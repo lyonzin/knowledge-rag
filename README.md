@@ -147,19 +147,21 @@ cd knowledge-rag
 
 5. **Configure MCP for Claude Code**
 
-   Add to `~/.claude/mcp.json`:
+   Add to `~/.claude.json` under `mcpServers`:
    ```json
    {
      "mcpServers": {
        "knowledge-rag": {
          "type": "stdio",
-         "command": "C:\\path\\to\\knowledge-rag\\venv\\Scripts\\python.exe",
-         "args": ["-m", "mcp_server.server"],
-         "cwd": "C:\\path\\to\\knowledge-rag"
+         "command": "cmd",
+         "args": ["/c", "cd /d C:\\path\\to\\knowledge-rag && .\\venv\\Scripts\\python.exe -m mcp_server.server"],
+         "env": {}
        }
      }
    }
    ```
+
+   > **Note**: We use `cmd /c` with `cd /d` to ensure the working directory is set correctly before starting the Python server. This is required because Claude Code may not respect the `cwd` property in MCP configurations.
 
 6. **Restart Claude Code**
 
@@ -424,9 +426,25 @@ ls documents/
 
 ### MCP server not loading
 
-1. Check `~/.claude/mcp.json` exists and is valid JSON
+1. Check `~/.claude.json` exists and has `mcpServers` section with valid JSON
 2. Verify paths use double backslashes (`\\`) on Windows
 3. Restart Claude Code completely
+4. Run `claude mcp list` to check connection status
+
+### "ModuleNotFoundError: No module named 'mcp_server'"
+
+This error occurs when Claude Code doesn't set the working directory correctly. **Solution**: Use the `cmd /c "cd /d ... && python"` wrapper in your config:
+
+```json
+{
+  "knowledge-rag": {
+    "type": "stdio",
+    "command": "cmd",
+    "args": ["/c", "cd /d C:\\path\\to\\knowledge-rag && .\\venv\\Scripts\\python.exe -m mcp_server.server"],
+    "env": {}
+  }
+}
+```
 
 ---
 
