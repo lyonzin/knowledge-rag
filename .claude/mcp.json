@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "knowledge-rag": {
+      "type": "stdio",
+      "command": "C:\\Users\\Ailton\\OneDrive\\Documentos\\AI-Agents\\knowledge-rag\\venv\\Scripts\\python.exe",
+      "args": ["-m", "mcp_server.server"],
+      "cwd": "C:\\Users\\Ailton\\OneDrive\\Documentos\\AI-Agents\\knowledge-rag"
+    }
+  }
+}

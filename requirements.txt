@@ -1,0 +1,28 @@
+# Knowledge RAG System - Python Dependencies
+# ==========================================
+# Requires Python 3.11 or 3.12 (NOT 3.13+ due to onnxruntime)
+
+# Vector Database (uses new PersistentClient API)
+chromadb>=1.4.0
+
+# PDF Parser (fast, maintains structure)
+pymupdf>=1.23.0
+
+# Local Embeddings (Ollama Python client)
+ollama>=0.6.0
+
+# MCP Server Framework (FastMCP)
+mcp>=1.0.0
+
+# ==========================================
+# IMPORTANT NOTES:
+# ==========================================
+# 1. Ollama server must be running locally before use
+#    Start with: ollama serve
+#
+# 2. Install embedding model before first use:
+#    ollama pull nomic-embed-text
+#
+# 3. Python 3.13+ is NOT supported because chromadb
+#    depends on onnxruntime which has no 3.13 wheels
+# ==========================================
