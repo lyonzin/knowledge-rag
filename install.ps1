@@ -29,7 +29,7 @@ param(
     [switch]$SkipPython,
     [switch]$SkipOllama,
     [switch]$SkipIndex,
-    [string]$InstallPath = "$env:USERPROFILE\OneDrive\Documentos\AI-Agents\knowledge-rag",
+    [string]$InstallPath = $PSScriptRoot,  # Uses directory where script is located
     [string]$DocsPath = "",
     [switch]$Force
 )

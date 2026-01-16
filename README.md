@@ -104,7 +104,7 @@ Knowledge RAG is a **100% local** semantic search system that integrates with Cl
 
 ```powershell
 # Clone the repository
-git clone https://github.com/yourusername/knowledge-rag.git
+git clone https://github.com/lyonzin/knowledge-rag.git
 cd knowledge-rag
 
 # Run the installer
@@ -134,7 +134,7 @@ cd knowledge-rag
 
 4. **Clone and setup the project**
    ```powershell
-   git clone https://github.com/yourusername/knowledge-rag.git
+   git clone https://github.com/lyonzin/knowledge-rag.git
    cd knowledge-rag
 
    # Create virtual environment
