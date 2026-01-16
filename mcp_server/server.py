@@ -172,19 +172,38 @@ class KnowledgeOrchestrator:
         )
 
     def reindex_all(self) -> Dict[str, Any]:
-        """Force reindex all documents (clears existing index)"""
-        # Clear collection
-        self.chroma_client.delete_collection(config.collection_name)
-        self.collection = self.chroma_client.create_collection(
+        """Force reindex all documents (clears existing index and orphan data)"""
+        import shutil
+
+        # Step 1: Delete collection from ChromaDB
+        try:
+            self.chroma_client.delete_collection(config.collection_name)
+        except Exception:
+            pass  # Collection may not exist
+
+        # Step 2: Clean orphan UUID folders (ChromaDB doesn't auto-clean)
+        chroma_dir = config.chroma_dir
+        if chroma_dir.exists():
+            for item in chroma_dir.iterdir():
+                if item.is_dir() and len(item.name) == 36 and '-' in item.name:
+                    # UUID folder pattern: 8-4-4-4-12 hex chars
+                    try:
+                        shutil.rmtree(item)
+                        print(f"[CLEANUP] Removed orphan folder: {item.name}")
+                    except Exception as e:
+                        print(f"[WARN] Failed to remove {item.name}: {e}")
+
+        # Step 3: Recreate collection
+        self.collection = self.chroma_client.get_or_create_collection(
             name=config.collection_name,
             embedding_function=self.embed_fn,
             metadata={"description": "Knowledge base for RAG"}
         )
 
-        # Clear metadata
+        # Step 4: Clear metadata cache
         self._indexed_docs = {}
 
-        # Reindex
+        # Step 5: Reindex all documents
         return self.index_all(force=True)
 
     # =========================================================================
