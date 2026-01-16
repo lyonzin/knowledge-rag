@@ -50,30 +50,30 @@ Knowledge RAG is a **100% local** semantic search system that integrates with Cl
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                      KNOWLEDGE ORCHESTRATOR                          │
-│                       (MCP Server via FastMCP)                       │
+│                      KNOWLEDGE ORCHESTRATOR                         │
+│                       (MCP Server via FastMCP)                      │
 ├─────────────────────────────────────────────────────────────────────┤
-│                                                                      │
+│                                                                     │
 │  ┌──────────────┐   ┌──────────────┐   ┌─────────────────────────┐  │
 │  │   KEYWORD    │ → │   SEMANTIC   │ → │   CONTEXT ASSEMBLER     │  │
 │  │   ROUTER     │   │   SEARCH     │   │   (Ranking + Merge)     │  │
 │  └──────────────┘   └──────────────┘   └─────────────────────────┘  │
-│         │                  │                        │                │
-│         ▼                  ▼                        ▼                │
+│         │                  │                        │               │
+│         ▼                  ▼                        ▼               │
 │  ┌─────────────────────────────────────────────────────────────┐    │
-│  │                VECTOR DATABASE (ChromaDB)                    │    │
-│  │   Collections: security | ctf | logscale | development       │    │
+│  │                VECTOR DATABASE (ChromaDB)                   │    │
+│  │   Collections: security | ctf | logscale | development      │    │
 │  └─────────────────────────────────────────────────────────────┘    │
-│                              │                                       │
-│                              ▼                                       │
+│                              │                                      │
+│                              ▼                                      │
 │  ┌─────────────────────────────────────────────────────────────┐    │
-│  │                  OLLAMA EMBEDDINGS                           │    │
-│  │                  (nomic-embed-text)                          │    │
+│  │                  OLLAMA EMBEDDINGS                          │    │
+│  │                  (nomic-embed-text)                         │    │
 │  └─────────────────────────────────────────────────────────────┘    │
-│                                                                      │
+│                                                                     │
 │  ┌─────────────────────────────────────────────────────────────┐    │
-│  │                 DOCUMENT INGESTION                           │    │
-│  │   Parsers: Markdown | PDF (PyMuPDF) | TXT | Python | JSON    │    │
+│  │                 DOCUMENT INGESTION                          │    │
+│  │   Parsers: Markdown | PDF (PyMuPDF) | TXT | Python | JSON   │    │
 │  └─────────────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────────────┘
 ```
