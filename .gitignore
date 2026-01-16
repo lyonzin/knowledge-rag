@@ -62,6 +62,9 @@ Desktop.ini
 .env
 .env.local
 
+# Claude Code local config (user-specific paths)
+.claude/mcp.json
+
 # Test outputs
 .pytest_cache/
 .coverage

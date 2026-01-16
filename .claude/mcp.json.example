@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "knowledge-rag": {
+      "type": "stdio",
+      "command": "cmd",
+      "args": ["/c", "cd /d C:\\path\\to\\knowledge-rag && .\\venv\\Scripts\\python.exe -m mcp_server.server"],
+      "env": {}
+    }
+  }
+}
