@@ -178,8 +178,8 @@ documents/
 ├── security/          # Pentest, exploit, vulnerability docs
 │   ├── RTFM.pdf
 │   └── web-hacking-101.pdf
-├── logscale/          # LogScale/CQL documentation
-│   └── CQL_REFERENCE.md
+├── logscale/          # LogScale/LQL documentation
+│   └── LQL_REFERENCE.md
 ├── development/       # Code, APIs, frameworks
 │   └── api-docs.md
 └── general/           # Everything else
@@ -340,7 +340,7 @@ The system uses keyword routing to improve search accuracy. Configure routes in 
 keyword_routes = {
     "security": ["exploit", "vulnerability", "pentest", "attack", ...],
     "ctf": ["ctf", "flag", "hackthebox", "tryhackme", ...],
-    "logscale": ["logscale", "humio", "cql", "formatTime", ...],
+    "logscale": ["logscale", "humio", "lql", "formatTime", ...],
     "development": ["python", "javascript", "api", "docker", ...]
 }
 ```

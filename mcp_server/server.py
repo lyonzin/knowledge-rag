@@ -6,19 +6,9 @@ Uses ChromaDB for vector storage and Ollama for embeddings.
 
 import json
 import asyncio
-import sys
 from pathlib import Path
 from typing import List, Dict, Optional, Any
 from datetime import datetime
-
-# Add parent directory to path for direct execution
-if __name__ == "__main__" or __package__ is None:
-    sys.path.insert(0, str(Path(__file__).parent.parent))
-    from mcp_server.config import config
-    from mcp_server.ingestion import DocumentParser, Document, parse_documents
-else:
-    from .config import config
-    from .ingestion import DocumentParser, Document, parse_documents
 
 # ChromaDB
 import chromadb
@@ -28,6 +18,10 @@ import ollama
 
 # FastMCP
 from mcp.server.fastmcp import FastMCP
+
+# Local imports
+from .config import config
+from .ingestion import DocumentParser, Document, parse_documents
 
 
 class OllamaEmbeddings:
@@ -519,8 +513,16 @@ def get_index_stats() -> str:
 
 def main():
     """Run the MCP server"""
-    # Run MCP server immediately - orchestrator init is lazy
-    # ChromaDB will be initialized on first tool call
+    import sys
+
+    # Auto-index on startup if empty
+    orchestrator = get_orchestrator()
+    if orchestrator.collection.count() == 0:
+        print("[INFO] No documents indexed. Running initial indexing...")
+        stats = orchestrator.index_all()
+        print(f"[INFO] Indexed {stats['indexed']} documents with {stats['chunks_added']} chunks")
+
+    # Run MCP server
     mcp.run()
 
 
