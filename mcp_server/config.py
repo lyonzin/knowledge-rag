@@ -65,6 +65,27 @@ class Config:
             "python", "typescript", "javascript", "api", "fastapi",
             "django", "react", "nodejs"
         ],
+        # Anti-Bot / WAF Bypass (2024-2025)
+        "security": [
+            # Anti-Bot & JS Challenge
+            "anti-bot", "antibot", "js challenge", "javascript challenge",
+            "cdp detection", "runtime.enable", "puppeteer", "playwright",
+            "selenium", "nodriver", "stealth", "undetected",
+            # TLS Fingerprinting
+            "ja3", "ja4", "tls fingerprint", "fingerprinting", "curl_cffi",
+            "got-scraping", "impersonate", "http/2 settings",
+            # Browser Fingerprinting
+            "browser fingerprint", "canvas fingerprint", "webgl fingerprint",
+            "navigator.webdriver", "audio context", "hardware concurrency",
+            # WAF Bypass
+            "waf bypass", "aws waf", "cloudflare bypass", "akamai bypass",
+            "datadome", "perimeterx", "imperva bypass",
+            "8kb bypass", "body size limit", "json sqli",
+            # Behavioral
+            "behavioral", "mouse movement", "ghost-cursor", "humanized",
+            # Tools
+            "flaresolverr", "turnstile", "rebrowser", "botbrowser",
+        ],
     })
 
     # Search settings

@@ -6,15 +6,20 @@ Uses ChromaDB for vector storage and Ollama for embeddings.
 
 import json
 import asyncio
+import re
 from pathlib import Path
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Tuple
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ChromaDB
 import chromadb
 
 # Ollama for embeddings
 import ollama
+
+# BM25 for keyword search (hybrid search)
+from rank_bm25 import BM25Okapi
 
 # FastMCP
 from mcp.server.fastmcp import FastMCP
@@ -25,22 +30,65 @@ from .ingestion import DocumentParser, Document, parse_documents
 
 
 class OllamaEmbeddings:
-    """Ollama-based embedding function for ChromaDB (v1.4.0+ compatible)"""
+    """
+    Ollama-based embedding function for ChromaDB (v1.4.0+ compatible).
 
-    def __init__(self, model: str = None, base_url: str = None):
+    Uses ThreadPoolExecutor for parallel embedding generation to improve
+    indexing performance. Default: 4 parallel workers.
+    """
+
+    def __init__(self, model: str = None, base_url: str = None, max_workers: int = 4):
         self.model = model or config.ollama_model
         self.base_url = base_url or config.ollama_base_url
+        self.max_workers = max_workers
         self._client = ollama.Client(host=self.base_url)
 
-    def __call__(self, input: List[str]) -> List[List[float]]:
-        """Generate embeddings for a list of texts"""
-        embeddings = []
-        for text in input:
+    def _embed_single(self, text: str) -> List[float]:
+        """Embed a single text (internal method for parallel execution)"""
+        try:
             response = self._client.embeddings(
                 model=self.model,
                 prompt=text
             )
-            embeddings.append(response["embedding"])
+            return response["embedding"]
+        except Exception as e:
+            print(f"[WARN] Embedding failed for text chunk: {e}")
+            # Return zero vector on failure (will have low similarity)
+            return [0.0] * 768  # nomic-embed-text dimension
+
+    def __call__(self, input: List[str]) -> List[List[float]]:
+        """
+        Generate embeddings for a list of texts using parallel execution.
+
+        For small batches (< 4 texts): sequential processing
+        For larger batches: parallel processing with ThreadPoolExecutor
+        """
+        if not input:
+            return []
+
+        # For small batches, sequential is fine (avoids thread overhead)
+        if len(input) < 4:
+            return [self._embed_single(text) for text in input]
+
+        # Parallel processing for larger batches
+        embeddings = [None] * len(input)
+
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # Submit all tasks with their indices
+            future_to_idx = {
+                executor.submit(self._embed_single, text): idx
+                for idx, text in enumerate(input)
+            }
+
+            # Collect results maintaining order
+            for future in as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                try:
+                    embeddings[idx] = future.result()
+                except Exception as e:
+                    print(f"[WARN] Embedding task {idx} failed: {e}")
+                    embeddings[idx] = [0.0] * 768
+
         return embeddings
 
     def name(self) -> str:
@@ -51,7 +99,7 @@ class OllamaEmbeddings:
         """Embed a list of documents (alias for __call__)"""
         return self(documents)
 
-    def embed_query(self, input = None, **kwargs) -> List[List[float]]:
+    def embed_query(self, input=None, **kwargs) -> List[List[float]]:
         """Embed query text(s) - returns list of embeddings"""
         # Handle both string and list inputs
         if isinstance(input, list):
@@ -61,11 +109,78 @@ class OllamaEmbeddings:
         else:
             texts = [kwargs.get('query', '')]
 
-        embeddings = []
-        for text in texts:
-            response = self._client.embeddings(model=self.model, prompt=text)
-            embeddings.append(response["embedding"])
-        return embeddings
+        # Queries are typically single texts, use sequential
+        return [self._embed_single(text) for text in texts]
+
+
+class BM25Index:
+    """
+    BM25 keyword index for hybrid search.
+
+    Maintains a BM25 index of all document chunks for fast keyword-based retrieval.
+    Used in combination with semantic search for hybrid search.
+    """
+
+    def __init__(self):
+        self.corpus: List[str] = []  # Original texts
+        self.corpus_ids: List[str] = []  # Chunk IDs (doc_id_chunkIndex)
+        self.bm25: Optional[BM25Okapi] = None
+        self._tokenized_corpus: List[List[str]] = []
+
+    def _tokenize(self, text: str) -> List[str]:
+        """Simple tokenization: lowercase, split on non-alphanumeric"""
+        # Keep technical terms intact (CVE-2021-44228, etc.)
+        text_lower = text.lower()
+        # Split on whitespace and punctuation, keeping alphanumeric and hyphens
+        tokens = re.findall(r'[a-z0-9][-a-z0-9]*[a-z0-9]|[a-z0-9]', text_lower)
+        return tokens
+
+    def add_documents(self, chunk_ids: List[str], texts: List[str]) -> None:
+        """Add documents to the BM25 index"""
+        for chunk_id, text in zip(chunk_ids, texts):
+            self.corpus.append(text)
+            self.corpus_ids.append(chunk_id)
+            self._tokenized_corpus.append(self._tokenize(text))
+
+    def build_index(self) -> None:
+        """Build/rebuild the BM25 index from the corpus"""
+        if self._tokenized_corpus:
+            self.bm25 = BM25Okapi(self._tokenized_corpus)
+
+    def search(self, query: str, top_k: int = 20) -> List[Tuple[str, float]]:
+        """
+        Search the BM25 index.
+
+        Returns list of (chunk_id, score) tuples sorted by score descending.
+        """
+        if not self.bm25 or not self.corpus:
+            return []
+
+        tokenized_query = self._tokenize(query)
+        if not tokenized_query:
+            return []
+
+        scores = self.bm25.get_scores(tokenized_query)
+
+        # Get top_k results with their scores
+        results = []
+        for idx, score in enumerate(scores):
+            if score > 0:  # Only include non-zero scores
+                results.append((self.corpus_ids[idx], score))
+
+        # Sort by score descending and take top_k
+        results.sort(key=lambda x: x[1], reverse=True)
+        return results[:top_k]
+
+    def clear(self) -> None:
+        """Clear the index"""
+        self.corpus = []
+        self.corpus_ids = []
+        self._tokenized_corpus = []
+        self.bm25 = None
+
+    def __len__(self) -> int:
+        return len(self.corpus)
 
 
 class KnowledgeOrchestrator:
@@ -87,9 +202,39 @@ class KnowledgeOrchestrator:
             metadata={"description": "Knowledge base for RAG"}
         )
 
+        # BM25 index for hybrid search
+        self.bm25_index = BM25Index()
+        self._bm25_initialized = False
+
         # Index metadata cache
         self._metadata_file = config.data_dir / "index_metadata.json"
         self._indexed_docs: Dict[str, Dict] = self._load_metadata()
+
+    def _ensure_bm25_index(self) -> None:
+        """Lazy initialization of BM25 index from existing ChromaDB data"""
+        if self._bm25_initialized:
+            return
+
+        # Load all documents from ChromaDB to build BM25 index
+        try:
+            count = self.collection.count()
+            if count > 0:
+                # Get all documents from ChromaDB
+                all_data = self.collection.get(
+                    include=["documents"],
+                    limit=count
+                )
+                if all_data["ids"] and all_data["documents"]:
+                    self.bm25_index.add_documents(
+                        all_data["ids"],
+                        all_data["documents"]
+                    )
+                    self.bm25_index.build_index()
+                    print(f"[INFO] BM25 index built with {len(self.bm25_index)} documents")
+        except Exception as e:
+            print(f"[WARN] Failed to build BM25 index: {e}")
+
+        self._bm25_initialized = True
 
     # =========================================================================
     # Indexing
@@ -145,7 +290,7 @@ class KnowledgeOrchestrator:
         return stats
 
     def _index_document(self, doc: Document) -> None:
-        """Index a single document's chunks into ChromaDB"""
+        """Index a single document's chunks into ChromaDB and BM25"""
         if not doc.chunks:
             return
 
@@ -165,11 +310,15 @@ class KnowledgeOrchestrator:
             for chunk in doc.chunks
         ]
 
+        # Add to ChromaDB (semantic search)
         self.collection.add(
             ids=ids,
             documents=documents,
             metadatas=metadatas
         )
+
+        # Add to BM25 index (keyword search)
+        self.bm25_index.add_documents(ids, documents)
 
     def reindex_all(self) -> Dict[str, Any]:
         """Force reindex all documents (clears existing index and orphan data)"""
@@ -200,11 +349,20 @@ class KnowledgeOrchestrator:
             metadata={"description": "Knowledge base for RAG"}
         )
 
-        # Step 4: Clear metadata cache
+        # Step 4: Clear metadata cache and BM25 index
         self._indexed_docs = {}
+        self.bm25_index.clear()
+        self._bm25_initialized = False
 
         # Step 5: Reindex all documents
-        return self.index_all(force=True)
+        stats = self.index_all(force=True)
+
+        # Step 6: Build BM25 index
+        self.bm25_index.build_index()
+        self._bm25_initialized = True
+        print(f"[INFO] BM25 index rebuilt with {len(self.bm25_index)} documents")
+
+        return stats
 
     # =========================================================================
     # Search
@@ -214,18 +372,29 @@ class KnowledgeOrchestrator:
         self,
         query_text: str,
         max_results: int = None,
-        category_filter: Optional[str] = None
+        category_filter: Optional[str] = None,
+        hybrid_alpha: float = 0.5
     ) -> List[Dict[str, Any]]:
         """
-        Main search method with keyword routing + semantic search
+        Hybrid search combining semantic search + BM25 keyword search.
 
-        1. Try keyword routing first (deterministic, fast)
-        2. Fall back to semantic search
-        3. Merge and rank results
+        Uses Reciprocal Rank Fusion (RRF) to combine results from both methods.
+
+        Args:
+            query_text: Search query
+            max_results: Maximum results to return
+            category_filter: Optional category filter
+            hybrid_alpha: Weight for semantic vs keyword (0.0 = keyword only, 1.0 = semantic only)
+
+        Returns:
+            List of results sorted by combined RRF score
         """
         max_results = max_results or config.default_results
 
-        # Step 1: Keyword routing
+        # Ensure BM25 index is ready
+        self._ensure_bm25_index()
+
+        # Step 1: Keyword routing (for category detection)
         routed_category = self._route_by_keywords(query_text)
 
         # Step 2: Build filter
@@ -235,53 +404,156 @@ class KnowledgeOrchestrator:
         elif routed_category:
             where_filter = {"category": routed_category}
 
-        # Step 3: Semantic search
+        # Step 3: Semantic search (ChromaDB)
+        semantic_results = {}
         try:
+            # Get more results than needed for better fusion
+            n_candidates = min(max_results * 3, config.max_results)
             results = self.collection.query(
                 query_texts=[query_text],
-                n_results=min(max_results, config.max_results),
+                n_results=n_candidates,
                 where=where_filter,
                 include=["documents", "metadatas", "distances"]
             )
+
+            if results["ids"] and results["ids"][0]:
+                for i, chunk_id in enumerate(results["ids"][0]):
+                    semantic_results[chunk_id] = {
+                        "rank": i + 1,
+                        "distance": results["distances"][0][i] if results["distances"] else 0,
+                        "document": results["documents"][0][i] if results["documents"] else "",
+                        "metadata": results["metadatas"][0][i] if results["metadatas"] else {}
+                    }
         except Exception as e:
-            print(f"[ERROR] Search failed: {e}")
-            return []
+            print(f"[WARN] Semantic search failed: {e}")
 
-        # Step 4: Format results
+        # Step 4: BM25 keyword search
+        bm25_results = {}
+        try:
+            bm25_hits = self.bm25_index.search(query_text, top_k=max_results * 3)
+            for rank, (chunk_id, bm25_score) in enumerate(bm25_hits):
+                bm25_results[chunk_id] = {
+                    "rank": rank + 1,
+                    "bm25_score": bm25_score
+                }
+        except Exception as e:
+            print(f"[WARN] BM25 search failed: {e}")
+
+        # Step 5: Reciprocal Rank Fusion (RRF)
+        # RRF formula: score = sum(1 / (k + rank)) for each method
+        # k is a constant (typically 60) to prevent high scores for top ranks
+        RRF_K = 60
+        combined_scores: Dict[str, Dict] = {}
+
+        # All unique chunk IDs from both searches
+        all_chunk_ids = set(semantic_results.keys()) | set(bm25_results.keys())
+
+        for chunk_id in all_chunk_ids:
+            semantic_rank = semantic_results.get(chunk_id, {}).get("rank", 1000)
+            bm25_rank = bm25_results.get(chunk_id, {}).get("rank", 1000)
+
+            # RRF scores (weighted by hybrid_alpha)
+            semantic_rrf = hybrid_alpha * (1 / (RRF_K + semantic_rank))
+            bm25_rrf = (1 - hybrid_alpha) * (1 / (RRF_K + bm25_rank))
+            combined_rrf = semantic_rrf + bm25_rrf
+
+            # Get document data (prefer semantic results as they have full metadata)
+            if chunk_id in semantic_results:
+                data = semantic_results[chunk_id]
+            else:
+                # Need to fetch from ChromaDB for BM25-only results
+                try:
+                    fetched = self.collection.get(ids=[chunk_id], include=["documents", "metadatas"])
+                    data = {
+                        "document": fetched["documents"][0] if fetched["documents"] else "",
+                        "metadata": fetched["metadatas"][0] if fetched["metadatas"] else {},
+                        "distance": 0
+                    }
+                except Exception:
+                    continue
+
+            combined_scores[chunk_id] = {
+                "rrf_score": combined_rrf,
+                "semantic_rank": semantic_rank if chunk_id in semantic_results else None,
+                "bm25_rank": bm25_rank if chunk_id in bm25_results else None,
+                "document": data.get("document", ""),
+                "metadata": data.get("metadata", {}),
+                "distance": data.get("distance", 0)
+            }
+
+        # Step 6: Sort by RRF score and take top results
+        sorted_results = sorted(
+            combined_scores.items(),
+            key=lambda x: x[1]["rrf_score"],
+            reverse=True
+        )[:max_results]
+
+        # Step 7: Format results
         formatted = []
-        if results["documents"] and results["documents"][0]:
-            for i, doc in enumerate(results["documents"][0]):
-                metadata = results["metadatas"][0][i] if results["metadatas"] else {}
-                distance = results["distances"][0][i] if results["distances"] else 0
+        for chunk_id, data in sorted_results:
+            metadata = data["metadata"]
 
-                # Normalize score: smaller distance = higher relevance
-                # Using 1/(1+distance) to normalize to 0-1 range
-                score = 1 / (1 + abs(distance)) if distance else 1.0
+            # Determine search method used
+            if data["semantic_rank"] and data["bm25_rank"]:
+                search_method = "hybrid"
+            elif data["semantic_rank"]:
+                search_method = "semantic"
+            else:
+                search_method = "keyword"
 
-                formatted.append({
-                    "content": doc,
-                    "source": metadata.get("source", ""),
-                    "filename": metadata.get("filename", ""),
-                    "category": metadata.get("category", ""),
-                    "chunk_index": metadata.get("chunk_index", 0),
-                    "score": round(score, 4),
-                    "distance": round(distance, 2),
-                    "keywords": metadata.get("keywords", "").split(","),
-                    "routed_by": routed_category if routed_category else "semantic"
-                })
+            formatted.append({
+                "content": data["document"],
+                "source": metadata.get("source", ""),
+                "filename": metadata.get("filename", ""),
+                "category": metadata.get("category", ""),
+                "chunk_index": metadata.get("chunk_index", 0),
+                "score": round(data["rrf_score"], 6),
+                "semantic_rank": data["semantic_rank"],
+                "bm25_rank": data["bm25_rank"],
+                "search_method": search_method,
+                "keywords": metadata.get("keywords", "").split(","),
+                "routed_by": routed_category if routed_category else "none"
+            })
 
         return formatted
 
     def _route_by_keywords(self, query_text: str) -> Optional[str]:
-        """Deterministic keyword routing - returns category if match found"""
+        """
+        Weighted keyword routing with word boundaries.
+
+        Uses regex word boundaries to avoid false positives (e.g., "RAPID" matching "api").
+        Scores each category by number of keyword matches and returns the highest scoring one.
+        """
         query_lower = query_text.lower()
 
-        for category, keywords in config.keyword_routes.items():
-            for keyword in keywords:
-                if keyword.lower() in query_lower:
-                    return category
+        # Score each category by counting keyword matches with word boundaries
+        category_scores: Dict[str, Tuple[int, List[str]]] = {}
 
-        return None
+        for category, keywords in config.keyword_routes.items():
+            matches = []
+            for keyword in keywords:
+                keyword_lower = keyword.lower()
+                # Use word boundaries for single words, exact match for phrases
+                if ' ' in keyword_lower:
+                    # Phrase: use exact substring match (phrases are less ambiguous)
+                    if keyword_lower in query_lower:
+                        matches.append(keyword)
+                else:
+                    # Single word: use word boundary to avoid false positives
+                    # e.g., "api" should not match "RAPID"
+                    pattern = r'\b' + re.escape(keyword_lower) + r'\b'
+                    if re.search(pattern, query_lower):
+                        matches.append(keyword)
+
+            if matches:
+                category_scores[category] = (len(matches), matches)
+
+        if not category_scores:
+            return None
+
+        # Return category with highest score (most keyword matches)
+        best_category = max(category_scores.keys(), key=lambda c: category_scores[c][0])
+        return best_category
 
     # =========================================================================
     # Document Retrieval
@@ -388,20 +660,52 @@ def get_orchestrator() -> KnowledgeOrchestrator:
 
 
 @mcp.tool()
-def search_knowledge(query: str, max_results: int = 5, category: str = None) -> str:
+def search_knowledge(
+    query: str,
+    max_results: int = 5,
+    category: str = None,
+    hybrid_alpha: float = 0.5
+) -> str:
     """
-    Search the knowledge base using semantic search with keyword routing.
+    Hybrid search combining semantic search + BM25 keyword search.
 
     Args:
         query: Search query text
         max_results: Maximum number of results (default: 5, max: 20)
-        category: Optional category filter (security, ctf, logscale, development, general)
+        category: Optional category filter (security, ctf, logscale, development, general, redteam, blueteam)
+        hybrid_alpha: Balance between semantic and keyword search (0.0 = keyword only, 1.0 = semantic only, default: 0.5)
 
     Returns:
-        JSON string with search results including content, source, and relevance score
+        JSON string with search results including content, source, relevance score, and search method used
     """
+    # Input validation
+    if not query or not query.strip():
+        return json.dumps({
+            "status": "error",
+            "message": "Query cannot be empty"
+        })
+
+    # Clamp max_results to valid range
+    max_results = max(1, min(max_results or 5, config.max_results))
+
+    # Clamp hybrid_alpha to valid range
+    hybrid_alpha = max(0.0, min(hybrid_alpha if hybrid_alpha is not None else 0.5, 1.0))
+
+    # Validate category if provided
+    valid_categories = list(config.keyword_routes.keys()) + ["general"]
+    if category and category not in valid_categories:
+        return json.dumps({
+            "status": "error",
+            "message": f"Invalid category '{category}'. Valid categories: {', '.join(valid_categories)}"
+        })
+
     orchestrator = get_orchestrator()
-    results = orchestrator.query(query, max_results=max_results, category_filter=category)
+    results = orchestrator.query(
+        query.strip(),
+        max_results=max_results,
+        category_filter=category,
+        hybrid_alpha=hybrid_alpha
+    )
 
     if not results:
         return json.dumps({
@@ -413,6 +717,7 @@ def search_knowledge(query: str, max_results: int = 5, category: str = None) -> 
     return json.dumps({
         "status": "success",
         "query": query,
+        "hybrid_alpha": hybrid_alpha,
         "result_count": len(results),
         "results": results
     }, indent=2, ensure_ascii=False)
