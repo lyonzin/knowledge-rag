@@ -51,7 +51,16 @@ class Config:
         ],
         "redteam": [
             "pentest", "exploit", "payload", "reverse shell", "privilege escalation",
-            "lateral movement", "c2", "beacon", "cobalt strike", "metasploit"
+            "lateral movement", "c2", "beacon", "cobalt strike", "metasploit",
+            "gtfobins", "lolbas", "lolbin", "suid", "sudo", "byovd",
+            "lol driver", "lolad", "lolapps", "hacktricks", "privesc",
+            "kerberoast", "dcsync", "golden ticket", "pass-the-hash",
+            "bloodhound", "mimikatz", "rubeus", "certipy", "adcs",
+            "sqli", "xss", "ssti", "ssrf", "lfi", "rfi", "xxe",
+            "deserialization", "ysoserial", "upload bypass",
+            "reverse shell", "web shell", "hash cracking", "hashcat",
+            "waf bypass", "amsi bypass", "uac bypass", "potato",
+            "searchsploit", "exploit-db", "cve"
         ],
         "blueteam": [
             "detection", "sigma", "yara", "ioc", "threat hunting",

@@ -404,40 +404,41 @@ class KnowledgeOrchestrator:
         elif routed_category:
             where_filter = {"category": routed_category}
 
-        # Step 3: Semantic search (ChromaDB)
+        # Step 3: Semantic search (ChromaDB) - SKIP if hybrid_alpha=0 (keyword only)
         semantic_results = {}
-        try:
-            # Get more results than needed for better fusion
-            n_candidates = min(max_results * 3, config.max_results)
-            results = self.collection.query(
-                query_texts=[query_text],
-                n_results=n_candidates,
-                where=where_filter,
-                include=["documents", "metadatas", "distances"]
-            )
+        if hybrid_alpha > 0:
+            try:
+                n_candidates = min(max_results * 3, config.max_results)
+                results = self.collection.query(
+                    query_texts=[query_text],
+                    n_results=n_candidates,
+                    where=where_filter,
+                    include=["documents", "metadatas", "distances"]
+                )
 
-            if results["ids"] and results["ids"][0]:
-                for i, chunk_id in enumerate(results["ids"][0]):
-                    semantic_results[chunk_id] = {
-                        "rank": i + 1,
-                        "distance": results["distances"][0][i] if results["distances"] else 0,
-                        "document": results["documents"][0][i] if results["documents"] else "",
-                        "metadata": results["metadatas"][0][i] if results["metadatas"] else {}
-                    }
-        except Exception as e:
-            print(f"[WARN] Semantic search failed: {e}")
+                if results["ids"] and results["ids"][0]:
+                    for i, chunk_id in enumerate(results["ids"][0]):
+                        semantic_results[chunk_id] = {
+                            "rank": i + 1,
+                            "distance": results["distances"][0][i] if results["distances"] else 0,
+                            "document": results["documents"][0][i] if results["documents"] else "",
+                            "metadata": results["metadatas"][0][i] if results["metadatas"] else {}
+                        }
+            except Exception as e:
+                print(f"[WARN] Semantic search failed: {e}")
 
-        # Step 4: BM25 keyword search
+        # Step 4: BM25 keyword search - SKIP if hybrid_alpha=1.0 (semantic only)
         bm25_results = {}
-        try:
-            bm25_hits = self.bm25_index.search(query_text, top_k=max_results * 3)
-            for rank, (chunk_id, bm25_score) in enumerate(bm25_hits):
-                bm25_results[chunk_id] = {
-                    "rank": rank + 1,
-                    "bm25_score": bm25_score
-                }
-        except Exception as e:
-            print(f"[WARN] BM25 search failed: {e}")
+        if hybrid_alpha < 1.0:
+            try:
+                bm25_hits = self.bm25_index.search(query_text, top_k=max_results * 3)
+                for rank, (chunk_id, bm25_score) in enumerate(bm25_hits):
+                    bm25_results[chunk_id] = {
+                        "rank": rank + 1,
+                        "bm25_score": bm25_score
+                    }
+            except Exception as e:
+                print(f"[WARN] BM25 search failed: {e}")
 
         # Step 5: Reciprocal Rank Fusion (RRF)
         # RRF formula: score = sum(1 / (k + rank)) for each method
@@ -664,7 +665,7 @@ def search_knowledge(
     query: str,
     max_results: int = 5,
     category: str = None,
-    hybrid_alpha: float = 0.5
+    hybrid_alpha: float = 0.3
 ) -> str:
     """
     Hybrid search combining semantic search + BM25 keyword search.
@@ -673,7 +674,7 @@ def search_knowledge(
         query: Search query text
         max_results: Maximum number of results (default: 5, max: 20)
         category: Optional category filter (security, ctf, logscale, development, general, redteam, blueteam)
-        hybrid_alpha: Balance between semantic and keyword search (0.0 = keyword only, 1.0 = semantic only, default: 0.5)
+        hybrid_alpha: Balance between semantic and keyword search (0.0 = keyword only, 1.0 = semantic only, default: 0.3)
 
     Returns:
         JSON string with search results including content, source, relevance score, and search method used

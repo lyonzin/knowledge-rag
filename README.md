@@ -2,7 +2,7 @@
 
 <div align="center">
 
-![Version](https://img.shields.io/badge/version-2.1.0-blue.svg)
+![Version](https://img.shields.io/badge/version-2.2.0-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12-green.svg)
 ![License](https://img.shields.io/badge/license-MIT-yellow.svg)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey.svg)
@@ -17,22 +17,21 @@
 
 ---
 
-## What's New in v2.0.0
+## What's New in v2.2.0
 
-### Hybrid Search
-Combines **semantic search** (embeddings) with **BM25 keyword search** using Reciprocal Rank Fusion (RRF) for best-of-both-worlds retrieval:
+### Search Performance Fix
+- **`hybrid_alpha=0` now skips Ollama entirely** - pure BM25 keyword search is instant (no embedding generation)
+- **`hybrid_alpha=1.0` skips BM25** - pure semantic search without keyword overhead
+- **Default changed from 0.5 to 0.3** - keyword-heavy by default for faster responses
 
-- **Semantic search**: Finds conceptually similar content
-- **BM25 keyword search**: Finds exact term matches (CVEs, tool names, etc.)
-- **RRF fusion**: Combines both rankings for optimal results
+### Expanded Keyword Routing
+- **40+ new keywords** for `redteam` category: GTFOBins, LOLBAS, BYOVD, SQLi, XSS, SSTI, hashcat, Kerberoast, BloodHound, ADCS, etc.
+- Better routing accuracy for offensive security queries
 
-### Improved Keyword Routing
-- **Word boundaries**: No more false positives ("RAPID" no longer matches "api")
-- **Weighted scoring**: Multiple keyword matches = higher confidence routing
-
-### Performance Improvements
-- **Parallel embeddings**: 4x faster indexing with ThreadPoolExecutor
-- **Lazy BM25 initialization**: No startup delay
+### Previous (v2.0.0)
+- Hybrid search (Semantic + BM25) with Reciprocal Rank Fusion
+- Word boundary keyword routing (no false positives)
+- Parallel embeddings (4x faster indexing)
 
 ---
 
@@ -202,19 +201,19 @@ flowchart TB
 ```mermaid
 flowchart LR
     subgraph ALPHA["hybrid_alpha values"]
-        A0["0.0<br/>Pure BM25"]
-        A3["0.3<br/>Keyword-heavy"]
+        A0["0.0<br/>Pure BM25<br/>⚡ INSTANT"]
+        A3["0.3 (default)<br/>Keyword-heavy<br/>⚡ Fast"]
         A5["0.5<br/>Balanced"]
         A7["0.7<br/>Semantic-heavy"]
-        A10["1.0<br/>Pure Semantic"]
+        A10["1.0<br/>Pure Semantic<br/>🐢 Slower"]
     end
 
     subgraph USE["Best For"]
-        U0["CVEs, tool names<br/>exact matches"]
+        U0["CVEs, tool names<br/>exact matches<br/>NO Ollama needed"]
         U3["Technical queries<br/>specific terms"]
-        U5["General queries<br/>(default)"]
+        U5["General queries"]
         U7["Conceptual queries<br/>related topics"]
-        U10["'How to...' questions<br/>understanding intent"]
+        U10["'How to...' questions<br/>Requires Ollama"]
     end
 
     A0 --- U0
@@ -347,19 +346,19 @@ Claude: [Uses search_knowledge internally, retrieves relevant chunks]
 You can control the balance between semantic and keyword search:
 
 ```javascript
-// Balanced hybrid (default) - best for general queries
+// Pure keyword - INSTANT, no Ollama needed (default for exact terms)
+search_knowledge("gtfobins suid", hybrid_alpha=0.0)
+
+// Keyword-heavy (default) - fast, slight semantic boost
+search_knowledge("lolbas certutil", hybrid_alpha=0.3)
+
+// Balanced hybrid - both engines equally weighted
 search_knowledge("SQL injection techniques", hybrid_alpha=0.5)
 
-// More semantic - better for conceptual queries
-search_knowledge("techniques for escalating privileges", hybrid_alpha=0.8)
+// Semantic-heavy - better for conceptual queries
+search_knowledge("how to escalate privileges", hybrid_alpha=0.7)
 
-// More keyword - better for exact terms
-search_knowledge("CVE-2021-44228", hybrid_alpha=0.2)
-
-// Pure keyword search
-search_knowledge("mimikatz sekurlsa", hybrid_alpha=0.0)
-
-// Pure semantic search
+// Pure semantic - Ollama only, no keyword matching
 search_knowledge("how to bypass authentication", hybrid_alpha=1.0)
 ```
 
@@ -379,7 +378,7 @@ Hybrid search combining semantic search + BM25 keyword search.
 | `query` | string | required | Search query text |
 | `max_results` | int | 5 | Maximum results (1-20) |
 | `category` | string | null | Filter by category |
-| `hybrid_alpha` | float | 0.5 | Balance: 0.0=keyword only, 1.0=semantic only |
+| `hybrid_alpha` | float | 0.3 | Balance: 0.0=keyword only, 1.0=semantic only |
 
 **Returns:** JSON with search results including content, source, relevance score, and search method.
 
@@ -550,13 +549,13 @@ The default model is `nomic-embed-text`. To change:
 
 The `hybrid_alpha` parameter controls the balance:
 
-| hybrid_alpha | Behavior | Best For |
-|--------------|----------|----------|
-| 0.0 | Pure BM25 keyword | Exact terms, CVEs, tool names |
-| 0.3 | Keyword-heavy | Technical queries with specific terms |
-| 0.5 | Balanced (default) | General queries |
-| 0.7 | Semantic-heavy | Conceptual queries |
-| 1.0 | Pure semantic | "How to..." questions |
+| hybrid_alpha | Behavior | Speed | Best For |
+|--------------|----------|-------|----------|
+| 0.0 | Pure BM25 keyword | **Instant** (no Ollama) | Exact terms, CVEs, tool names |
+| 0.3 | Keyword-heavy **(default)** | Fast | Technical queries with specific terms |
+| 0.5 | Balanced | Medium | General queries |
+| 0.7 | Semantic-heavy | Slower | Conceptual queries |
+| 1.0 | Pure semantic | Slower (Ollama required) | "How to..." questions |
 
 ---
 
@@ -688,6 +687,12 @@ This error occurs when Claude Code doesn't set the working directory correctly. 
 ---
 
 ## Changelog
+
+### v2.2.0 (2026-02-27)
+- **FIX**: `hybrid_alpha=0` now completely skips Ollama embedding - pure BM25 is instant
+- **FIX**: `hybrid_alpha=1.0` now skips BM25 search - no unnecessary keyword computation
+- **CHANGED**: Default `hybrid_alpha` from 0.5 to 0.3 (keyword-heavy for faster responses)
+- **NEW**: 40+ keyword routes for `redteam` category (GTFOBins, LOLBAS, BYOVD, SQLi, XSS, SSTI, hashcat, etc.)
 
 ### v2.1.0 (2026-02-05)
 - **NEW**: Interactive Mermaid flowcharts for architecture visualization
