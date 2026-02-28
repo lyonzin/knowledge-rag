@@ -65,7 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - mcp >= 1.0.0
 
 - **Compatibility**
-  - Python 3.11, 3.12 (3.13+ NOT supported due to onnxruntime)
+  - Python 3.12 (3.13+ NOT supported due to onnxruntime)
   - Windows 10/11
   - Claude Code CLI
 

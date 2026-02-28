@@ -1,0 +1,13 @@
+[project]
+name = "knowledge-rag"
+version = "2.1.0"
+description = "A knowledge RAG system with hybrid search using ChromaDB and Ollama"
+readme = "README.md"
+requires-python = ">=3.12, <3.13"
+dependencies = [
+    "chromadb>=1.4.0",
+    "mcp>=1.0.0",
+    "ollama>=0.6.0",
+    "pymupdf>=1.23.0",
+    "rank-bm25>=0.2.2",
+]

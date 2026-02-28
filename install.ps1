@@ -19,14 +19,14 @@
 
 .USAGE
     .\install.ps1                    # Full installation
-    .\install.ps1 -SkipPython        # Skip Python installation
+    .\install.ps1 -SkipUv            # Skip uv installation
     .\install.ps1 -SkipOllama        # Skip Ollama installation
     .\install.ps1 -DocsPath "C:\Docs" # Custom documents path
 #>
 
 [CmdletBinding()]
 param(
-    [switch]$SkipPython,
+    [switch]$SkipUv,
     [switch]$SkipOllama,
     [switch]$SkipIndex,
     [string]$InstallPath = $PSScriptRoot,  # Uses directory where script is located
@@ -42,12 +42,9 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
 $CONFIG = @{
-    PythonVersion = "3.12"
-    PythonMinVersion = "3.11"
-    PythonInstallerUrl = "https://www.python.org/ftp/python/3.12.0/python-3.12.0-amd64.exe"
+    UvInstallerUrl = "https://astral.sh/uv/install.ps1"
     OllamaInstallerUrl = "https://ollama.com/download/OllamaSetup.exe"
     EmbeddingModel = "nomic-embed-text"
-    RequiredPackages = @("chromadb", "pymupdf", "ollama", "mcp")
 }
 
 # ============================================================================
@@ -104,48 +101,12 @@ function Test-Administrator {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-function Get-PythonPath {
-    # Check common Python installation paths
-    $paths = @(
-        "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",
-        "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe",
-        "C:\Program Files\Python312\python.exe",
-        "C:\Program Files\Python311\python.exe",
-        "C:\Python312\python.exe",
-        "C:\Python311\python.exe"
-    )
-
-    foreach ($path in $paths) {
-        if (Test-Path $path) {
-            return $path
-        }
+function Get-UvPath {
+    try {
+        return (Get-Command uv -ErrorAction SilentlyContinue).Source
+    } catch {
+        return $null
     }
-
-    # Try to find via py launcher
-    try {
-        $pyPath = & py -3.12 -c "import sys; print(sys.executable)" 2>$null
-        if ($pyPath -and (Test-Path $pyPath)) {
-            return $pyPath
-        }
-
-        $pyPath = & py -3.11 -c "import sys; print(sys.executable)" 2>$null
-        if ($pyPath -and (Test-Path $pyPath)) {
-            return $pyPath
-        }
-    } catch {}
-
-    # Try PATH
-    try {
-        $pyPath = (Get-Command python -ErrorAction SilentlyContinue).Source
-        if ($pyPath) {
-            $version = & $pyPath --version 2>&1
-            if ($version -match "3\.(11|12)") {
-                return $pyPath
-            }
-        }
-    } catch {}
-
-    return $null
 }
 
 function Get-OllamaPath {
@@ -201,39 +162,32 @@ function Start-OllamaService {
 # INSTALLATION STEPS
 # ============================================================================
 
-function Install-Python {
-    Write-Host "`n=== PYTHON INSTALLATION ===" -ForegroundColor Yellow
+function Install-Uv {
+    Write-Host "`n=== UV INSTALLATION ===" -ForegroundColor Yellow
 
-    $pythonPath = Get-PythonPath
+    $uvPath = Get-UvPath
 
-    if ($pythonPath) {
-        $version = & $pythonPath --version 2>&1
-        Write-Step "Python found: $version at $pythonPath" "OK"
-        return $pythonPath
+    if ($uvPath) {
+        $version = & $uvPath --version 2>&1
+        Write-Step "uv found: $version" "OK"
+        return $uvPath
     }
 
-    Write-Step "Python 3.11/3.12 not found. Installing..." "WARN"
+    Write-Step "uv not found. Installing..." "WARN"
 
-    $installerPath = "$env:TEMP\python-installer.exe"
-
-    Write-Step "Downloading Python installer..." "INFO"
-    Invoke-WebRequest -Uri $CONFIG.PythonInstallerUrl -OutFile $installerPath
-
-    Write-Step "Running Python installer (this may take a few minutes)..." "INFO"
-    $installArgs = "/quiet InstallAllUsers=1 PrependPath=1 Include_test=0"
-    Start-Process -FilePath $installerPath -ArgumentList $installArgs -Wait
-
-    Remove-Item $installerPath -Force -ErrorAction SilentlyContinue
+    Write-Step "Downloading and running uv installer..." "INFO"
+    & ([scriptblock]::Create((Invoke-RestMethod $CONFIG.UvInstallerUrl)))
 
     # Refresh environment
     $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
 
-    $pythonPath = Get-PythonPath
-    if ($pythonPath) {
-        Write-Step "Python installed successfully!" "OK"
-        return $pythonPath
+    $uvPath = Get-UvPath
+    if ($uvPath) {
+        $version = & $uvPath --version 2>&1
+        Write-Step "uv installed successfully: $version" "OK"
+        return $uvPath
     } else {
-        throw "Python installation failed. Please install Python 3.11 or 3.12 manually."
+        throw "uv installation failed. Please install uv manually: https://docs.astral.sh/uv/"
     }
 }
 
@@ -342,38 +296,23 @@ function Setup-ProjectStructure {
     Write-Step "Directory structure created" "OK"
 }
 
-function Setup-VirtualEnvironment {
-    param([string]$PythonPath)
+function Install-Dependencies {
+    param([string]$UvPath)
 
-    Write-Host "`n=== VIRTUAL ENVIRONMENT ===" -ForegroundColor Yellow
+    Write-Host "`n=== DEPENDENCIES ===" -ForegroundColor Yellow
 
-    $venvPath = Join-Path $InstallPath "venv"
-    $venvPython = Join-Path $venvPath "Scripts\python.exe"
-    $venvPip = Join-Path $venvPath "Scripts\pip.exe"
-
-    # Create venv if needed
-    if (-not (Test-Path $venvPython) -or $Force) {
-        Write-Step "Creating virtual environment..." "INFO"
-        & $PythonPath -m venv $venvPath
-        Write-Step "Virtual environment created" "OK"
-    } else {
-        Write-Step "Virtual environment exists" "OK"
+    Write-Step "Running uv sync (installs Python & dependencies)..." "INFO"
+    Push-Location $InstallPath
+    try {
+        & $UvPath sync
+        if ($LASTEXITCODE -eq 0) {
+            Write-Step "All dependencies installed!" "OK"
+        } else {
+            throw "uv sync failed"
+        }
+    } finally {
+        Pop-Location
     }
-
-    # Upgrade pip
-    Write-Step "Upgrading pip..." "INFO"
-    & $venvPython -m pip install --upgrade pip --quiet
-
-    # Install packages
-    Write-Step "Installing dependencies..." "INFO"
-    foreach ($package in $CONFIG.RequiredPackages) {
-        Write-Step "  Installing $package..." "INFO"
-        & $venvPip install $package --quiet
-    }
-
-    Write-Step "All dependencies installed!" "OK"
-
-    return $venvPython
 }
 
 function Create-SourceFiles {
@@ -411,21 +350,18 @@ function Create-SourceFiles {
 }
 
 function Setup-MCPConfiguration {
-    param([string]$VenvPython)
-
     Write-Host "`n=== MCP CONFIGURATION ===" -ForegroundColor Yellow
 
     # Use cmd /c wrapper to ensure working directory is set correctly
     # (Claude Code may not respect the cwd property)
     $escapedPath = $InstallPath.Replace("\", "\\")
-    $cmdArgs = "/c", "cd /d $InstallPath && .\venv\Scripts\python.exe -m mcp_server.server"
 
     $mcpConfig = @{
         mcpServers = @{
             "knowledge-rag" = @{
                 type = "stdio"
                 command = "cmd"
-                args = @("/c", "cd /d $escapedPath && .\venv\Scripts\python.exe -m mcp_server.server")
+                args = @("/c", "cd /d $escapedPath && uv run -m mcp_server.server")
                 env = @{}
             }
         }
@@ -464,7 +400,7 @@ function Setup-MCPConfiguration {
 }
 
 function Run-InitialIndex {
-    param([string]$VenvPython)
+    param([string]$UvPath)
 
     Write-Host "`n=== INITIAL INDEXING ===" -ForegroundColor Yellow
 
@@ -492,8 +428,6 @@ function Run-InitialIndex {
     Write-Step "Running initial indexing..." "INFO"
 
     $indexScript = @"
-import sys
-sys.path.insert(0, r'$InstallPath')
 from mcp_server.server import KnowledgeOrchestrator
 
 orch = KnowledgeOrchestrator()
@@ -502,18 +436,19 @@ print(f"Indexed: {result['indexed']} files, {result['chunks_added']} chunks")
 print(f"Categories: {result['categories']}")
 "@
 
+    Push-Location $InstallPath
     try {
-        $result = & $VenvPython -c $indexScript 2>&1
+        $result = & $UvPath run python -c $indexScript 2>&1
         Write-Host $result
         Write-Step "Indexing complete!" "OK"
     } catch {
         Write-Step "Indexing failed: $_" "ERROR"
+    } finally {
+        Pop-Location
     }
 }
 
 function Show-Summary {
-    param([string]$VenvPython)
-
     $summary = @"
 
     ╔═══════════════════════════════════════════════════════════════════╗
@@ -521,7 +456,7 @@ function Show-Summary {
     ╚═══════════════════════════════════════════════════════════════════╝
 
     Installation Path: $InstallPath
-    Python:            $VenvPython
+    Package Manager:   uv
     Embedding Model:   $($CONFIG.EmbeddingModel)
 
     ┌─────────────────────────────────────────────────────────────────┐
@@ -562,21 +497,21 @@ try {
     Write-Banner
 
     # Check admin for installations
-    if (-not $SkipPython -or -not $SkipOllama) {
+    if (-not $SkipOllama) {
         if (-not (Test-Administrator)) {
             Write-Step "Some installations may require administrator privileges" "WARN"
         }
     }
 
-    # Step 1: Python
-    if ($SkipPython) {
-        Write-Step "Skipping Python installation" "SKIP"
-        $pythonPath = Get-PythonPath
-        if (-not $pythonPath) {
-            throw "Python 3.11/3.12 not found. Run without -SkipPython"
+    # Step 1: uv
+    if ($SkipUv) {
+        Write-Step "Skipping uv installation" "SKIP"
+        $uvPath = Get-UvPath
+        if (-not $uvPath) {
+            throw "uv not found. Run without -SkipUv"
         }
     } else {
-        $pythonPath = Install-Python
+        $uvPath = Install-Uv
     }
 
     # Step 2: Ollama
@@ -593,24 +528,24 @@ try {
     # Step 3: Project structure
     Setup-ProjectStructure
 
-    # Step 4: Virtual environment
-    $venvPython = Setup-VirtualEnvironment -PythonPath $pythonPath
+    # Step 4: Install dependencies (uv sync handles venv + packages)
+    Install-Dependencies -UvPath $uvPath
 
     # Step 5: Source files
     Create-SourceFiles
 
     # Step 6: MCP configuration
-    Setup-MCPConfiguration -VenvPython $venvPython
+    Setup-MCPConfiguration
 
     # Step 7: Initial indexing
     if (-not $SkipIndex) {
-        Run-InitialIndex -VenvPython $venvPython
+        Run-InitialIndex -UvPath $uvPath
     } else {
         Write-Step "Skipping initial indexing" "SKIP"
     }
 
     # Summary
-    Show-Summary -VenvPython $venvPython
+    Show-Summary
 
     Write-Host "Installation completed successfully!" -ForegroundColor Green
 

@@ -3,7 +3,7 @@
 <div align="center">
 
 ![Version](https://img.shields.io/badge/version-2.2.0-blue.svg)
-![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12-green.svg)
+![Python](https://img.shields.io/badge/python-3.12-green.svg)
 ![License](https://img.shields.io/badge/license-MIT-yellow.svg)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey.svg)
 
@@ -230,7 +230,7 @@ flowchart LR
 ### Prerequisites
 
 - Windows 10/11
-- Python 3.11 or 3.12
+- [uv](https://docs.astral.sh/uv/) (Python package manager, automatically manages Python)
 - [Ollama](https://ollama.com) (for local embeddings)
 - Claude Code CLI
 
@@ -247,11 +247,12 @@ cd knowledge-rag
 
 ### Manual Installation
 
-1. **Install Python 3.12**
+1. **Install uv**
    ```powershell
-   # Download from https://www.python.org/downloads/
+   # Using PowerShell:
+   powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
    # Or use winget:
-   winget install Python.Python.3.12
+   winget install astral-sh.uv
    ```
 
 2. **Install Ollama**
@@ -271,12 +272,8 @@ cd knowledge-rag
    git clone https://github.com/lyonzin/knowledge-rag.git
    cd knowledge-rag
 
-   # Create virtual environment
-   python -m venv venv
-   .\venv\Scripts\activate
-
-   # Install dependencies
-   pip install -r requirements.txt
+   # Install dependencies (uv will automatically create a virtual environment)
+   uv sync
    ```
 
 5. **Configure MCP for Claude Code**
@@ -288,7 +285,7 @@ cd knowledge-rag
        "knowledge-rag": {
          "type": "stdio",
          "command": "cmd",
-         "args": ["/c", "cd /d C:\\path\\to\\knowledge-rag && .\\venv\\Scripts\\python.exe -m mcp_server.server"],
+         "args": ["/c", "cd /d C:\\path\\to\\knowledge-rag && uv run -m mcp_server.server"],
          "env": {}
        }
      }
@@ -587,7 +584,8 @@ flowchart TB
 
         subgraph FILES["📄 Root Files"]
             INSTALL["install.ps1"]
-            REQS["requirements.txt"]
+            PYPROJECT["pyproject.toml"]
+            UVLOCK["uv.lock"]
             README["README.md"]
             CHANGE["CHANGELOG.md"]
         end
@@ -611,9 +609,10 @@ knowledge-rag/
 │   └── index_metadata.json
 ├── .claude/
 │   └── mcp.json           # Project MCP config
-├── venv/                  # Python virtual environment
+├── .venv/                 # Python virtual environment (created by uv)
 ├── install.ps1            # Automated installer
-├── requirements.txt       # Python dependencies
+├── pyproject.toml         # Project metadata & dependencies
+├── uv.lock                # Locked dependency versions
 ├── CHANGELOG.md           # Version history
 └── README.md              # This file
 ```
@@ -634,14 +633,11 @@ curl http://localhost:11434/api/tags
 
 ### Python version mismatch
 
-ChromaDB requires Python 3.11 or 3.12. Python 3.13+ is NOT supported due to onnxruntime compatibility.
+ChromaDB requires Python 3.12. Python 3.13+ is NOT supported due to onnxruntime compatibility. uv will automatically install and use the correct Python version based on `.python-version` file.
 
 ```powershell
-# Check version
-python --version
-
-# Use specific version
-py -3.12 -m venv venv
+# Reinstall with correct Python version
+uv sync
 ```
 
 ### Index is empty
@@ -663,10 +659,10 @@ ls documents/
 
 ### "ModuleNotFoundError: No module named 'rank_bm25'"
 
-Install the BM25 dependency in your virtual environment:
+Install the BM25 dependency:
 
 ```powershell
-.\venv\Scripts\pip.exe install rank-bm25
+uv sync
 ```
 
 ### "ModuleNotFoundError: No module named 'mcp_server'"
@@ -678,7 +674,7 @@ This error occurs when Claude Code doesn't set the working directory correctly. 
   "knowledge-rag": {
     "type": "stdio",
     "command": "cmd",
-    "args": ["/c", "cd /d C:\\path\\to\\knowledge-rag && .\\venv\\Scripts\\python.exe -m mcp_server.server"],
+    "args": ["/c", "cd /d C:\\path\\to\\knowledge-rag && uv run -m mcp_server.server"],
     "env": {}
   }
 }
