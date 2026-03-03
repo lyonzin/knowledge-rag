@@ -1,15 +1,36 @@
-"""Knowledge RAG MCP Server
+"""
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                                                                              ║
+║                         KNOWLEDGE RAG MCP SERVER                             ║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
 
 MCP Server with semantic search + keyword routing for local document retrieval.
 Uses ChromaDB for vector storage and Ollama for embeddings.
+
+Features:
+    - Hybrid search (semantic + BM25 keyword) with RRF fusion
+    - Incremental indexing (only re-indexes changed files)
+    - Query caching with TTL for instant repeat queries
+    - Chunk deduplication via content hashing
+    - Score normalization (0-1 range)
+
+Autor:   Lyon (Ailton Rocha)
+Versão:  1.1.0
+Data:    2026-03-03
+
+By Lyon :) Legal Ne?
 """
 
 import json
+import hashlib
 import asyncio
 import re
+import time
 from pathlib import Path
 from typing import List, Dict, Optional, Any, Tuple
 from datetime import datetime
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ChromaDB
@@ -28,6 +49,85 @@ from mcp.server.fastmcp import FastMCP
 from .config import config
 from .ingestion import DocumentParser, Document, parse_documents
 
+
+# =============================================================================
+# QUERY CACHE
+# =============================================================================
+
+class QueryCache:
+    """
+    LRU cache with TTL for search queries.
+
+    Avoids redundant searches when the same query is executed multiple times.
+    Uses OrderedDict for O(1) LRU eviction.
+
+    Args:
+        max_size: Maximum number of cached entries (default: 100)
+        ttl_seconds: Time-to-live for cache entries in seconds (default: 300)
+    """
+
+    def __init__(self, max_size: int = 100, ttl_seconds: int = 300):
+        self.max_size = max_size
+        self.ttl_seconds = ttl_seconds
+        self._cache: OrderedDict[str, Tuple[float, Any]] = OrderedDict()
+        self._hits = 0
+        self._misses = 0
+
+    def _make_key(self, query: str, max_results: int, category: Optional[str], hybrid_alpha: float) -> str:
+        """Generate cache key from query parameters"""
+        raw = f"{query}|{max_results}|{category}|{hybrid_alpha}"
+        return hashlib.sha256(raw.encode()).hexdigest()[:24]
+
+    def get(self, query: str, max_results: int, category: Optional[str], hybrid_alpha: float) -> Optional[Any]:
+        """Get cached result if exists and not expired"""
+        key = self._make_key(query, max_results, category, hybrid_alpha)
+
+        if key in self._cache:
+            timestamp, result = self._cache[key]
+
+            # Check TTL
+            if time.time() - timestamp < self.ttl_seconds:
+                # Move to end (most recently used)
+                self._cache.move_to_end(key)
+                self._hits += 1
+                return result
+            else:
+                # Expired - remove
+                del self._cache[key]
+
+        self._misses += 1
+        return None
+
+    def put(self, query: str, max_results: int, category: Optional[str], hybrid_alpha: float, result: Any) -> None:
+        """Store result in cache"""
+        key = self._make_key(query, max_results, category, hybrid_alpha)
+
+        # Evict oldest if at capacity
+        if len(self._cache) >= self.max_size:
+            self._cache.popitem(last=False)
+
+        self._cache[key] = (time.time(), result)
+
+    def invalidate(self) -> None:
+        """Clear entire cache (call after reindex)"""
+        self._cache.clear()
+
+    def stats(self) -> Dict[str, Any]:
+        """Return cache statistics"""
+        total = self._hits + self._misses
+        return {
+            "size": len(self._cache),
+            "max_size": self.max_size,
+            "ttl_seconds": self.ttl_seconds,
+            "hits": self._hits,
+            "misses": self._misses,
+            "hit_rate": f"{(self._hits / total * 100):.1f}%" if total > 0 else "0%"
+        }
+
+
+# =============================================================================
+# EMBEDDINGS
+# =============================================================================
 
 class OllamaEmbeddings:
     """
@@ -206,9 +306,15 @@ class KnowledgeOrchestrator:
         self.bm25_index = BM25Index()
         self._bm25_initialized = False
 
+        # Query cache (LRU with TTL)
+        self.query_cache = QueryCache(max_size=100, ttl_seconds=300)
+
         # Index metadata cache
         self._metadata_file = config.data_dir / "index_metadata.json"
         self._indexed_docs: Dict[str, Dict] = self._load_metadata()
+
+        # Chunk dedup tracking (content_hash → chunk_id)
+        self._chunk_hashes: Dict[str, str] = self._build_dedup_index()
 
     def _ensure_bm25_index(self) -> None:
         """Lazy initialization of BM25 index from existing ChromaDB data"""
@@ -241,63 +347,166 @@ class KnowledgeOrchestrator:
     # =========================================================================
 
     def index_all(self, force: bool = False) -> Dict[str, Any]:
-        """Index all documents in the documents directory"""
+        """
+        Index documents with incremental change detection.
+
+        Compares file mtime/size against stored metadata to detect changes.
+        Only re-indexes files that are new or modified. Cleans up orphaned
+        chunks from files that were modified or deleted.
+
+        Args:
+            force: If True, skip change detection and index everything
+
+        Returns:
+            Dict with indexing statistics
+        """
         stats = {
             "total_files": 0,
             "indexed": 0,
+            "updated": 0,
             "skipped": 0,
+            "deleted": 0,
             "errors": 0,
             "chunks_added": 0,
+            "chunks_removed": 0,
+            "dedup_skipped": 0,
             "categories": {}
         }
 
         documents = self.parser.parse_directory()
         stats["total_files"] = len(documents)
 
+        # Build reverse map: filepath → doc_id for detecting modified files
+        path_to_docid: Dict[str, str] = {}
+        for doc_id, info in self._indexed_docs.items():
+            path_to_docid[info.get("source", "")] = doc_id
+
+        # Track which filepaths are still present (for orphan detection)
+        current_paths = set()
+
         for doc in documents:
+            current_paths.add(str(doc.source))
             try:
-                # Skip if already indexed (unless force)
-                if not force and doc.id in self._indexed_docs:
+                source_str = str(doc.source)
+                existing_doc_id = path_to_docid.get(source_str)
+
+                if not force and existing_doc_id:
+                    existing_meta = self._indexed_docs.get(existing_doc_id, {})
+
+                    # Compare mtime and size to detect changes
+                    stored_mtime = existing_meta.get("file_mtime", "")
+                    stored_size = existing_meta.get("file_size", 0)
+
+                    try:
+                        current_stat = doc.source.stat()
+                        current_mtime = datetime.fromtimestamp(current_stat.st_mtime).isoformat()
+                        current_size = current_stat.st_size
+                    except OSError:
+                        current_mtime = ""
+                        current_size = 0
+
+                    # File unchanged → skip
+                    if stored_mtime == current_mtime and stored_size == current_size:
+                        stats["skipped"] += 1
+                        continue
+
+                    # File changed → delete old chunks first
+                    removed = self._remove_document_chunks(existing_doc_id)
+                    stats["chunks_removed"] += removed
+                    del self._indexed_docs[existing_doc_id]
+                    stats["updated"] += 1
+                elif not force and doc.id in self._indexed_docs:
                     stats["skipped"] += 1
                     continue
 
-                # Add chunks to ChromaDB
-                self._index_document(doc)
+                # Index the document (with dedup)
+                chunks_added, dedup_skipped = self._index_document(doc)
 
                 # Track stats
-                stats["indexed"] += 1
-                stats["chunks_added"] += len(doc.chunks)
+                if not (existing_doc_id and not force):
+                    stats["indexed"] += 1
+                stats["chunks_added"] += chunks_added
+                stats["dedup_skipped"] += dedup_skipped
                 stats["categories"][doc.category] = stats["categories"].get(doc.category, 0) + 1
 
-                # Update metadata cache
+                # Store metadata with file mtime for incremental detection
+                try:
+                    file_stat = doc.source.stat()
+                    file_mtime = datetime.fromtimestamp(file_stat.st_mtime).isoformat()
+                    file_size = file_stat.st_size
+                except OSError:
+                    file_mtime = datetime.now().isoformat()
+                    file_size = 0
+
                 self._indexed_docs[doc.id] = {
                     "source": str(doc.source),
                     "category": doc.category,
                     "format": doc.format,
-                    "chunks": len(doc.chunks),
+                    "chunks": chunks_added,
                     "keywords": doc.keywords,
-                    "indexed_at": datetime.now().isoformat()
+                    "indexed_at": datetime.now().isoformat(),
+                    "file_mtime": file_mtime,
+                    "file_size": file_size,
                 }
 
             except Exception as e:
                 stats["errors"] += 1
                 print(f"[ERROR] Failed to index {doc.source}: {e}")
 
+        # Clean up orphaned docs (files that were deleted from disk)
+        orphan_ids = []
+        for doc_id, info in list(self._indexed_docs.items()):
+            if info.get("source", "") not in current_paths:
+                removed = self._remove_document_chunks(doc_id)
+                stats["chunks_removed"] += removed
+                stats["deleted"] += 1
+                orphan_ids.append(doc_id)
+                print(f"[CLEANUP] Removed orphaned doc: {info.get('source', doc_id)}")
+
+        for doc_id in orphan_ids:
+            del self._indexed_docs[doc_id]
+
         # Persist metadata
         self._save_metadata()
 
-        # ChromaDB PersistentClient auto-persists
+        # Invalidate query cache after indexing changes
+        if stats["indexed"] > 0 or stats["updated"] > 0 or stats["deleted"] > 0:
+            self.query_cache.invalidate()
+
         return stats
 
-    def _index_document(self, doc: Document) -> None:
-        """Index a single document's chunks into ChromaDB and BM25"""
-        if not doc.chunks:
-            return
+    def _index_document(self, doc: Document) -> Tuple[int, int]:
+        """
+        Index a single document's chunks into ChromaDB and BM25.
 
-        ids = [f"{doc.id}_{chunk.index}" for chunk in doc.chunks]
-        documents = [chunk.content for chunk in doc.chunks]
-        metadatas = [
-            {
+        Performs content-hash deduplication: chunks with identical content
+        are skipped to prevent index bloat.
+
+        Returns:
+            Tuple of (chunks_added, chunks_skipped_by_dedup)
+        """
+        if not doc.chunks:
+            return 0, 0
+
+        # Filter out duplicate chunks via content hashing
+        unique_ids = []
+        unique_docs = []
+        unique_metas = []
+        dedup_skipped = 0
+
+        for chunk in doc.chunks:
+            content_hash = hashlib.sha256(chunk.content.encode("utf-8")).hexdigest()[:20]
+            chunk_id = f"{doc.id}_{chunk.index}"
+
+            # Skip if identical content already indexed
+            if content_hash in self._chunk_hashes:
+                dedup_skipped += 1
+                continue
+
+            self._chunk_hashes[content_hash] = chunk_id
+            unique_ids.append(chunk_id)
+            unique_docs.append(chunk.content)
+            unique_metas.append({
                 "doc_id": doc.id,
                 "source": str(doc.source),
                 "filename": doc.filename,
@@ -305,20 +514,76 @@ class KnowledgeOrchestrator:
                 "format": doc.format,
                 "chunk_index": chunk.index,
                 "keywords": ",".join(doc.keywords[:10]),
+                "content_hash": content_hash,
                 **chunk.metadata
-            }
-            for chunk in doc.chunks
-        ]
+            })
 
-        # Add to ChromaDB (semantic search)
-        self.collection.add(
-            ids=ids,
-            documents=documents,
-            metadatas=metadatas
-        )
+        if unique_ids:
+            # Add to ChromaDB (semantic search)
+            self.collection.add(
+                ids=unique_ids,
+                documents=unique_docs,
+                metadatas=unique_metas
+            )
 
-        # Add to BM25 index (keyword search)
-        self.bm25_index.add_documents(ids, documents)
+            # Add to BM25 index (keyword search)
+            self.bm25_index.add_documents(unique_ids, unique_docs)
+
+        return len(unique_ids), dedup_skipped
+
+    def _remove_document_chunks(self, doc_id: str) -> int:
+        """
+        Remove all chunks belonging to a document from ChromaDB and BM25.
+
+        Args:
+            doc_id: The document ID whose chunks should be removed
+
+        Returns:
+            Number of chunks removed
+        """
+        try:
+            # Find all chunks with this doc_id
+            results = self.collection.get(
+                where={"doc_id": doc_id},
+                include=["metadatas"]
+            )
+
+            if results["ids"]:
+                # Remove content hashes from dedup index
+                for meta in results["metadatas"]:
+                    content_hash = meta.get("content_hash", "")
+                    if content_hash and content_hash in self._chunk_hashes:
+                        del self._chunk_hashes[content_hash]
+
+                # Delete from ChromaDB
+                self.collection.delete(ids=results["ids"])
+
+                # BM25 needs full rebuild (no delete support)
+                self._bm25_initialized = False
+
+                return len(results["ids"])
+        except Exception as e:
+            print(f"[WARN] Failed to remove chunks for doc {doc_id}: {e}")
+
+        return 0
+
+    def _build_dedup_index(self) -> Dict[str, str]:
+        """Build deduplication index from existing ChromaDB data"""
+        dedup = {}
+        try:
+            count = self.collection.count()
+            if count > 0:
+                all_data = self.collection.get(
+                    include=["metadatas"],
+                    limit=count
+                )
+                for chunk_id, meta in zip(all_data["ids"], all_data["metadatas"]):
+                    content_hash = meta.get("content_hash", "")
+                    if content_hash:
+                        dedup[content_hash] = chunk_id
+        except Exception as e:
+            print(f"[WARN] Failed to build dedup index: {e}")
+        return dedup
 
     def reindex_all(self) -> Dict[str, Any]:
         """Force reindex all documents (clears existing index and orphan data)"""
@@ -349,10 +614,12 @@ class KnowledgeOrchestrator:
             metadata={"description": "Knowledge base for RAG"}
         )
 
-        # Step 4: Clear metadata cache and BM25 index
+        # Step 4: Clear metadata cache, BM25 index, dedup index, and query cache
         self._indexed_docs = {}
         self.bm25_index.clear()
         self._bm25_initialized = False
+        self._chunk_hashes = {}
+        self.query_cache.invalidate()
 
         # Step 5: Reindex all documents
         stats = self.index_all(force=True)
@@ -379,6 +646,8 @@ class KnowledgeOrchestrator:
         Hybrid search combining semantic search + BM25 keyword search.
 
         Uses Reciprocal Rank Fusion (RRF) to combine results from both methods.
+        Results are cached with TTL for instant repeat queries.
+        Scores are normalized to 0-1 range.
 
         Args:
             query_text: Search query
@@ -387,9 +656,14 @@ class KnowledgeOrchestrator:
             hybrid_alpha: Weight for semantic vs keyword (0.0 = keyword only, 1.0 = semantic only)
 
         Returns:
-            List of results sorted by combined RRF score
+            List of results sorted by combined RRF score (normalized 0-1)
         """
         max_results = max_results or config.default_results
+
+        # Check cache first
+        cached = self.query_cache.get(query_text, max_results, category_filter, hybrid_alpha)
+        if cached is not None:
+            return cached
 
         # Ensure BM25 index is ready
         self._ensure_bm25_index()
@@ -489,7 +763,14 @@ class KnowledgeOrchestrator:
             reverse=True
         )[:max_results]
 
-        # Step 7: Format results
+        # Step 7: Normalize scores to 0-1 range
+        if sorted_results:
+            raw_scores = [data["rrf_score"] for _, data in sorted_results]
+            max_score = max(raw_scores)
+            min_score = min(raw_scores)
+            score_range = max_score - min_score
+
+        # Step 8: Format results
         formatted = []
         for chunk_id, data in sorted_results:
             metadata = data["metadata"]
@@ -502,19 +783,29 @@ class KnowledgeOrchestrator:
             else:
                 search_method = "keyword"
 
+            # Normalize score to 0-1
+            if score_range > 0:
+                normalized_score = (data["rrf_score"] - min_score) / score_range
+            else:
+                normalized_score = 1.0 if sorted_results else 0.0
+
             formatted.append({
                 "content": data["document"],
                 "source": metadata.get("source", ""),
                 "filename": metadata.get("filename", ""),
                 "category": metadata.get("category", ""),
                 "chunk_index": metadata.get("chunk_index", 0),
-                "score": round(data["rrf_score"], 6),
+                "score": round(normalized_score, 4),
+                "raw_rrf_score": round(data["rrf_score"], 6),
                 "semantic_rank": data["semantic_rank"],
                 "bm25_rank": data["bm25_rank"],
                 "search_method": search_method,
                 "keywords": metadata.get("keywords", "").split(","),
                 "routed_by": routed_category if routed_category else "none"
             })
+
+        # Store in cache
+        self.query_cache.put(query_text, max_results, category_filter, hybrid_alpha, formatted)
 
         return formatted
 
@@ -612,11 +903,13 @@ class KnowledgeOrchestrator:
         return {
             "total_documents": len(self._indexed_docs),
             "total_chunks": self.collection.count(),
+            "unique_content_hashes": len(self._chunk_hashes),
             "categories": self.list_categories(),
             "supported_formats": config.supported_formats,
             "embedding_model": config.ollama_model,
             "chunk_size": config.chunk_size,
-            "chunk_overlap": config.chunk_overlap
+            "chunk_overlap": config.chunk_overlap,
+            "query_cache": self.query_cache.stats(),
         }
 
     # =========================================================================
@@ -715,11 +1008,13 @@ def search_knowledge(
             "message": "No relevant documents found. Try a different query or check if documents are indexed."
         })
 
+    cache_stats = orchestrator.query_cache.stats()
     return json.dumps({
         "status": "success",
         "query": query,
         "hybrid_alpha": hybrid_alpha,
         "result_count": len(results),
+        "cache_hit_rate": cache_stats["hit_rate"],
         "results": results
     }, indent=2, ensure_ascii=False)
 
