@@ -586,26 +586,93 @@ class KnowledgeOrchestrator:
         return dedup
 
     def reindex_all(self) -> Dict[str, Any]:
-        """Force reindex all documents (clears existing index and orphan data)"""
+        """
+        Smart reindex: incremental detection + BM25 rebuild + orphan cleanup.
+
+        Unlike a nuclear rebuild (which re-embeds ALL chunks via Ollama and takes
+        forever), this method:
+        1. Detects new/changed/deleted files via mtime+size comparison
+        2. Only re-embeds new or changed documents (FAST for small changes)
+        3. Removes orphaned chunks from deleted files
+        4. Rebuilds BM25 index from existing ChromaDB data (no Ollama needed)
+        5. Cleans up orphan UUID folders in ChromaDB storage
+
+        This is what `force=True` calls. For a true nuclear rebuild (corrupted DB),
+        use `nuclear_rebuild()` instead.
+        """
         import shutil
+
+        print("[REINDEX] Starting smart incremental reindex...")
+        start_time = time.time()
+
+        # Step 1: Incremental index (new/changed/deleted detection)
+        stats = self.index_all(force=False)
+
+        # Step 2: Rebuild BM25 index from current ChromaDB data
+        print("[REINDEX] Rebuilding BM25 index...")
+        self.bm25_index.clear()
+        self._bm25_initialized = False
+        self.bm25_index.build_index()
+        self._bm25_initialized = True
+        print(f"[REINDEX] BM25 index rebuilt with {len(self.bm25_index)} documents")
+
+        # Step 3: Clean orphan UUID folders (ChromaDB doesn't auto-clean)
+        chroma_dir = config.chroma_dir
+        orphans_cleaned = 0
+        if chroma_dir.exists():
+            for item in chroma_dir.iterdir():
+                if item.is_dir() and len(item.name) == 36 and '-' in item.name:
+                    try:
+                        # Check if folder is actually used by ChromaDB
+                        if not any(item.iterdir()):
+                            shutil.rmtree(item)
+                            orphans_cleaned += 1
+                            print(f"[CLEANUP] Removed empty orphan folder: {item.name}")
+                    except Exception:
+                        pass
+
+        # Step 4: Invalidate query cache
+        self.query_cache.invalidate()
+
+        elapsed = time.time() - start_time
+        stats["orphan_folders_cleaned"] = orphans_cleaned
+        stats["elapsed_seconds"] = round(elapsed, 2)
+        print(f"[REINDEX] Smart reindex completed in {elapsed:.1f}s "
+              f"(indexed: {stats['indexed']}, updated: {stats['updated']}, "
+              f"skipped: {stats['skipped']}, deleted: {stats['deleted']})")
+
+        return stats
+
+    def nuclear_rebuild(self) -> Dict[str, Any]:
+        """
+        Nuclear rebuild: DELETE everything and re-embed ALL documents from scratch.
+
+        WARNING: This is EXTREMELY SLOW (re-embeds all chunks via Ollama).
+        Only use when ChromaDB is corrupted or embeddings model changed.
+
+        For normal reindexing, use `reindex_all()` instead (smart incremental).
+        """
+        import shutil
+
+        print("[NUCLEAR] Starting full rebuild — this will take a long time...")
+        start_time = time.time()
 
         # Step 1: Delete collection from ChromaDB
         try:
             self.chroma_client.delete_collection(config.collection_name)
+            print("[NUCLEAR] Deleted ChromaDB collection")
         except Exception:
-            pass  # Collection may not exist
+            pass
 
-        # Step 2: Clean orphan UUID folders (ChromaDB doesn't auto-clean)
+        # Step 2: Clean ALL UUID folders
         chroma_dir = config.chroma_dir
         if chroma_dir.exists():
             for item in chroma_dir.iterdir():
                 if item.is_dir() and len(item.name) == 36 and '-' in item.name:
-                    # UUID folder pattern: 8-4-4-4-12 hex chars
                     try:
                         shutil.rmtree(item)
-                        print(f"[CLEANUP] Removed orphan folder: {item.name}")
-                    except Exception as e:
-                        print(f"[WARN] Failed to remove {item.name}: {e}")
+                    except Exception:
+                        pass
 
         # Step 3: Recreate collection
         self.collection = self.chroma_client.get_or_create_collection(
@@ -614,20 +681,24 @@ class KnowledgeOrchestrator:
             metadata={"description": "Knowledge base for RAG"}
         )
 
-        # Step 4: Clear metadata cache, BM25 index, dedup index, and query cache
+        # Step 4: Clear ALL caches and metadata
         self._indexed_docs = {}
         self.bm25_index.clear()
         self._bm25_initialized = False
         self._chunk_hashes = {}
         self.query_cache.invalidate()
 
-        # Step 5: Reindex all documents
+        # Step 5: Reindex everything (force=True skips mtime check)
         stats = self.index_all(force=True)
 
         # Step 6: Build BM25 index
         self.bm25_index.build_index()
         self._bm25_initialized = True
-        print(f"[INFO] BM25 index rebuilt with {len(self.bm25_index)} documents")
+
+        elapsed = time.time() - start_time
+        stats["elapsed_seconds"] = round(elapsed, 2)
+        print(f"[NUCLEAR] Full rebuild completed in {elapsed:.1f}s "
+              f"({stats['indexed']} docs, {stats['chunks_added']} chunks)")
 
         return stats
 
@@ -1046,26 +1117,34 @@ def get_document(filepath: str) -> str:
 
 
 @mcp.tool()
-def reindex_documents(force: bool = False) -> str:
+def reindex_documents(force: bool = False, full_rebuild: bool = False) -> str:
     """
     Index or reindex all documents in the knowledge base.
 
     Args:
-        force: If True, reindex all documents (clears existing index)
+        force: If True, smart reindex (detects new/changed/deleted files + rebuilds BM25).
+               FAST — only re-embeds new or changed documents.
+        full_rebuild: If True, nuclear rebuild (deletes everything and re-embeds ALL chunks).
+                      EXTREMELY SLOW — only use if ChromaDB is corrupted or embedding model changed.
 
     Returns:
         JSON string with indexing statistics
     """
     orchestrator = get_orchestrator()
 
-    if force:
+    if full_rebuild:
+        stats = orchestrator.nuclear_rebuild()
+        operation = "nuclear_rebuild"
+    elif force:
         stats = orchestrator.reindex_all()
+        operation = "smart_reindex"
     else:
         stats = orchestrator.index_all()
+        operation = "incremental_index"
 
     return json.dumps({
         "status": "success",
-        "operation": "reindex" if force else "index",
+        "operation": operation,
         "stats": stats
     }, indent=2, ensure_ascii=False)
 
