@@ -53,6 +53,7 @@ git pull origin main
 # 2. Activate your virtual environment
 # Windows:
 .\venv\Scripts\activate
+
 # Linux/macOS:
 source venv/bin/activate
 
