@@ -93,8 +93,8 @@ def _get_top(key: str, default):
     val = _yaml.get(key)
     if val is None:
         return default
-    if not isinstance(val, dict):
-        print(f"[WARN] config.yaml: {key} has wrong type (expected dict, got {type(val).__name__}), using default")
+    if not isinstance(val, type(default)):
+        print(f"[WARN] config.yaml: {key} has wrong type, using default")
         return default
     return val
 
@@ -357,6 +357,9 @@ class Config:
     documents_dir: Path = field(
         default_factory=lambda: _resolve_path(_get("paths", "documents_dir", None), BASE_DIR / "documents")
     )
+    models_cache_dir: Path = field(
+        default_factory=lambda: _resolve_path(_get("paths", "models_cache_dir", None), BASE_DIR / "models_cache")
+    )
 
     # Chunking
     chunk_size: int = field(
@@ -438,6 +441,9 @@ class Config:
         default_factory=lambda: _get_top("query_expansions", _DEFAULT_QUERY_EXPANSIONS)
     )
 
+    # Exclude patterns
+    exclude_patterns: List[str] = field(default_factory=lambda: _get_top("exclude_patterns", []))
+
     # Search settings
     default_results: int = field(default_factory=lambda: _get("search", "default_results", 5))
     max_results: int = field(default_factory=lambda: _get("search", "max_results", 20))
@@ -481,6 +487,7 @@ class Config:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.chroma_dir.mkdir(parents=True, exist_ok=True)
         self.documents_dir.mkdir(parents=True, exist_ok=True)
+        self.models_cache_dir.mkdir(parents=True, exist_ok=True)
 
 
 # Global config instance

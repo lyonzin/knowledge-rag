@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import fnmatch
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -103,6 +104,9 @@ class DocumentParser:
             ".xlsx": self._parse_xlsx,
             ".pptx": self._parse_pptx,
             ".csv": self._parse_csv,
+            ".mqh": self._parse_text,
+            ".mq4": self._parse_text,
+            ".ipynb": self._parse_json,
         }
 
     def parse_file(self, filepath: Path) -> Optional[Document]:
@@ -165,10 +169,68 @@ class DocumentParser:
                 continue
             seen_dirs.add(real_root)
 
+            # Filter out excluded directories
+            if config.exclude_patterns:
+                rel_root = os.path.relpath(root, directory)
+                if rel_root == ".":
+                    rel_root = ""
+                parts = Path(rel_root).parts
+                skip_dir = False
+                for p in config.exclude_patterns:
+                    clean_p = p.replace("**", "").strip("/")
+                    # Handle dotfiles
+                    if (clean_p == "." or clean_p == ".*") and any(part.startswith(".") for part in parts):
+                        skip_dir = True
+                        break
+                    # Sub-path matching
+                    p_parts = Path(clean_p).parts
+                    if p_parts:
+                        for i in range(len(parts) - len(p_parts) + 1):
+                            if parts[i : i + len(p_parts)] == p_parts:
+                                skip_dir = True
+                                break
+                    if skip_dir:
+                        break
+                    # Fallback to standard match
+                    if fnmatch.fnmatch(rel_root, p) or fnmatch.fnmatch(os.path.join(rel_root, ""), p):
+                        skip_dir = True
+                        break
+
+                if skip_dir:
+                    dirs.clear()
+                    continue
+
             for fname in files:
                 filepath = Path(root) / fname
                 if filepath.suffix.lower() not in supported:
                     continue
+
+                # Check for file exclusions
+                if config.exclude_patterns:
+                    rel_file = os.path.relpath(filepath, directory)
+                    f_parts = Path(rel_file).parts
+                    skip_file = False
+                    for p in config.exclude_patterns:
+                        clean_p = p.replace("**", "").strip("/")
+                        # Handle dotfiles
+                        if (clean_p == "." or clean_p == ".*") and any(part.startswith(".") for part in f_parts):
+                            skip_file = True
+                            break
+                        # Sub-path matching
+                        p_parts = Path(clean_p).parts
+                        if p_parts:
+                            for i in range(len(f_parts) - len(p_parts) + 1):
+                                if f_parts[i : i + len(p_parts)] == p_parts:
+                                    skip_file = True
+                                    break
+                        if skip_file:
+                            break
+                        if fnmatch.fnmatch(rel_file, p):
+                            skip_file = True
+                            break
+                    if skip_file:
+                        continue
+
                 try:
                     doc = self.parse_file(filepath)
                     if doc:
