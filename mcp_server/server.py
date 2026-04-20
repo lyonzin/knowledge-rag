@@ -25,6 +25,7 @@ Data:    2026-04-06
 
 import hashlib
 import json
+import os
 import re
 import threading
 import time
@@ -141,7 +142,7 @@ class FastEmbedEmbeddings:
         self.model_name = model or config.embedding_model
         self._dim = config.embedding_dim
         print(f"[INFO] Loading embedding model: {self.model_name} ({self._dim}D)...")
-        self._model = TextEmbedding(model_name=self.model_name)
+        self._model = TextEmbedding(model_name=self.model_name, cache_dir=os.path.expanduser("~/.cache/fastembed"))
         print("[INFO] Embedding model loaded successfully")
 
     def __call__(self, input: List[str]) -> List[List[float]]:
@@ -204,7 +205,10 @@ class CrossEncoderReranker:
         """Lazy initialization of cross-encoder model"""
         if self._model is None:
             print(f"[INFO] Loading reranker model: {self.model_name}...")
-            self._model = TextCrossEncoder(model_name=self.model_name)
+            self._model = TextCrossEncoder(
+                model_name=self.model_name,
+                cache_dir=os.path.expanduser("~/.cache/fastembed"),
+            )
             print("[INFO] Reranker model loaded successfully")
 
     def rerank(self, query: str, documents: List[Dict[str, Any]], top_k: int = 5) -> List[Dict[str, Any]]:
