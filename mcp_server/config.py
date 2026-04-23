@@ -16,7 +16,28 @@ import yaml
 _source_dir = Path(__file__).parent.parent
 
 
-_SUPPORTED_SUFFIXES = frozenset([".md", ".txt", ".pdf", ".py", ".json", ".docx", ".xlsx", ".pptx", ".csv", ".ipynb"])
+_SUPPORTED_SUFFIXES = frozenset(
+    [
+        ".md",
+        ".txt",
+        ".pdf",
+        ".py",
+        ".c",
+        ".h",
+        ".cpp",
+        ".js",
+        ".jsx",
+        ".ts",
+        ".tsx",
+        ".json",
+        ".xml",
+        ".docx",
+        ".xlsx",
+        ".pptx",
+        ".csv",
+        ".ipynb",
+    ]
+)
 
 
 def _has_documents(path: Path) -> bool:
@@ -457,7 +478,26 @@ class Config:
         default_factory=lambda: _get(
             "documents",
             "supported_formats",
-            [".md", ".txt", ".pdf", ".py", ".json", ".docx", ".xlsx", ".pptx", ".csv", ".ipynb"],
+            [
+                ".md",
+                ".txt",
+                ".pdf",
+                ".py",
+                ".c",
+                ".h",
+                ".cpp",
+                ".js",
+                ".jsx",
+                ".ts",
+                ".tsx",
+                ".json",
+                ".xml",
+                ".docx",
+                ".xlsx",
+                ".pptx",
+                ".csv",
+                ".ipynb",
+            ],
         )
     )
 
@@ -510,7 +550,26 @@ class Config:
             self.reranker_top_k_multiplier = 3
         if not isinstance(self.supported_formats, list) or not self.supported_formats:
             print("[WARN] supported_formats is empty or invalid, using defaults")
-            self.supported_formats = [".md", ".txt", ".pdf", ".py", ".json", ".docx", ".xlsx", ".pptx", ".csv"]
+            self.supported_formats = [
+                ".md",
+                ".txt",
+                ".pdf",
+                ".py",
+                ".c",
+                ".h",
+                ".cpp",
+                ".js",
+                ".jsx",
+                ".ts",
+                ".tsx",
+                ".json",
+                ".xml",
+                ".docx",
+                ".xlsx",
+                ".pptx",
+                ".csv",
+                ".ipynb",
+            ]
 
         # Validate exclude_patterns is a list of strings
         if not isinstance(self.exclude_patterns, list):

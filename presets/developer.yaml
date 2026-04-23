@@ -31,7 +31,15 @@ documents:
     - .pdf       # Technical papers, specs
     - .docx      # Word documents
     - .py        # Python source code
+    - .c         # C source code
+    - .h         # C/C++ headers
+    - .cpp       # C++ source code
+    - .js        # JavaScript
+    - .jsx       # React JSX
+    - .ts        # TypeScript
+    - .tsx       # React TypeScript TSX
     - .json      # API schemas, configs
+    - .xml       # XML config files
     - .csv       # Data files, logs
     - .ipynb     # Jupyter Notebooks
 

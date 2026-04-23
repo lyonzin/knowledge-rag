@@ -1,7 +1,7 @@
 """Document Ingestion System for Knowledge RAG
 
 Multi-format document parsing, chunking, and metadata extraction.
-Supports: MD, PDF, TXT, PY, JSON, DOCX, XLSX, PPTX, CSV, IPYNB, MQH, MQ4
+Supports: MD, PDF, TXT, PY, C, H, CPP, JS, JSX, TS, TSX, JSON, XML, DOCX, XLSX, PPTX, CSV, IPYNB, MQH, MQ4
 """
 
 import fnmatch
@@ -48,6 +48,83 @@ import csv
 import io
 
 from .config import config
+
+# =============================================
+# LANGUAGE PROFILES FOR CODE PARSING
+# =============================================
+
+LANGUAGE_PROFILES = {
+    ".py": {
+        "language": "python",
+        "docstring_pattern": r'^["\'][\'"]{2}(.*?)["\'][\'"]{2}',
+        "function_pattern": r"^def\s+(\w+)\s*\(",
+        "class_pattern": r"^class\s+(\w+)\s*[:\(]",
+        "import_pattern": r"^(?:from\s+[\w.]+\s+)?import\s+[\w.,\s]+",
+    },
+    ".c": {
+        "language": "c",
+        "docstring_pattern": r"/\*\*(.*?)\*/",
+        "function_pattern": r"^(?:[\w\*]+\s+)+(\w+)\s*\([^;]*$",
+        "class_pattern": r"^(?:typedef\s+)?(?:struct|union|enum)\s+(\w+)",
+        "import_pattern": r'^#include\s+[<"][\w./]+"?',
+    },
+    ".h": {
+        "language": "c",
+        "docstring_pattern": r"/\*\*(.*?)\*/",
+        "function_pattern": r"^(?:[\w\*]+\s+)+(\w+)\s*\(",
+        "class_pattern": r"^(?:typedef\s+)?(?:struct|union|enum)\s+(\w+)",
+        "import_pattern": r'^#include\s+[<"][\w./]+"?',
+    },
+    ".cpp": {
+        "language": "cpp",
+        "docstring_pattern": r"/\*\*(.*?)\*/",
+        "function_pattern": r"^(?:[\w\*:&]+\s+)+(\w+)\s*\([^;]*$",
+        "class_pattern": r"^(?:class|struct)\s+(\w+)",
+        "import_pattern": r'^#include\s+[<"][\w./]+"?',
+    },
+    ".js": {
+        "language": "javascript",
+        "docstring_pattern": r"/\*\*(.*?)\*/",
+        "function_pattern": r"^(?:export\s+)?(?:async\s+)?function\s+(\w+)",
+        "class_pattern": r"^(?:export\s+)?class\s+(\w+)",
+        "import_pattern": r"^(?:import\s+.+|(?:const|let|var)\s+.*?=\s*require\s*\()",
+    },
+    ".jsx": {
+        "language": "javascript",
+        "docstring_pattern": r"/\*\*(.*?)\*/",
+        "function_pattern": r"^(?:export\s+)?(?:async\s+)?function\s+(\w+)",
+        "class_pattern": r"^(?:export\s+)?class\s+(\w+)",
+        "import_pattern": r"^(?:import\s+.+|(?:const|let|var)\s+.*?=\s*require\s*\()",
+    },
+    ".ts": {
+        "language": "typescript",
+        "docstring_pattern": r"/\*\*(.*?)\*/",
+        "function_pattern": r"^(?:export\s+)?(?:async\s+)?function\s+(\w+)",
+        "class_pattern": r"^(?:export\s+)?(?:class|interface|enum|type)\s+(\w+)",
+        "import_pattern": r"^import\s+.+",
+    },
+    ".tsx": {
+        "language": "typescript",
+        "docstring_pattern": r"/\*\*(.*?)\*/",
+        "function_pattern": r"^(?:export\s+)?(?:async\s+)?function\s+(\w+)",
+        "class_pattern": r"^(?:export\s+)?(?:class|interface|enum|type)\s+(\w+)",
+        "import_pattern": r"^import\s+.+",
+    },
+    ".mqh": {
+        "language": "mql4",
+        "docstring_pattern": r"/\*\*(.*?)\*/",
+        "function_pattern": r"^(?:[\w\*]+\s+)+(\w+)\s*\(",
+        "class_pattern": r"^class\s+(\w+)",
+        "import_pattern": r"^#(?:include|property)\s+.+",
+    },
+    ".mq4": {
+        "language": "mql4",
+        "docstring_pattern": r"/\*\*(.*?)\*/",
+        "function_pattern": r"^(?:[\w\*]+\s+)+(\w+)\s*\(",
+        "class_pattern": r"^class\s+(\w+)",
+        "import_pattern": r"^#(?:include|property)\s+.+",
+    },
+}
 
 
 @dataclass
@@ -99,7 +176,15 @@ class DocumentParser:
             ".txt": self._parse_text,
             ".pdf": self._parse_pdf,
             ".py": self._parse_code,
+            ".c": self._parse_code,
+            ".h": self._parse_code,
+            ".cpp": self._parse_code,
+            ".js": self._parse_code,
+            ".jsx": self._parse_code,
+            ".ts": self._parse_code,
+            ".tsx": self._parse_code,
             ".json": self._parse_json,
+            ".xml": self._parse_xml,
             ".docx": self._parse_docx,
             ".xlsx": self._parse_xlsx,
             ".pptx": self._parse_pptx,
@@ -295,11 +380,18 @@ class DocumentParser:
         return content, metadata
 
     def _parse_code(self, filepath: Path) -> tuple[str, Dict]:
-        """Parse Python code file, extracting docstrings and comments"""
+        """Parse source code file with language-aware metadata extraction.
+
+        Language detection is automatic based on file extension.
+        Supports: Python, C, C++, JavaScript, TypeScript, MQL4/5.
+        """
         content = filepath.read_text(encoding="utf-8", errors="ignore")
+        suffix = filepath.suffix.lower()
+        profile = LANGUAGE_PROFILES.get(suffix, LANGUAGE_PROFILES[".py"])
+
         metadata = {
             "type": "code",
-            "language": "python",
+            "language": profile["language"],
             "title": filepath.stem,
             "file_size": filepath.stat().st_size,
             "modified": datetime.fromtimestamp(filepath.stat().st_mtime).isoformat(),
@@ -308,22 +400,48 @@ class DocumentParser:
             "imports": [],
         }
 
-        # Extract module docstring
-        docstring_match = re.match(r'^["\'][\'"]{2}(.*?)["\'][\'"]{2}', content, re.DOTALL)
+        # Extract leading docstring / block comment
+        docstring_match = re.match(profile["docstring_pattern"], content, re.DOTALL)
         if docstring_match:
             metadata["docstring"] = docstring_match.group(1).strip()
 
         # Extract function names
-        func_pattern = r"^def\s+(\w+)\s*\("
-        metadata["functions"] = re.findall(func_pattern, content, re.MULTILINE)
+        raw_functions = re.findall(profile["function_pattern"], content, re.MULTILINE)
+        if raw_functions and isinstance(raw_functions[0], tuple):
+            metadata["functions"] = [g for groups in raw_functions for g in groups if g]
+        else:
+            metadata["functions"] = list(raw_functions)
 
-        # Extract class names
-        class_pattern = r"^class\s+(\w+)\s*[:\(]"
-        metadata["classes"] = re.findall(class_pattern, content, re.MULTILINE)
+        # Extract class/struct/interface names
+        metadata["classes"] = re.findall(profile["class_pattern"], content, re.MULTILINE)
 
-        # Extract imports
-        import_pattern = r"^(?:from\s+[\w.]+\s+)?import\s+[\w.,\s]+"
-        metadata["imports"] = re.findall(import_pattern, content, re.MULTILINE)[:10]
+        # Extract imports/includes (cap at 10)
+        metadata["imports"] = re.findall(profile["import_pattern"], content, re.MULTILINE)[:10]
+
+        return content, metadata
+
+    def _parse_xml(self, filepath: Path) -> tuple[str, Dict]:
+        """Parse XML file, extracting root element and namespace metadata."""
+        content = filepath.read_text(encoding="utf-8", errors="ignore")
+        metadata = {
+            "type": "xml",
+            "title": filepath.stem,
+            "file_size": filepath.stat().st_size,
+            "modified": datetime.fromtimestamp(filepath.stat().st_mtime).isoformat(),
+            "root_element": None,
+            "namespaces": [],
+        }
+
+        # Extract root element (skip <?xml ...?> declaration and comments)
+        for match in re.finditer(r"<(\w[\w\-.:]*)[\s>]", content):
+            tag = match.group(1)
+            if tag.lower() != "xml":
+                metadata["root_element"] = tag
+                break
+
+        # Extract namespace declarations
+        ns_matches = re.findall(r'xmlns(?::(\w+))?\s*=\s*["\']([^"\']+)["\']', content)
+        metadata["namespaces"] = [{"prefix": prefix or "default", "uri": uri} for prefix, uri in ns_matches]
 
         return content, metadata
 

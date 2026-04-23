@@ -58,11 +58,19 @@ documents:
     - .txt       # Plain text
     - .pdf       # PDF documents
     - .docx      # Word documents
+    - .py        # Python source code
+    - .c         # C source code
+    - .h         # C/C++ header files
+    - .cpp       # C++ source code
+    - .js        # JavaScript
+    - .jsx       # React JSX
+    - .ts        # TypeScript
+    - .tsx       # React TypeScript TSX
+    - .json      # JSON files
+    - .xml       # XML files
     # - .xlsx    # Excel spreadsheets
     # - .pptx    # PowerPoint presentations
     # - .csv     # CSV data files
-    # - .py      # Python source code
-    # - .json    # JSON files
     # - .ipynb   # Jupyter Notebooks (extracts markdown + code cells)
     # - .mq4     # MetaTrader MQL4 source (opt-in, add to enable)
     # - .mqh     # MetaTrader MQL4/5 headers (opt-in, add to enable)

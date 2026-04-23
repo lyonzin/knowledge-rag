@@ -24,7 +24,7 @@ pip install knowledge-rag → restart Claude Code → search_knowledge("your que
 
 ---
 
-**12 MCP Tools** | **Hybrid Search + Reranking** | **12 File Formats** | **Optional NVIDIA GPU** | **100% Local**
+**12 MCP Tools** | **Hybrid Search + Reranking** | **20 File Formats** | **Optional NVIDIA GPU** | **100% Local**
 
 [What's New](#whats-new-in-v352) | [Supported Formats](#supported-formats) | [Installation](#installation) | [Configuration](#configuration) | [API Reference](#api-reference) | [Architecture](#architecture)
 
@@ -87,6 +87,14 @@ See [Changelog](#changelog) for full history.
 | Excel | `.xlsx` | openpyxl | Yes | Sheet-by-sheet extraction |
 | PowerPoint | `.pptx` | python-pptx | Yes | Slide-by-slide extraction |
 | Jupyter Notebook | `.ipynb` | Cell-aware parser | Yes | Markdown + code cells only, no outputs/base64 |
+| C Source | `.c` | Code-aware parser | Yes | Functions/structs/includes extracted |
+| C/C++ Header | `.h` | Code-aware parser | Yes | Function declarations/structs extracted |
+| C++ Source | `.cpp` | Code-aware parser | Yes | Classes/structs/includes extracted |
+| JavaScript | `.js` | Code-aware parser | Yes | Functions/classes/imports (ESM + CJS) |
+| React JSX | `.jsx` | Code-aware parser | Yes | Same as JS parser |
+| TypeScript | `.ts` | Code-aware parser | Yes | Functions/classes/interfaces/enums/imports |
+| React TSX | `.tsx` | Code-aware parser | Yes | Same as TS parser |
+| XML | `.xml` | XML parser | Yes | Root element and namespace extraction |
 | MQL4 Header | `.mqh` | Code parser | No | MetaTrader — add to `supported_formats` to enable |
 | MQL4 Source | `.mq4` | Code parser | No | MetaTrader — add to `supported_formats` to enable |
 
@@ -106,7 +114,7 @@ See [Changelog](#changelog) for full history.
 | **Markdown-Aware Chunking** | `.md` files split by `##`/`###` sections instead of fixed windows |
 | **In-Process Embeddings** | FastEmbed ONNX Runtime (BAAI/bge-small-en-v1.5, 384D) |
 | **Keyword Routing** | Word-boundary aware routing for domain-specific queries |
-| **12 Format Parsers** | MD, TXT, PDF, PY, JSON, CSV, DOCX, XLSX, PPTX, IPYNB + opt-in MQH/MQ4 |
+| **20 Format Parsers** | MD, TXT, PDF, PY, C, H, CPP, JS, JSX, TS, TSX, JSON, XML, CSV, DOCX, XLSX, PPTX, IPYNB + opt-in MQH/MQ4 |
 | **Category Organization** | Organize docs by folder, auto-tagged by path |
 | **Incremental Indexing** | Change detection via mtime/size — only re-indexes modified files |
 | **Chunk Deduplication** | SHA256 content hashing prevents duplicate chunks |
@@ -164,7 +172,7 @@ flowchart TB
     end
 
     subgraph INGEST["DOCUMENT INGESTION"]
-        PARSERS["12 Parsers<br/>MD | PDF | TXT | PY | JSON | CSV<br/>DOCX | XLSX | PPTX | IPYNB | MQH | MQ4"]
+        PARSERS["20 Parsers<br/>MD | PDF | TXT | PY | C | H | CPP | JS | JSX | TS | TSX | JSON | XML | CSV<br/>DOCX | XLSX | PPTX | IPYNB | MQH | MQ4"]
         CHUNKER["Chunking<br/>MD: section-aware<br/>Other: 1000 chars + 200 overlap"]
         PARSERS --> CHUNKER
     end
@@ -230,11 +238,11 @@ flowchart LR
         FILES["documents/<br/>├── security/<br/>├── development/<br/>├── ctf/<br/>└── general/"]
     end
 
-    subgraph PARSE["Parse (12 formats)"]
+    subgraph PARSE["Parse (20 formats)"]
         MD["Markdown"]
         PDF["PDF<br/>(PyMuPDF)"]
         OFFICE["DOCX | XLSX<br/>PPTX | CSV"]
-        CODE["PY | JSON<br/>IPYNB"]
+        CODE["PY | C | H | CPP | JS | JSX<br/>TS | TSX | JSON | XML | IPYNB"]
     end
 
     subgraph CHUNK["Chunk"]
@@ -895,7 +903,7 @@ knowledge-rag/
 ├── mcp_server/
 │   ├── __init__.py          # Stdout protection + version
 │   ├── config.py            # YAML config loader + defaults
-│   ├── ingestion.py         # 12 parsers, chunking, metadata extraction
+│   ├── ingestion.py         # 20 parsers, chunking, metadata extraction
 │   └── server.py            # MCP server, ChromaDB, BM25, reranker, 12 tools
 ├── config.example.yaml      # Documented config template (copy to config.yaml)
 ├── config.yaml              # Your active configuration (git-ignored)
@@ -986,6 +994,15 @@ With ~200 documents, expect ~300-500MB RAM. The embedding model (~50MB) and rera
 
 ## Changelog
 
+### v3.6.0 (2026-04-23)
+
+- **NEW**: Multi-language code parsing — C (`.c`), C++ (`.cpp`/`.h`), JavaScript (`.js`/`.jsx`), TypeScript (`.ts`/`.tsx`) with per-language function/class/import extraction
+- **NEW**: XML parser (`.xml`) — root element and namespace metadata extraction
+- **NEW**: All 8 new formats default enabled — no config change needed
+- **NEW**: NPM wrapper (`npx knowledge-rag`) + Docker image (`ghcr.io/lyonzin/knowledge-rag`)
+- **NEW**: Automated release pipeline — PyPI (Trusted Publishing), NPM, Docker GHCR
+- **IMPROVED**: Code parser reports correct `language` metadata per file type (was hardcoded to `"python"` for all code files)
+
 ### v3.5.2 (2026-04-16)
 
 - **NEW**: Auto-discovery of CUDA 12 DLLs from pip-installed NVIDIA packages — no manual PATH configuration needed
@@ -1000,7 +1017,7 @@ With ~200 documents, expect ~300-500MB RAM. The embedding model (~50MB) and rera
 ### v3.5.0 (2026-04-16)
 
 - **NEW**: Optional GPU acceleration for ONNX embeddings — `pip install knowledge-rag[gpu]` + `models.embedding.gpu: true` in config. 5-10x faster indexing on NVIDIA GPUs with automatic CPU fallback.
-- **DOCS**: Supported formats table added to README (12 formats)
+- **DOCS**: Supported formats table added to README (20 formats)
 
 ### v3.4.3 (2026-04-16)
 

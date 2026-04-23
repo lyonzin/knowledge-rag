@@ -181,3 +181,104 @@ def test_mqh_mq4_in_parsers(parser):
 def test_ipynb_in_parsers(parser):
     """Jupyter Notebook must be registered in parser dispatch table."""
     assert ".ipynb" in parser._parsers
+
+
+# ── Multi-Language Code Parsing ──
+
+
+def test_new_extensions_in_parsers(parser):
+    """All new code extensions must be registered in parser dispatch table."""
+    for ext in [".c", ".h", ".cpp", ".js", ".jsx", ".ts", ".tsx", ".xml"]:
+        assert ext in parser._parsers, f"{ext} missing from _parsers"
+
+
+def test_parse_c(parser, sample_c):
+    """C parser extracts functions, structs, and includes."""
+    doc = parser.parse_file(sample_c)
+    assert doc is not None
+    assert doc.format == ".c"
+    assert doc.metadata.get("language") == "c"
+    assert "main" in doc.metadata.get("functions", [])
+    assert "Config" in doc.metadata.get("classes", [])
+    assert len(doc.metadata.get("imports", [])) >= 2
+
+
+def test_parse_cpp(parser, sample_cpp):
+    """C++ parser extracts classes, structs, and includes."""
+    doc = parser.parse_file(sample_cpp)
+    assert doc is not None
+    assert doc.format == ".cpp"
+    assert doc.metadata.get("language") == "cpp"
+    assert "Engine" in doc.metadata.get("classes", [])
+    assert len(doc.metadata.get("imports", [])) >= 2
+
+
+def test_parse_javascript(parser, sample_js):
+    """JavaScript parser extracts functions, classes, and imports."""
+    doc = parser.parse_file(sample_js)
+    assert doc is not None
+    assert doc.format == ".js"
+    assert doc.metadata.get("language") == "javascript"
+    assert "fetchData" in doc.metadata.get("functions", [])
+    assert "DataService" in doc.metadata.get("classes", [])
+    assert len(doc.metadata.get("imports", [])) >= 2
+
+
+def test_parse_typescript(parser, sample_ts):
+    """TypeScript parser extracts functions, interfaces, enums, and imports."""
+    doc = parser.parse_file(sample_ts)
+    assert doc is not None
+    assert doc.format == ".ts"
+    assert doc.metadata.get("language") == "typescript"
+    assert "createRouter" in doc.metadata.get("functions", [])
+    assert "AppConfig" in doc.metadata.get("classes", [])
+    assert "Status" in doc.metadata.get("classes", [])
+    assert "ApiController" in doc.metadata.get("classes", [])
+    assert len(doc.metadata.get("imports", [])) >= 1
+
+
+def test_parse_xml(parser, sample_xml):
+    """XML parser extracts root element and namespaces."""
+    doc = parser.parse_file(sample_xml)
+    assert doc is not None
+    assert doc.format == ".xml"
+    assert doc.metadata.get("type") == "xml"
+    assert doc.metadata.get("root_element") == "project"
+    namespaces = doc.metadata.get("namespaces", [])
+    assert len(namespaces) >= 1
+    uris = [ns["uri"] for ns in namespaces]
+    assert any("maven" in uri for uri in uris)
+
+
+def test_python_parse_unchanged(parser, sample_python):
+    """Regression guard: Python parsing must produce identical output after refactor."""
+    doc = parser.parse_file(sample_python)
+    assert doc.metadata["language"] == "python"
+    assert doc.metadata["type"] == "code"
+    assert doc.metadata["functions"] == ["hello"]
+    assert doc.metadata["classes"] == ["Greeter"]
+    assert "docstring" in doc.metadata
+
+
+def test_jsx_uses_javascript_language(parser, tmp_path):
+    """JSX files must report language as javascript."""
+    f = tmp_path / "component.jsx"
+    f.write_text("function App() { return null; }", encoding="utf-8")
+    doc = parser.parse_file(f)
+    assert doc.metadata["language"] == "javascript"
+
+
+def test_tsx_uses_typescript_language(parser, tmp_path):
+    """TSX files must report language as typescript."""
+    f = tmp_path / "component.tsx"
+    f.write_text("function App(): JSX.Element { return null; }", encoding="utf-8")
+    doc = parser.parse_file(f)
+    assert doc.metadata["language"] == "typescript"
+
+
+def test_h_uses_c_language(parser, tmp_path):
+    """Header files must report language as c."""
+    f = tmp_path / "header.h"
+    f.write_text("#ifndef GUARD_H\n#define GUARD_H\nvoid func();\n#endif", encoding="utf-8")
+    doc = parser.parse_file(f)
+    assert doc.metadata["language"] == "c"

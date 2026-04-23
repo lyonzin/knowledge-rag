@@ -85,3 +85,17 @@ def test_ipynb_in_supported_suffixes():
     from mcp_server.config import _SUPPORTED_SUFFIXES
 
     assert ".ipynb" in _SUPPORTED_SUFFIXES
+
+
+def test_new_code_formats_in_supported_suffixes():
+    """New code formats must be in _SUPPORTED_SUFFIXES for directory detection."""
+    from mcp_server.config import _SUPPORTED_SUFFIXES
+
+    for ext in [".c", ".h", ".cpp", ".js", ".jsx", ".ts", ".tsx", ".xml"]:
+        assert ext in _SUPPORTED_SUFFIXES, f"{ext} missing from _SUPPORTED_SUFFIXES"
+
+
+def test_new_code_formats_default_enabled():
+    """New code formats must be in default supported_formats (not opt-in)."""
+    for ext in [".c", ".h", ".cpp", ".js", ".jsx", ".ts", ".tsx", ".xml"]:
+        assert ext in config.supported_formats, f"{ext} missing from supported_formats defaults"
