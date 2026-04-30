@@ -248,13 +248,22 @@ class CrossEncoderReranker:
     def __init__(self, model: str = None):
         self.model_name = model or config.reranker_model
         self._model = None  # Lazy init
+        self._load_failed = False
 
-    def _ensure_model(self):
+    def _ensure_model(self) -> bool:
         """Lazy initialization of cross-encoder model"""
+        if self._load_failed:
+            return False
         if self._model is None:
             print(f"[INFO] Loading reranker model: {self.model_name}...")
-            self._model = TextCrossEncoder(model_name=self.model_name, cache_dir=str(config.models_cache_dir))
-            print("[INFO] Reranker model loaded successfully")
+            try:
+                self._model = TextCrossEncoder(model_name=self.model_name, cache_dir=str(config.models_cache_dir))
+                print("[INFO] Reranker model loaded successfully")
+            except Exception as e:
+                self._load_failed = True
+                print(f"[WARN] Reranker unavailable, using RRF order: {e}")
+                return False
+        return True
 
     def rerank(self, query: str, documents: List[Dict[str, Any]], top_k: int = 5) -> List[Dict[str, Any]]:
         """
@@ -271,7 +280,8 @@ class CrossEncoderReranker:
         if not documents or not config.reranker_enabled:
             return documents[:top_k]
 
-        self._ensure_model()
+        if not self._ensure_model():
+            return documents[:top_k]
 
         texts = [doc.get("document", "") for doc in documents]
 
@@ -1923,6 +1933,10 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] == "init":
         _handle_init()
         return
+
+    from .preflight import run_preflight
+
+    run_preflight()
 
     orchestrator = get_orchestrator()
 

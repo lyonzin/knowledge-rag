@@ -74,6 +74,18 @@ def test_models_cache_dir_exists():
     assert config.models_cache_dir.exists()
 
 
+def test_venv_project_dir_uses_unresolved_executable(monkeypatch):
+    """Venv detection must survive python symlinks that resolve to system Python."""
+    from pathlib import Path
+
+    import mcp_server.config as config_module
+
+    monkeypatch.setattr(config_module.sys, "prefix", "/usr")
+    monkeypatch.setattr(config_module.sys, "executable", "/opt/knowledge-rag/venv/bin/python")
+
+    assert config_module._venv_project_dir() == Path("/opt/knowledge-rag")
+
+
 def test_exclude_patterns_default_empty():
     """Default exclude_patterns must be an empty list."""
     assert hasattr(config, "exclude_patterns")

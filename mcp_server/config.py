@@ -54,10 +54,11 @@ def _has_documents(path: Path) -> bool:
 
 def _venv_project_dir():
     """Detect project root from venv location (pip install from PyPI)."""
-    exe = Path(sys.executable).resolve()
-    for parent in exe.parents:
-        if parent.name in ("venv", ".venv", "env", ".env"):
-            return parent.parent
+    candidates = [Path(sys.prefix), Path(sys.executable), Path(sys.executable).resolve()]
+    for candidate in candidates:
+        for parent in (candidate, *candidate.parents):
+            if parent.name in ("venv", ".venv", "env", ".env"):
+                return parent.parent
     return None
 
 

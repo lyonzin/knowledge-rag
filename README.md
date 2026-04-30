@@ -772,7 +772,7 @@ models:
     dimensions: 384
     gpu: false                         # Set true + pip install knowledge-rag[gpu]
   reranker:
-    enabled: true                      # Set false on low-resource machines
+    enabled: true                      # Falls back to RRF if model is unavailable
     model: "Xenova/ms-marco-MiniLM-L-6-v2"
     top_k_multiplier: 3               # Candidates fetched before reranking
 
@@ -858,6 +858,8 @@ For `.md` files, chunking splits at `##` and `###` header boundaries first. Sect
 | `models.reranker.enabled` | true | Enable cross-encoder reranking |
 | `models.reranker.model` | `Xenova/ms-marco-MiniLM-L-6-v2` | Reranker model |
 | `models.reranker.top_k_multiplier` | 3 | Fetch N*multiplier candidates for reranking |
+
+If the reranker model is not available locally and the machine cannot download it, search now falls back to the RRF order from hybrid semantic+BM25 retrieval. This keeps `search_knowledge` available offline, but result ordering may be less precise for ambiguous queries until the reranker model is cached.
 
 **Embedding model options** (fastest → most accurate):
 - `BAAI/bge-small-en-v1.5` — 384D, ~33MB (default)
@@ -989,6 +991,31 @@ rm -rf models_cache
 # Then restart the MCP server
 ```
 
+### Reranker model download fails
+
+The reranker is lazy-loaded on the first query. If the model is not cached and the machine is offline, search continues without reranking and uses the RRF order from hybrid retrieval. To keep reranking enabled offline, run one query while online or pre-populate `models_cache/` on the target machine.
+
+You can still disable reranking explicitly in `config.yaml`:
+
+```yaml
+models:
+  reranker:
+    enabled: false
+```
+
+Disabling reranking reduces memory use and avoids first-query model loading. The tradeoff is lower ranking precision, especially when several chunks match the same terms but only one is the best answer.
+
+### ChromaDB index crashes on startup
+
+Native ChromaDB failures can terminate Python before normal exception handling runs. Startup now probes ChromaDB in a child process before initializing the MCP server. If the probe crashes, the active `chroma_db/` and `index_metadata.json` are moved to `data/backups/auto-repair-*`, and the next startup can rebuild a clean index.
+
+The same guarded behavior is available through either console script:
+
+```bash
+knowledge-rag
+knowledge-rag-guarded
+```
+
 ### Index is empty
 
 ```bash
@@ -1019,7 +1046,7 @@ pip install --upgrade knowledge-rag
 
 ### Slow first query
 
-The cross-encoder reranker model is lazy-loaded on the first query. This adds a one-time ~2-3 second delay for model download and loading. Subsequent queries are fast.
+The cross-encoder reranker model is lazy-loaded on the first query. This adds a one-time ~2-3 second delay for model download and loading. Subsequent queries are fast. If the model cannot be loaded, search falls back to RRF ordering and does not retry loading the reranker until the server restarts.
 
 ### Memory usage
 
@@ -1028,6 +1055,13 @@ With ~200 documents, expect ~300-500MB RAM. The embedding model (~50MB) and rera
 ---
 
 ## Changelog
+
+### Unreleased
+
+- **FIX**: Startup preflight probes ChromaDB in a child process and moves crashing persistent indexes to `data/backups/auto-repair-*` before MCP initialization.
+- **FIX**: Reranker load failures now fall back to RRF ordering instead of failing `search_knowledge` on offline machines.
+- **FIX**: Virtualenv project-root detection now handles Python symlinks that resolve to the system interpreter.
+- **NEW**: `knowledge-rag-guarded` console script kept as an explicit guarded startup alias.
 
 ### v3.6.2 (2026-04-23)
 
