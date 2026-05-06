@@ -1016,6 +1016,17 @@ knowledge-rag
 knowledge-rag-guarded
 ```
 
+### Multiple MCP clients start duplicate servers
+
+MCP stdio clients can open more than one `knowledge-rag` process when multiple
+sessions or approval/review flows connect at the same time. Each process loads
+its own embedding model, ChromaDB client, BM25 state, and file watcher, which can
+consume significant memory.
+
+Startup now creates `data/knowledge-rag.lock` and refuses to start a second
+server while another instance is running. If the previous process crashed, stale
+locks are detected by PID and removed automatically.
+
 ### Index is empty
 
 ```bash
