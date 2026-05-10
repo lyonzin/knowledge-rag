@@ -1,0 +1,35 @@
+# gitleaks config for knowledge-rag
+#
+# Inherits the default ruleset from gitleaks (covers AWS, GitHub, GitLab,
+# Slack, Stripe, GCP, Azure, RSA private keys, etc.). We only add narrowly
+# scoped allowlists to suppress false positives in fixtures and example
+# configs that intentionally contain placeholder strings.
+#
+# Allowlist syntax: https://github.com/gitleaks/gitleaks#configuration
+
+[extend]
+useDefault = true
+
+# ── Global allowlist ──────────────────────────────────────────────────────
+[[allowlists]]
+description = "Test fixtures, sample configs, and AAR documents"
+paths = [
+    '''(?i)tests/fixtures/.*''',
+    '''(?i)examples/.*''',
+    '''(?i)documents/aar/.*\.md$''',  # AAR write-ups may include redacted hashes
+    '''(?i)config\.example\.ya?ml$''',
+    '''(?i)presets/.*\.ya?ml$''',
+    '''^\.gitleaks\.toml$''',  # this file
+]
+
+[[allowlists]]
+description = "Documentation: example tokens are explicitly fake"
+paths = [
+    '''CONTRIBUTING\.md''',
+    '''SECURITY\.md''',
+    '''README\.md''',
+    '''docs/.*''',
+]
+regexes = [
+    '''lyonzin@users\.noreply\.github\.com''',  # public placeholder address
+]

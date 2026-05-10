@@ -1,0 +1,1033 @@
+{
+  "modules": {
+    "mcp_server": {
+      "classes": {},
+      "functions": {}
+    },
+    "mcp_server.config": {
+      "classes": {
+        "Config": {
+          "bases": [],
+          "methods": {}
+        }
+      },
+      "functions": {}
+    },
+    "mcp_server.guarded": {
+      "classes": {},
+      "functions": {
+        "guarded_main": {
+          "args": [],
+          "is_async": false,
+          "returns_annotated": true
+        }
+      }
+    },
+    "mcp_server.ingestion": {
+      "classes": {
+        "Chunk": {
+          "bases": [],
+          "methods": {}
+        },
+        "Document": {
+          "bases": [],
+          "methods": {
+            "filename": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "relative_path": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            }
+          }
+        },
+        "DocumentParser": {
+          "bases": [],
+          "methods": {
+            "parse_directory": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "directory"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "parse_file": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "filepath"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            }
+          }
+        }
+      },
+      "functions": {
+        "parse_documents": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": true,
+              "kind": "positional",
+              "name": "directory"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        }
+      }
+    },
+    "mcp_server.instance_lock": {
+      "classes": {
+        "AlreadyRunningError": {
+          "bases": [
+            "RuntimeError"
+          ],
+          "methods": {}
+        }
+      },
+      "functions": {
+        "single_instance_enabled": {
+          "args": [],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "single_instance_lock": {
+          "args": [],
+          "is_async": false,
+          "returns_annotated": true
+        }
+      }
+    },
+    "mcp_server.preflight": {
+      "classes": {},
+      "functions": {
+        "run_preflight": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": true,
+              "kind": "positional",
+              "name": "timeout_seconds"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        }
+      }
+    },
+    "mcp_server.server": {
+      "classes": {
+        "BM25Index": {
+          "bases": [],
+          "methods": {
+            "add_documents": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "chunk_ids"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "texts"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "build_index": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "clear": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "expand_query": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "query"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "search": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "query"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "top_k"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            }
+          }
+        },
+        "CrossEncoderReranker": {
+          "bases": [],
+          "methods": {
+            "rerank": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "query"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "documents"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "top_k"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            }
+          }
+        },
+        "DocumentWatcher": {
+          "bases": [
+            "FileSystemEventHandler"
+          ],
+          "methods": {
+            "on_created": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "event"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": false
+            },
+            "on_deleted": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "event"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": false
+            },
+            "on_modified": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "event"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": false
+            }
+          }
+        },
+        "EmbeddingError": {
+          "bases": [
+            "RuntimeError"
+          ],
+          "methods": {}
+        },
+        "EmbeddingModelLoadError": {
+          "bases": [
+            "RuntimeError"
+          ],
+          "methods": {}
+        },
+        "FastEmbedEmbeddings": {
+          "bases": [],
+          "methods": {
+            "embed_documents": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "documents"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "embed_query": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": false,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "input"
+                },
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "kwarg",
+                  "name": "kwargs"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "name": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            }
+          }
+        },
+        "KnowledgeOrchestrator": {
+          "bases": [],
+          "methods": {
+            "add_document_from_content": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "content"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "filepath"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "category"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "add_from_url": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "url"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "category"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "title"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "evaluate_retrieval": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "test_cases"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "get_document": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "filepath"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "get_stats": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "index_all": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "force"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "list_categories": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "list_documents": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "category"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "nuclear_rebuild": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "query": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "query_text"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "max_results"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "category_filter"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "hybrid_alpha"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "reindex_all": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "remove_document_by_path": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "filepath"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "delete_file"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "search_similar": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "filepath"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "max_results"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "update_document_content": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "filepath"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "content"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            }
+          }
+        },
+        "QueryCache": {
+          "bases": [],
+          "methods": {
+            "get": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "query"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "max_results"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "category"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "hybrid_alpha"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "invalidate": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "put": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "query"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "max_results"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "category"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "hybrid_alpha"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "result"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "stats": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            }
+          }
+        }
+      },
+      "functions": {
+        "add_document": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "content"
+            },
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "filepath"
+            },
+            {
+              "annotated": true,
+              "has_default": true,
+              "kind": "positional",
+              "name": "category"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "add_from_url": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "url"
+            },
+            {
+              "annotated": true,
+              "has_default": true,
+              "kind": "positional",
+              "name": "category"
+            },
+            {
+              "annotated": true,
+              "has_default": true,
+              "kind": "positional",
+              "name": "title"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "evaluate_retrieval": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "test_cases"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "get_document": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "filepath"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "get_index_stats": {
+          "args": [],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "get_orchestrator": {
+          "args": [],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "list_categories": {
+          "args": [],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "list_documents": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": true,
+              "kind": "positional",
+              "name": "category"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "main": {
+          "args": [],
+          "is_async": false,
+          "returns_annotated": false
+        },
+        "reindex_documents": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": true,
+              "kind": "positional",
+              "name": "force"
+            },
+            {
+              "annotated": true,
+              "has_default": true,
+              "kind": "positional",
+              "name": "full_rebuild"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "remove_document": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "filepath"
+            },
+            {
+              "annotated": true,
+              "has_default": true,
+              "kind": "positional",
+              "name": "delete_file"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "search_knowledge": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "query"
+            },
+            {
+              "annotated": true,
+              "has_default": true,
+              "kind": "positional",
+              "name": "max_results"
+            },
+            {
+              "annotated": true,
+              "has_default": true,
+              "kind": "positional",
+              "name": "category"
+            },
+            {
+              "annotated": true,
+              "has_default": true,
+              "kind": "positional",
+              "name": "hybrid_alpha"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "search_similar": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "filepath"
+            },
+            {
+              "annotated": true,
+              "has_default": true,
+              "kind": "positional",
+              "name": "max_results"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "update_document": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "filepath"
+            },
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "content"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        }
+      }
+    }
+  },
+  "version": 1
+}

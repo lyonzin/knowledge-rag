@@ -1,0 +1,248 @@
+name: Quality Gate
+
+# 7 Pillars Quality Gate — wave 2 of 5 (Security + Versioning).
+# Each job below maps to a status check that branch protection requires.
+# More pillars (Stability, Memory, Versatility, Scalability, Quality) are
+# added by subsequent waves.
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+# Cancel earlier runs of the same PR when a new push lands
+concurrency:
+  group: quality-gate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ════════════════════════════════════════════════════════════════════════
+  # PILLAR 1: SECURITY
+  # ════════════════════════════════════════════════════════════════════════
+
+  bandit:
+    name: "Pillar 1 — Bandit SAST"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install bandit
+      - name: Run bandit
+        shell: bash
+        run: |
+          # Fail on HIGH severity, report MEDIUM as warning
+          bandit -r mcp_server/ scripts/ --severity-level high --confidence-level medium
+
+  semgrep:
+    name: "Pillar 1 — Semgrep"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install semgrep
+      - name: Run semgrep with auto config
+        shell: bash
+        run: |
+          # --error makes ERROR-level findings fail the job; warnings are reported but pass.
+          semgrep --config=auto --error mcp_server/ scripts/
+
+  pip-audit:
+    name: "Pillar 1 — pip-audit (CVEs)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install pip-audit
+      - name: Install package + audit installed environment
+        shell: bash
+        run: |
+          # Install the package so pip-audit sees the actual resolved dep tree.
+          pip install -e .
+          # Strict mode fails on any unfixed advisory. To intentionally accept a
+          # known risk, set repo variable IGNORE_AUDIT_IDS to a space-separated
+          # list of CVE / GHSA IDs and document the rationale in CHANGELOG.
+          ignore_args=""
+          if [ -n "${IGNORE_AUDIT_IDS:-}" ]; then
+            for id in ${IGNORE_AUDIT_IDS}; do
+              ignore_args="${ignore_args} --ignore-vuln ${id}"
+            done
+          fi
+          pip-audit --strict ${ignore_args}
+
+  gitleaks:
+    name: "Pillar 1 — Gitleaks (secrets)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # gitleaks scans full history
+      - name: Scan for secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITLEAKS_CONFIG: .gitleaks.toml
+
+  dependency-review:
+    name: "Pillar 1 — Dependency Review"
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          comment-summary-in-pr: on-failure
+
+  # ════════════════════════════════════════════════════════════════════════
+  # PILLAR 6: VERSIONING
+  # ════════════════════════════════════════════════════════════════════════
+
+  version-sync:
+    name: "Pillar 6 — Version sync (3 files)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Verify versions agree
+        shell: bash
+        run: python scripts/check_version_sync.py
+
+  api-surface:
+    name: "Pillar 6 — Public API surface"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Compare API surface against baseline
+        shell: bash
+        run: python scripts/check_api_surface.py --check
+
+  conventional-commit-title:
+    name: "Pillar 6 — Conventional commit (PR title)"
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            docs
+            chore
+            refactor
+            test
+            perf
+            build
+            ci
+            style
+            revert
+          requireScope: false
+          subjectPattern: ^[A-Za-z].+
+          subjectPatternError: |
+            The PR title subject must start with a letter and not be empty.
+            Example: feat(server): add new search filter
+
+  changelog:
+    name: "Pillar 6 — CHANGELOG entry"
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Verify ## Unreleased gained an entry (if user-facing PR)
+        shell: bash
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: python scripts/check_changelog.py --base-ref origin/master
+
+  backwards-compat:
+    name: "Pillar 6 — Backwards-compat tests"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        shell: bash
+        run: |
+          pip install -e .
+          pip install pytest pytest-cov pyyaml
+      - name: Run backwards-compat regression tests
+        shell: bash
+        env:
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+          HF_HUB_DISABLE_PROGRESS_BARS: "1"
+        run: pytest tests/test_backwards_compat.py -v
+
+  # ════════════════════════════════════════════════════════════════════════
+  # SUMMARY
+  # ════════════════════════════════════════════════════════════════════════
+
+  summary:
+    name: "Quality Gate Summary"
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - bandit
+      - semgrep
+      - pip-audit
+      - gitleaks
+      - version-sync
+      - api-surface
+      - backwards-compat
+    steps:
+      - name: Aggregate results
+        shell: bash
+        run: |
+          echo "## Quality Gate Status" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Pillar | Job | Result |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-----|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 1 Security | Bandit SAST | ${{ needs.bandit.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 1 Security | Semgrep | ${{ needs.semgrep.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 1 Security | pip-audit | ${{ needs.pip-audit.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 1 Security | Gitleaks | ${{ needs.gitleaks.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 6 Versioning | Version sync | ${{ needs.version-sync.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 6 Versioning | API surface | ${{ needs.api-surface.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 6 Versioning | Backwards-compat | ${{ needs.backwards-compat.result }} |" >> $GITHUB_STEP_SUMMARY
+          # `skipped` is acceptable (PR-only jobs running on push events skip cleanly).
+          # `cancelled` is acceptable (concurrency cancel of older runs).
+          # Only `failure` blocks the gate.
+          for r in \
+            "${{ needs.bandit.result }}" \
+            "${{ needs.semgrep.result }}" \
+            "${{ needs.pip-audit.result }}" \
+            "${{ needs.gitleaks.result }}" \
+            "${{ needs.version-sync.result }}" \
+            "${{ needs.api-surface.result }}" \
+            "${{ needs.backwards-compat.result }}"; do
+            if [[ "$r" == "failure" ]]; then
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "❌ One or more pillars failed. Address the issues above before review." >> $GITHUB_STEP_SUMMARY
+              exit 1
+            fi
+          done
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ All Quality Gate pillars passed." >> $GITHUB_STEP_SUMMARY
