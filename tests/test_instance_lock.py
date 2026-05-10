@@ -15,10 +15,10 @@ from pathlib import Path
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Env-var parsing
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.parametrize(
     "value",
@@ -53,6 +53,7 @@ def test_env_var_unset_keeps_guard_disabled(monkeypatch):
 # No-op default
 # ---------------------------------------------------------------------------
 
+
 def test_disabled_by_default_is_noop(monkeypatch, tmp_path):
     """Without the env var, the contextmanager creates NO lock file."""
     from mcp_server import instance_lock
@@ -84,6 +85,7 @@ def test_disabled_allows_unlimited_concurrent_acquires(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 # Enabled-mode behavior
 # ---------------------------------------------------------------------------
+
 
 def test_enabled_creates_lock_with_pid(monkeypatch, tmp_path):
     from mcp_server import instance_lock

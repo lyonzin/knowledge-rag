@@ -41,7 +41,6 @@ from __future__ import annotations
 
 import os
 import signal
-import sys
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Optional
@@ -146,9 +145,7 @@ def single_instance_lock() -> Iterator[Optional[Path]]:
             except FileNotFoundError:
                 pass
             except OSError as exc:
-                raise AlreadyRunningError(
-                    f"Failed to clear stale lock {lock_path}: {exc}"
-                ) from exc
+                raise AlreadyRunningError(f"Failed to clear stale lock {lock_path}: {exc}") from exc
             continue
 
         with os.fdopen(fd, "w", encoding="utf-8") as f:
