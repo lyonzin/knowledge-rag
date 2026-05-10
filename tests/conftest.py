@@ -14,38 +14,32 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
 # ---------------------------------------------------------------------------
-# Workaround: pytest 9.0.3 atexit cleanup_numbered_dir flake on Windows GHA
+# Workaround: defense-in-depth for Windows pytest atexit interpreter-shutdown
+# races
 # ---------------------------------------------------------------------------
-# pytest 9.0.3 registers _pytest.pathlib.cleanup_numbered_dir as an atexit
-# callback. The function calls ``root.glob("garbage-*")`` without try/except,
-# which can raise OSError on Windows when the temp directory is being
-# concurrently accessed by antivirus/indexer/another process during interpreter
-# shutdown. The OSError is logged as "Exception ignored in atexit callback"
-# and causes the Python process to exit with code 1, which CI treats as a
-# test failure even though every single test passed.
+# Two flake sources have surfaced on Windows GHA runners with pytest 9.0.3:
 #
-# Symptoms (only on Windows runners, both 3.11 and 3.12):
-#     ============================= 126 passed in 6.42s ==============================
-#     Exception ignored in atexit callback: <function cleanup_numbered_dir at ...>
-#     Traceback (most recent call last):
-#       File ".../pathlib.py", line 371, in cleanup_numbered_dir
-#         for path in root.glob("garbage-*"):
-#       File "pathlib.py", line 953, in glob
-#         ...
-#     ##[error]Process completed with exit code 1.
+#   1) pytest's own ``_pytest.pathlib.cleanup_numbered_dir`` atexit callback
+#      runs ``root.glob("garbage-*")`` without try/except. Concurrent FS
+#      access (Defender, Search Indexer, parallel runner) can raise OSError
+#      during interpreter shutdown -> exit code 1 with "Exception ignored
+#      in atexit callback" even though all tests passed.
 #
-# Upstream issue lineage: pytest-dev/pytest#7491 family; the inner ``try_cleanup``
-# helper already swallows OSError, but the outer ``cleanup_numbered_dir`` does
-# not protect the ``glob("garbage-*")`` line that triggers it on Windows.
+#   2) Background HuggingFace download threads (huggingface_hub uses
+#      ``concurrent.futures.ThreadPoolExecutor`` for parallel snapshot
+#      fetches) can outlive pytest's stdout. A late warning emit then trips
+#      "ValueError: I/O operation on closed file" -> non-zero exit. The
+#      primary fix for this is ``HF_HUB_OFFLINE=1`` in the CI workflow;
+#      we also wrap pathlib cleanup here so any pytest-side race is contained.
 #
-# We patch the function inside the ``_pytest.pathlib`` module BEFORE the first
-# tmp_path fixture runs (which is when ``make_numbered_dir_with_cleanup`` calls
-# ``atexit.register(cleanup_numbered_dir, ...)`` and binds the global lookup).
-# Because ``conftest.py`` is imported at collection time — well before any
-# fixture resolution — the registered atexit callback is already the safe
-# wrapper and the OSError is contained.
+# We patch ``_pytest.pathlib.cleanup_numbered_dir`` BEFORE the first
+# ``tmp_path`` fixture runs (which is when ``make_numbered_dir_with_cleanup``
+# calls ``atexit.register(cleanup_numbered_dir, ...)`` and binds the global
+# lookup). ``conftest.py`` is imported at collection time so the atexit
+# callback registered later is our safe wrapper.
 #
-# Remove this block once pytest ships a real fix for the cleanup race.
+# Track upstream pytest-dev/pytest#7491 family. Remove this block once
+# pytest ships a real fix.
 try:
     import _pytest.pathlib as _pp
 
