@@ -25,40 +25,18 @@ jobs:
         run: ruff format --check mcp_server/ tests/
 
   test:
-    name: Test (Python ${{ matrix.python-version }}, ${{ matrix.os }})${{ matrix.experimental && ' [experimental]' || '' }}
+    name: Test (Python ${{ matrix.python-version }}, ${{ matrix.os }})
     needs: lint
     runs-on: ${{ matrix.os }}
-    # Pillar 4 (Versatility): 3 OS x 3 Python = 9 combos.
-    # Stable combos (Linux+Windows x 3.11+3.12) must pass.
-    # Experimental combos (macOS, Python 3.13) report visibly but do not
-    # block the gate yet — fastembed/onnxruntime wheels for those targets
-    # are still catching up. Promotion to required happens in a future PR
-    # once two consecutive nightlies are green.
-    continue-on-error: ${{ matrix.experimental || false }}
+    # Pillar 4 (Versatility): 3 OS x 3 Python = 9 combos, all required.
+    # All cells were green for two consecutive Quality Gate cycles
+    # (Onda 3 + Onda 4) on macOS and Python 3.13 — promoted from
+    # experimental to required at v3.9.0.
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
-        python-version: ["3.11", "3.12"]
-        experimental: [false]
-        include:
-          # ── macOS x 3.11/3.12 (experimental) ──
-          - os: macos-latest
-            python-version: "3.11"
-            experimental: true
-          - os: macos-latest
-            python-version: "3.12"
-            experimental: true
-          # ── Python 3.13 across all OS (experimental) ──
-          - os: ubuntu-latest
-            python-version: "3.13"
-            experimental: true
-          - os: windows-latest
-            python-version: "3.13"
-            experimental: true
-          - os: macos-latest
-            python-version: "3.13"
-            experimental: true
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.11", "3.12", "3.13"]
 
     steps:
       - uses: actions/checkout@v4

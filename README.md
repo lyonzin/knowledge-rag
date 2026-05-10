@@ -11,6 +11,7 @@
 ![GPU](https://img.shields.io/badge/GPU-NVIDIA%20CUDA-76B900.svg?logo=nvidia)
 [![CI](https://github.com/lyonzin/knowledge-rag/actions/workflows/ci.yml/badge.svg)](https://github.com/lyonzin/knowledge-rag/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/lyonzin/knowledge-rag/actions/workflows/security.yml/badge.svg)](https://github.com/lyonzin/knowledge-rag/actions/workflows/security.yml)
+[![Quality Gate](https://github.com/lyonzin/knowledge-rag/actions/workflows/quality-gate.yml/badge.svg)](https://github.com/lyonzin/knowledge-rag/actions/workflows/quality-gate.yml)
 [![Glama Score](https://glama.ai/mcp/servers/lyonzin/knowledge-rag/badges/score.svg)](https://glama.ai/mcp/servers/lyonzin/knowledge-rag)
 
 ### Your docs, your machine, zero cloud. Claude Code searches them natively.
@@ -27,15 +28,33 @@ pip install knowledge-rag → restart Claude Code → search_knowledge("your que
 
 **12 MCP Tools** | **Hybrid Search + Reranking** | **20 File Formats** | **Optional NVIDIA GPU** | **100% Local**
 
-[What's New](#whats-new-in-v381) | [Supported Formats](#supported-formats) | [Installation](#installation) | [Configuration](#configuration) | [API Reference](#api-reference) | [Architecture](#architecture)
+[What's New](#whats-new-in-v390) | [Supported Formats](#supported-formats) | [Installation](#installation) | [Configuration](#configuration) | [API Reference](#api-reference) | [Architecture](#architecture)
 
 </div>
 
 ---
 
-## What's New in v3.8.1
+## What's New in v3.9.0
 
-### Critical Hotfix — No More Silent Zero-Vector Corruption
+### Quality Gate — 7-Pillar PR Validation
+
+knowledge-rag is now used daily by 70+ enterprise teams. Every PR (including dependabot bumps and one-line fixes) is now evaluated against **35+ automated checks** spread across 7 pillars before any human review:
+
+| Pillar | What it enforces | Tools |
+|---|---|---|
+| **1 Security** | SAST, secrets, CVEs, supply chain | bandit, semgrep, gitleaks, pip-audit, dependency-review, Snyk, CodeQL, Socket |
+| **2 Stability** | Flake detection, coverage trend, test count, deterministic runs | pytest-rerunfailures, codecov ±0.5pp, test-count guard |
+| **3 Memory Leak** | RSS bounded under 1000-query load, no idle bloat | psutil-based baseline tests + nightly 50K-iteration soak |
+| **4 Versatility** | 9 OS×Python combos, 14 format parsers, 4 config presets, locale tolerance, property-based fuzzing | matrix CI on Linux+Windows+macOS × 3.11+3.12+3.13, Hypothesis |
+| **5 Scalability** | Performance regression > 10% blocks merge, public bench dashboard | pytest-benchmark, GH Pages chart |
+| **6 Versioning** | Atomic version sync, API surface diff, conventional commits, CHANGELOG enforcement, backwards compat | griffe-style AST diff, custom guards |
+| **7 Quality** | Type strictness, docstring coverage, complexity, dead code | mypy strict, interrogate ≥80%, radon, vulture |
+
+Plus a **nightly resilience workflow** that runs chaos failure-injection (HF down, ChromaDB corruption, watchdog crash, ONNX zero-byte replay), determinism check (full suite × 3), and mutation testing on selected modules.
+
+Read the full philosophy in [CONTRIBUTING.md](CONTRIBUTING.md). Report bugs via [SECURITY.md](SECURITY.md) or the [issue templates](.github/ISSUE_TEMPLATE/).
+
+### Critical Hotfix — No More Silent Zero-Vector Corruption (v3.8.1)
 
 `FastEmbedEmbeddings.__call__` no longer swallows exceptions and returns `[[0.0]*dim, ...]` when the ONNX model fails to load. That bug pre-existed in master but was silent: ChromaDB happily stored zero embeddings, `count()` reported normal numbers, smart-reindex skipped them as "already indexed", and queries returned garbage similarity with no error visible. Now raises `EmbeddingModelLoadError` / `EmbeddingError` loudly. **All v3.8.0 users should upgrade.** Full details in [Changelog](#v381-2026-05-10--hotfix).
 
@@ -67,6 +86,7 @@ All methods produce the same MCP server. See [Installation](#installation) for f
 
 ### Recent Highlights
 
+- **v3.9.0** — **Quality Gate** activated: 35+ automated PR checks across 7 pillars (Security, Stability, Memory Leak, Versatility, Scalability, Versioning, Quality) + nightly resilience suite (chaos, soak, determinism, mutation)
 - **v3.8.1** — Critical hotfix: loud-fail embeddings (no more silent zero-vector corruption); Windows CI flake erradicated (HF_HUB_OFFLINE + shell:bash + atexit wrapper)
 - **v3.8.0** — Lazy-load embeddings, opt-in single-instance guard, version sync across PyPI/NPM/Docker
 - **v3.6.0** — Multi-language code parsing (C/C++/JS/TS/XML), NPM wrapper, Docker image, automated release pipeline
@@ -1081,6 +1101,28 @@ A second instance exits immediately with code 75. Default is OFF (multi-client f
 ---
 
 ## Changelog
+
+### v3.9.0 (2026-05-10) — Quality Gate
+
+**Major governance + CI hardening release. No runtime behavior change in `mcp_server/`. Public API surface unchanged from v3.8.1.**
+
+- **NEW** Quality Gate workflow (`.github/workflows/quality-gate.yml`) enforcing the 7 pillars on every PR: Security, Stability, Memory Leak, Versatility, Scalability, Versioning, Quality. 35+ status checks total.
+- **NEW** Nightly resilience workflow (`.github/workflows/nightly.yml`): chaos suite (failure injection), 1h soak test (50K-iteration loop), determinism check (full suite × 3), mutation testing (mutmut). Auto-opens GitHub issue on any nightly failure.
+- **NEW** Performance benchmark suite under `bench/` (12 microbenchmarks, pytest-benchmark) with 10% regression gate on every PR.
+- **NEW** Public performance dashboard via GitHub Pages (`.github/workflows/bench-pages.yml`) — chart of latency/throughput per commit. Dormant until repo Pages is enabled.
+- **NEW** Property-based fuzzing of all parsers via Hypothesis (`tests/test_ingestion_property.py`) — 200 random examples per CI run.
+- **NEW** Memory baseline regression tests (`tests/test_memory_baseline.py`, cross-platform via psutil) — RSS bounded under 1000 queries; nightly soak amplifies to 50K iterations.
+- **NEW** Property/locale/format/preset matrices (`tests/test_presets.py`, `tests/test_locale.py`, `tests/test_format_smoke.py`).
+- **NEW** Backwards-compatibility regression tests (`tests/test_backwards_compat.py`) — legacy YAML configs from v3.6.0 / v3.7.0 still parse; all 12 MCP tool parameter names frozen.
+- **NEW** AST-based public API surface diff (`scripts/check_api_surface.py`) — any breaking change blocks merge, baseline at `.github/api-surface-baseline.json`.
+- **NEW** CHANGELOG enforcement (`scripts/check_changelog.py`) — user-facing PRs must add a bullet under `## Unreleased`; bypass via `skip-changelog` label.
+- **NEW** Test count anti-regression (`scripts/check_test_count.py`) — guards against silent test deletion.
+- **NEW** Conventional commits required on every PR title (commitlint via `amannn/action-semantic-pull-request`).
+- **NEW** mypy `--strict` rolling out per-module (currently `instance_lock.py` + `preflight.py` + `scripts/`); interrogate docstring coverage ≥ 80%; radon, vulture, PR-size guard report-only.
+- **NEW** CI matrix expanded to 9 cells: Linux + Windows + **macOS** × 3.11 + 3.12 + **3.13** (all required at v3.9.0; macOS / 3.13 promoted from experimental after two clean cycles).
+- **NEW** Governance docs: `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`, `.github/PULL_REQUEST_TEMPLATE.md`, 3 issue templates, expanded `CODEOWNERS`.
+- **NEW** Pre-commit hooks: ruff, gitleaks, version-sync, conventional commits.
+- **CHORE** `.codecov.yml` enforcing coverage trend gate (-0.5pp blocks; new code ≥ 70%).
 
 ### v3.8.1 (2026-05-10) — hotfix
 

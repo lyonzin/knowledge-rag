@@ -465,9 +465,9 @@ jobs:
     name: "Pillar 5 — Performance regression gate (10%)"
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
-    # Initial rollout: report-only while we establish baseline stability.
-    # Promotes to required after a few cycles of clean nightly bench data.
-    continue-on-error: true
+    # Promoted to required at v3.9.0. Bootstrap-resilient: when master
+    # does not yet contain bench/, the gate skips with [INFO] message
+    # rather than failing.
     steps:
       - name: Checkout PR branch
         uses: actions/checkout@v4
@@ -532,6 +532,10 @@ jobs:
       - versatility-locale
       - versatility-formats
       - property-fuzz
+      # Pillar 5 — Scalability (blocking from v3.9.0)
+      - perf-bench
+      # Pillar 2 — Stability (blocking from v3.9.0)
+      - test-count
       # Pillar 6 — Versioning
       - version-sync
       - api-surface
@@ -556,6 +560,8 @@ jobs:
           echo "| 4 Versatility | Locale matrix | ${{ needs.versatility-locale.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 4 Versatility | Format matrix | ${{ needs.versatility-formats.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 4 Versatility | Property-based fuzz | ${{ needs.property-fuzz.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 2 Stability | Test count guard | ${{ needs.test-count.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 5 Scalability | Perf gate 10% | ${{ needs.perf-bench.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 6 Versioning | Version sync | ${{ needs.version-sync.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 6 Versioning | API surface | ${{ needs.api-surface.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 6 Versioning | Backwards-compat | ${{ needs.backwards-compat.result }} |" >> $GITHUB_STEP_SUMMARY
@@ -574,6 +580,8 @@ jobs:
             "${{ needs.versatility-locale.result }}" \
             "${{ needs.versatility-formats.result }}" \
             "${{ needs.property-fuzz.result }}" \
+            "${{ needs.test-count.result }}" \
+            "${{ needs.perf-bench.result }}" \
             "${{ needs.version-sync.result }}" \
             "${{ needs.api-surface.result }}" \
             "${{ needs.backwards-compat.result }}" \
