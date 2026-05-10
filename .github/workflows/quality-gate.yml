@@ -63,32 +63,34 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install pip-audit
-      - name: Install package + audit installed environment
+      - name: Audit dependency tree (without installing knowledge-rag)
         shell: bash
+        # We audit the dependency tree only — NOT the knowledge-rag package
+        # itself. Auditing knowledge-rag would always fail on release PRs
+        # (the version about to ship is not yet on PyPI), and we already
+        # fully exercise the project via the test suite. Resolving deps via
+        # pip download lets pip-audit see the real graph without installing
+        # an editable / not-on-PyPI version.
         run: |
-          # Always upgrade pip itself first — older pip ships with its own CVEs
-          # and pip-audit's --strict mode would fail on them otherwise.
           python -m pip install --upgrade pip
-          # Install the package so pip-audit sees the actual resolved dep tree.
-          pip install -e .
-          # Strict mode fails on any unfixed advisory. The list below documents
-          # advisories that we have explicitly evaluated and accepted because
-          # there is no fix upstream yet:
-          #   CVE-2026-3219 (pip): tarball symlink TOCTOU — no fix as of 2026-05;
-          #     does not affect us because we never install untrusted tarballs
-          #     in CI; users invoke pip themselves.
-          # Re-evaluate each line at every release. To add an exception, document
-          # it here AND in CHANGELOG.md, then update IGNORE_AUDIT_IDS below.
+          # Materialize the actual dependency closure into a requirements
+          # file by asking pip to resolve (without installing) what
+          # `pip install .` would pull. Then audit that file.
+          pip install --upgrade pip-tools
+          pip-compile --quiet --output-file=resolved-deps.txt --strip-extras pyproject.toml
+          # Drop the project itself from the file (pip-compile may include it)
+          grep -v "^knowledge-rag" resolved-deps.txt > resolved-deps.clean.txt || cp resolved-deps.txt resolved-deps.clean.txt
+
+          # Strict mode fails on any unfixed advisory. Documented exceptions:
+          #   CVE-2026-3219 (pip): tarball symlink TOCTOU — no upstream fix
+          #     as of 2026-05. Does not affect us; users run pip themselves.
           ignore_args="--ignore-vuln CVE-2026-3219"
           if [ -n "${IGNORE_AUDIT_IDS:-}" ]; then
             for id in ${IGNORE_AUDIT_IDS}; do
               ignore_args="${ignore_args} --ignore-vuln ${id}"
             done
           fi
-          # --skip-editable avoids "Dependency not found on PyPI" when the
-          # PR itself is the one bumping the version that does not yet
-          # exist on PyPI (release PRs).
-          pip-audit --strict --skip-editable ${ignore_args}
+          pip-audit --strict --requirement resolved-deps.clean.txt ${ignore_args}
 
   gitleaks:
     name: "Pillar 1 — Gitleaks (secrets)"
