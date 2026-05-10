@@ -394,11 +394,14 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - name: Install package + pytest
+      - name: Install package + pytest + collect-time deps
         shell: bash
+        # The collect-only run imports every test module — including those
+        # that depend on hypothesis, psutil, numpy, yaml. Install all of
+        # them so collection succeeds across the full suite.
         run: |
           pip install -e .
-          pip install pytest
+          pip install pytest hypothesis psutil numpy pyyaml
       - name: Verify test count has not regressed
         shell: bash
         env:
@@ -485,11 +488,20 @@ jobs:
         run: pytest bench/ --benchmark-only --benchmark-min-rounds=3 --benchmark-json=branch.json
       - name: Checkout master and bench it
         shell: bash
+        # First-run resilience: if master does not yet contain bench/ (the
+        # PR that introduces it), the perf gate is informational. Once bench/
+        # exists in master, the gate compares medians and enforces the 10%
+        # ceiling.
         run: |
           git fetch origin master:master-base
-          git checkout master-base -- bench/ scripts/ mcp_server/
-          pytest bench/ --benchmark-only --benchmark-min-rounds=3 --benchmark-json=master.json || echo "[WARN] master bench step incomplete; treating as informational"
-          git checkout HEAD -- bench/ scripts/ mcp_server/
+          if git show master-base:bench/test_bench_search.py > /dev/null 2>&1; then
+            git checkout master-base -- bench/ scripts/ mcp_server/
+            pytest bench/ --benchmark-only --benchmark-min-rounds=3 --benchmark-json=master.json || \
+              echo "[WARN] master bench step failed; perf gate becomes informational this run"
+            git checkout HEAD -- bench/ scripts/ mcp_server/
+          else
+            echo "[INFO] master does not yet contain bench/; this is the bootstrap PR. Perf gate skipped."
+          fi
       - name: Compare and gate
         shell: bash
         run: |
