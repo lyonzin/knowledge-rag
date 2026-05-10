@@ -27,19 +27,23 @@ pip install knowledge-rag → restart Claude Code → search_knowledge("your que
 
 **12 MCP Tools** | **Hybrid Search + Reranking** | **20 File Formats** | **Optional NVIDIA GPU** | **100% Local**
 
-[What's New](#whats-new-in-v360) | [Supported Formats](#supported-formats) | [Installation](#installation) | [Configuration](#configuration) | [API Reference](#api-reference) | [Architecture](#architecture)
+[What's New](#whats-new-in-v381) | [Supported Formats](#supported-formats) | [Installation](#installation) | [Configuration](#configuration) | [API Reference](#api-reference) | [Architecture](#architecture)
 
 </div>
 
 ---
 
-## What's New in v3.8.0
+## What's New in v3.8.1
 
-### Lazy-Loaded Embeddings — Cheaper Idle Processes
+### Critical Hotfix — No More Silent Zero-Vector Corruption
+
+`FastEmbedEmbeddings.__call__` no longer swallows exceptions and returns `[[0.0]*dim, ...]` when the ONNX model fails to load. That bug pre-existed in master but was silent: ChromaDB happily stored zero embeddings, `count()` reported normal numbers, smart-reindex skipped them as "already indexed", and queries returned garbage similarity with no error visible. Now raises `EmbeddingModelLoadError` / `EmbeddingError` loudly. **All v3.8.0 users should upgrade.** Full details in [Changelog](#v381-2026-05-10--hotfix).
+
+### Lazy-Loaded Embeddings — Cheaper Idle Processes (v3.8.0)
 
 The FastEmbed ONNX model (~200MB resident) now loads on the **first query**, not at startup. Idle `knowledge-rag` processes are now genuinely cheap. Why this matters: MCP stdio is one-process-per-client by protocol — multiple Claude Code windows, Claude Desktop + IDE simultaneously, or review/approval flows that open extra connections all spawn their own processes. Before v3.8.0, every one of them paid the full embedding-model cost up front. Now only processes that actually serve queries load the model. Public API is unchanged.
 
-### Opt-In Single-Instance Guard
+### Opt-In Single-Instance Guard (v3.8.0)
 
 For users who measured their setup and want a hard cap of one server per `data_dir`:
 
@@ -63,6 +67,7 @@ All methods produce the same MCP server. See [Installation](#installation) for f
 
 ### Recent Highlights
 
+- **v3.8.1** — Critical hotfix: loud-fail embeddings (no more silent zero-vector corruption); Windows CI flake erradicated (HF_HUB_OFFLINE + shell:bash + atexit wrapper)
 - **v3.8.0** — Lazy-load embeddings, opt-in single-instance guard, version sync across PyPI/NPM/Docker
 - **v3.6.0** — Multi-language code parsing (C/C++/JS/TS/XML), NPM wrapper, Docker image, automated release pipeline
 - **v3.5.2** — CUDA DLL auto-discovery from pip packages, graceful GPU→CPU fallback, explicit CPU provider (no CUDA noise when `gpu: false`), BASE_DIR resolution fix for editable installs
