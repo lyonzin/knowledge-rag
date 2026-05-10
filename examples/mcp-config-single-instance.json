@@ -1,0 +1,11 @@
+{
+  "_comment": "Example MCP client config with the opt-in single-instance guard enabled. See docs/single-instance.md for full context. Default behavior (without this env var) allows multiple parallel knowledge-rag processes.",
+  "mcpServers": {
+    "knowledge-rag": {
+      "command": "knowledge-rag",
+      "env": {
+        "KNOWLEDGE_RAG_SINGLE_INSTANCE": "1"
+      }
+    }
+  }
+}

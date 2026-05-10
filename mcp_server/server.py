@@ -1934,48 +1934,58 @@ def main():
         _handle_init()
         return
 
+    from .instance_lock import (
+        ALREADY_RUNNING_EXIT_CODE,
+        AlreadyRunningError,
+        single_instance_lock,
+    )
     from .preflight import run_preflight
 
-    run_preflight()
-
-    orchestrator = get_orchestrator()
-
-    # Migration: check dimension mismatch AFTER full init (avoids segfault during __init__)
-    orchestrator._needs_rebuild = orchestrator._check_dimension_mismatch()
-    if orchestrator._needs_rebuild:
-        print("[MIGRATION] Running nuclear rebuild for embedding model change...")
-        try:
-            stats = orchestrator.nuclear_rebuild()
-            print(
-                f"[MIGRATION] Rebuild complete: {stats['indexed']} docs, "
-                f"{stats['chunks_added']} chunks in {stats.get('elapsed_seconds', '?')}s"
-            )
-        except Exception as e:
-            print(f"[ERROR] Migration failed: {e}")
-            print("[FALLBACK] Attempting regular index instead...")
-            stats = orchestrator.index_all(force=True)
-    elif orchestrator.collection.count() == 0:
-        print("[INFO] No documents indexed. Running initial indexing...")
-        stats = orchestrator.index_all()
-        print(f"[INFO] Indexed {stats['indexed']} documents with {stats['chunks_added']} chunks")
-
-    # Start file watcher for auto-reindex on document changes
     try:
-        watcher = DocumentWatcher(get_orchestrator, debounce_seconds=5.0)
-        observer = Observer()
-        observer.schedule(watcher, str(config.documents_dir), recursive=True)
-        observer.daemon = True
-        observer.start()
-        print(f"[WATCHER] Monitoring {config.documents_dir} for changes")
-    except Exception as e:
-        print(f"[WARN] Failed to start file watcher: {e}")
-        print("[WARN] Auto-reindexing disabled. Use reindex_documents tool manually.")
+        with single_instance_lock():
+            run_preflight()
 
-    # Restore real stdout for MCP JSON-RPC, keep print() going to stderr
-    from . import _original_stdout
+            orchestrator = get_orchestrator()
 
-    sys.stdout = _original_stdout
-    mcp.run()
+            # Migration: check dimension mismatch AFTER full init (avoids segfault during __init__)
+            orchestrator._needs_rebuild = orchestrator._check_dimension_mismatch()
+            if orchestrator._needs_rebuild:
+                print("[MIGRATION] Running nuclear rebuild for embedding model change...")
+                try:
+                    stats = orchestrator.nuclear_rebuild()
+                    print(
+                        f"[MIGRATION] Rebuild complete: {stats['indexed']} docs, "
+                        f"{stats['chunks_added']} chunks in {stats.get('elapsed_seconds', '?')}s"
+                    )
+                except Exception as e:
+                    print(f"[ERROR] Migration failed: {e}")
+                    print("[FALLBACK] Attempting regular index instead...")
+                    stats = orchestrator.index_all(force=True)
+            elif orchestrator.collection.count() == 0:
+                print("[INFO] No documents indexed. Running initial indexing...")
+                stats = orchestrator.index_all()
+                print(f"[INFO] Indexed {stats['indexed']} documents with {stats['chunks_added']} chunks")
+
+            # Start file watcher for auto-reindex on document changes
+            try:
+                watcher = DocumentWatcher(get_orchestrator, debounce_seconds=5.0)
+                observer = Observer()
+                observer.schedule(watcher, str(config.documents_dir), recursive=True)
+                observer.daemon = True
+                observer.start()
+                print(f"[WATCHER] Monitoring {config.documents_dir} for changes")
+            except Exception as e:
+                print(f"[WARN] Failed to start file watcher: {e}")
+                print("[WARN] Auto-reindexing disabled. Use reindex_documents tool manually.")
+
+            # Restore real stdout for MCP JSON-RPC, keep print() going to stderr
+            from . import _original_stdout
+
+            sys.stdout = _original_stdout
+            mcp.run()
+    except AlreadyRunningError as e:
+        print(f"[ERROR] {e}", file=sys.stderr)
+        raise SystemExit(ALREADY_RUNNING_EXIT_CODE) from e
 
 
 if __name__ == "__main__":
