@@ -13,6 +13,62 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
+# ---------------------------------------------------------------------------
+# Workaround: pytest 9.0.3 atexit cleanup_numbered_dir flake on Windows GHA
+# ---------------------------------------------------------------------------
+# pytest 9.0.3 registers _pytest.pathlib.cleanup_numbered_dir as an atexit
+# callback. The function calls ``root.glob("garbage-*")`` without try/except,
+# which can raise OSError on Windows when the temp directory is being
+# concurrently accessed by antivirus/indexer/another process during interpreter
+# shutdown. The OSError is logged as "Exception ignored in atexit callback"
+# and causes the Python process to exit with code 1, which CI treats as a
+# test failure even though every single test passed.
+#
+# Symptoms (only on Windows runners, both 3.11 and 3.12):
+#     ============================= 126 passed in 6.42s ==============================
+#     Exception ignored in atexit callback: <function cleanup_numbered_dir at ...>
+#     Traceback (most recent call last):
+#       File ".../pathlib.py", line 371, in cleanup_numbered_dir
+#         for path in root.glob("garbage-*"):
+#       File "pathlib.py", line 953, in glob
+#         ...
+#     ##[error]Process completed with exit code 1.
+#
+# Upstream issue lineage: pytest-dev/pytest#7491 family; the inner ``try_cleanup``
+# helper already swallows OSError, but the outer ``cleanup_numbered_dir`` does
+# not protect the ``glob("garbage-*")`` line that triggers it on Windows.
+#
+# We patch the function inside the ``_pytest.pathlib`` module BEFORE the first
+# tmp_path fixture runs (which is when ``make_numbered_dir_with_cleanup`` calls
+# ``atexit.register(cleanup_numbered_dir, ...)`` and binds the global lookup).
+# Because ``conftest.py`` is imported at collection time — well before any
+# fixture resolution — the registered atexit callback is already the safe
+# wrapper and the OSError is contained.
+#
+# Remove this block once pytest ships a real fix for the cleanup race.
+try:
+    import _pytest.pathlib as _pp
+
+    # Public attribute on this module so the regression test in
+    # test_pytest_atexit_patch.py can verify the wrapper is in place
+    # without poking at closure cells.
+    _ORIGINAL_CLEANUP_NUMBERED_DIR = _pp.cleanup_numbered_dir
+
+    def _safe_cleanup_numbered_dir(*args, **kwargs):
+        """OSError-safe wrapper around pytest's atexit tmp_path cleanup."""
+        try:
+            return _ORIGINAL_CLEANUP_NUMBERED_DIR(*args, **kwargs)
+        except OSError:
+            # Race during interpreter shutdown — leftovers will be removed on
+            # the next pytest run via the same cleanup mechanism.
+            return None
+
+    _pp.cleanup_numbered_dir = _safe_cleanup_numbered_dir
+except Exception:
+    # Never let the workaround itself break test collection.
+    _ORIGINAL_CLEANUP_NUMBERED_DIR = None
+
+
 @pytest.fixture
 def mock_embedding():
     """Mock FastEmbed to avoid model download in CI."""
