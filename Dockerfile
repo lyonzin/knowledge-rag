@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 LABEL maintainer="Lyon. <lyonzin@users.noreply.github.com>"
 LABEL description="Local RAG System for Claude Code — Hybrid search + Cross-encoder Reranking + 12 MCP Tools + 20 Format Parsers"
