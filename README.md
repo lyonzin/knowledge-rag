@@ -33,11 +33,21 @@ pip install knowledge-rag → restart Claude Code → search_knowledge("your que
 
 ---
 
-## What's New in v3.6.0
+## What's New in v3.8.0
 
-### Multi-Language Code Parsing
+### Lazy-Loaded Embeddings — Cheaper Idle Processes
 
-Language-aware extraction for **C**, **C++**, **JavaScript**, **TypeScript**, and **XML** — functions, classes, structs, interfaces, imports, and namespaces are captured as searchable metadata. Total supported formats: **20**.
+The FastEmbed ONNX model (~200MB resident) now loads on the **first query**, not at startup. Idle `knowledge-rag` processes are now genuinely cheap. Why this matters: MCP stdio is one-process-per-client by protocol — multiple Claude Code windows, Claude Desktop + IDE simultaneously, or review/approval flows that open extra connections all spawn their own processes. Before v3.8.0, every one of them paid the full embedding-model cost up front. Now only processes that actually serve queries load the model. Public API is unchanged.
+
+### Opt-In Single-Instance Guard
+
+For users who measured their setup and want a hard cap of one server per `data_dir`:
+
+```bash
+export KNOWLEDGE_RAG_SINGLE_INSTANCE=1
+```
+
+A second instance exits immediately with code 75. **OFF by default** so multi-client MCP usage continues to work unchanged. Stale-PID recovery + SIGINT/SIGTERM cleanup wired correctly. Full guide in [docs/single-instance.md](docs/single-instance.md). Sample MCP config in [examples/mcp-config-single-instance.json](examples/mcp-config-single-instance.json).
 
 ### 5 Ways to Install
 
@@ -53,6 +63,7 @@ All methods produce the same MCP server. See [Installation](#installation) for f
 
 ### Recent Highlights
 
+- **v3.8.0** — Lazy-load embeddings, opt-in single-instance guard, version sync across PyPI/NPM/Docker
 - **v3.6.0** — Multi-language code parsing (C/C++/JS/TS/XML), NPM wrapper, Docker image, automated release pipeline
 - **v3.5.2** — CUDA DLL auto-discovery from pip packages, graceful GPU→CPU fallback, explicit CPU provider (no CUDA noise when `gpu: false`), BASE_DIR resolution fix for editable installs
 - **v3.5.1** — Remove Python `<3.13` upper bound — 3.13 and 3.14 now supported
@@ -1065,6 +1076,17 @@ A second instance exits immediately with code 75. Default is OFF (multi-client f
 ---
 
 ## Changelog
+
+### v3.8.0 (2026-05-10)
+
+- **NEW**: Lazy-load FastEmbed embedding model (~200MB ONNX runtime). Loads on first query instead of startup — idle `knowledge-rag` processes are now cheap, which matters when MCP stdio clients spawn parallel server processes (multiple Claude Code windows, Claude Desktop + IDE, etc.). Public API unchanged. (#32)
+- **NEW**: Opt-in single-instance guard via `KNOWLEDGE_RAG_SINGLE_INSTANCE=1` env var. **OFF by default** — multi-client MCP usage continues to work unchanged. When enabled, a second server process for the same `data_dir` exits with code 75 (`EX_TEMPFAIL`). Includes stale-PID recovery and SIGINT/SIGTERM handlers. See [docs/single-instance.md](docs/single-instance.md). (#33, original concept by @Hohlas in #31)
+- **NEW**: `examples/mcp-config-single-instance.json` — sample MCP client config for the opt-in guard.
+- **DOCS**: New `docs/single-instance.md` — when to use, when NOT to use, troubleshooting, full activation reference.
+- **DOCS**: README troubleshooting section for "Multiple MCP clients spawn duplicate servers" + memory-usage note for lazy embeddings.
+- **CHORE**: Sync version across `pyproject.toml`, `mcp_server/__init__.py`, and `npm/package.json` (was drifting since v3.5.x).
+- **CHORE**: pytest `tmp_path_retention_count=1` to avoid Windows atexit cleanup race in CI.
+- **ROADMAP**: Tracked v4.0 shared-service architecture (one daemon, many thin MCP clients) as the long-term fix for multi-process resource duplication. (#34)
 
 ### Unreleased
 
