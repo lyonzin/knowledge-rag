@@ -47,13 +47,18 @@ jobs:
           pip install pytest pytest-cov
 
       - name: Run tests with coverage
+        # Force bash on Windows too — the default pwsh shell propagates ANY
+        # stderr write as a non-zero exit code through its $LASTEXITCODE
+        # handling in some configurations, even when pytest itself exited
+        # cleanly. Bash inherits pytest's actual return code.
+        shell: bash
         env:
           # Forbid any HuggingFace network call. Tests must mock TextEmbedding
           # / TextCrossEncoder. A leaked real download (race condition spawning
           # a daemon thread, missing mock, etc.) would otherwise hang on slow
           # Windows runners and produce "ValueError: I/O operation on closed
-          # file" during interpreter shutdown -> exit code 1 even though all
-          # tests pass. With OFFLINE=1, any leak fails fast and visibly.
+          # file" during interpreter shutdown. With OFFLINE=1, any leak fails
+          # fast and visibly.
           HF_HUB_OFFLINE: "1"
           TRANSFORMERS_OFFLINE: "1"
           # Disable HF Hub download progress bars (they spawn worker threads
