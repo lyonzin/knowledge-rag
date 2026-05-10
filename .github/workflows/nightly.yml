@@ -30,7 +30,7 @@ jobs:
     name: "Nightly — Chaos suite"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -52,7 +52,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -76,7 +76,7 @@ jobs:
     name: "Nightly — Determinism (full suite x3)"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -104,7 +104,7 @@ jobs:
     timeout-minutes: 60
     continue-on-error: true   # mutmut output is exploratory, never blocking
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -129,7 +129,7 @@ jobs:
             || true
           mutmut results > mutation-report.txt
           cat mutation-report.txt >> $GITHUB_STEP_SUMMARY
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: mutation-report
           path: mutation-report.txt
@@ -140,7 +140,7 @@ jobs:
     if: failure()
     needs: [chaos, soak, determinism]
     steps:
-      - uses: actions/github-script@v8
+      - uses: actions/github-script@v9
         with:
           script: |
             const date = new Date().toISOString().split("T")[0];

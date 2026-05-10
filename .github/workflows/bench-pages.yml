@@ -29,7 +29,7 @@ jobs:
     name: "Run benchmarks + build dashboard"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -119,24 +119,24 @@ jobs:
           print("Dashboard written to site/")
           PY
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: bench-dashboard
           path: site/
 
       - name: Setup Pages
         if: github.event_name == 'push'
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
         continue-on-error: true   # Pages may not be enabled on the repo yet
 
       - name: Upload to Pages
         if: github.event_name == 'push'
-        uses: actions/upload-pages-artifact@v4
+        uses: actions/upload-pages-artifact@v5
         with:
           path: site
         continue-on-error: true
 
       - name: Deploy to Pages
         if: github.event_name == 'push'
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
         continue-on-error: true
