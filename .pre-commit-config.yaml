@@ -1,0 +1,80 @@
+# Pre-commit configuration for knowledge-rag
+#
+# Hooks run on `git commit`. Install once with:
+#     pre-commit install
+#
+# Run on the whole repo manually:
+#     pre-commit run --all-files
+#
+# CI runs the same hooks via .github/workflows/quality-gate.yml so contributors
+# can never bypass them by skipping pre-commit locally.
+
+default_install_hook_types: [pre-commit, commit-msg]
+default_stages: [pre-commit]
+fail_fast: false  # report all failures, not just the first
+
+repos:
+  # ── Generic hygiene ────────────────────────────────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: '\.md$'  # markdown sometimes uses trailing space for line breaks
+      - id: end-of-file-fixer
+      - id: check-yaml
+        args: [--unsafe]  # GHA workflows use !!tags
+      - id: check-json
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: mixed-line-ending
+        args: [--fix=lf]
+        exclude: '^npm/'  # npm tooling occasionally normalizes to CRLF on Windows
+
+  # ── Ruff: lint + format (Python) ──────────────────────────────────────────
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.4
+    hooks:
+      - id: ruff
+        args: [--fix]
+        files: '^(mcp_server/|tests/|scripts/|bench/)'
+      - id: ruff-format
+        files: '^(mcp_server/|tests/|scripts/|bench/)'
+
+  # ── Secret scanning ───────────────────────────────────────────────────────
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.0
+    hooks:
+      - id: gitleaks
+
+  # ── Project-specific: version sync ────────────────────────────────────────
+  - repo: local
+    hooks:
+      - id: version-sync
+        name: Version sync (pyproject / __init__ / npm)
+        entry: python scripts/check_version_sync.py
+        language: system
+        files: '^(pyproject\.toml|mcp_server/__init__\.py|npm/package\.json)$'
+        pass_filenames: false
+
+  # ── Commit message: conventional commits ──────────────────────────────────
+  - repo: https://github.com/compilerla/conventional-pre-commit
+    rev: v3.6.0
+    hooks:
+      - id: conventional-pre-commit
+        stages: [commit-msg]
+        args:
+          - --strict
+          # Allowed types — keep aligned with CONTRIBUTING.md
+          - feat
+          - fix
+          - docs
+          - chore
+          - refactor
+          - test
+          - perf
+          - build
+          - ci
+          - style
+          - revert

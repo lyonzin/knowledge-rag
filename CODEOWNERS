@@ -1,1 +1,40 @@
-* @lyonzin
+# CODEOWNERS — knowledge-rag
+#
+# Anyone listed here is automatically requested for review on PRs that touch
+# the matching paths. With branch protection requiring code-owner review,
+# nothing in this file can be merged without an approval from @lyonzin.
+#
+# Syntax: https://docs.github.com/en/repositories/managing-your-repositories-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default — every PR needs Lyon
+*                               @lyonzin
+
+# Workflows + CI infrastructure (highest leverage, must be reviewed carefully)
+/.github/                       @lyonzin
+/.github/workflows/             @lyonzin
+/.pre-commit-config.yaml        @lyonzin
+
+# Release & versioning
+/pyproject.toml                 @lyonzin
+/mcp_server/__init__.py         @lyonzin
+/npm/package.json               @lyonzin
+/scripts/check_version_sync.py  @lyonzin
+
+# Security-sensitive code paths
+/mcp_server/server.py           @lyonzin
+/mcp_server/instance_lock.py    @lyonzin
+/mcp_server/preflight.py        @lyonzin
+/Dockerfile                     @lyonzin
+/install.sh                     @lyonzin
+/install.ps1                    @lyonzin
+
+# Governance documents
+/CONTRIBUTING.md                @lyonzin
+/CODE_OF_CONDUCT.md             @lyonzin
+/SECURITY.md                    @lyonzin
+/CODEOWNERS                     @lyonzin
+/LICENSE                        @lyonzin
+
+# Tests & benches (lighter review, but still owner)
+/tests/                         @lyonzin
+/bench/                         @lyonzin

@@ -1,0 +1,78 @@
+name: Feature request
+description: Suggest a new capability or improvement
+title: "[Feature] "
+labels: ["enhancement", "needs-triage"]
+assignees:
+  - lyonzin
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for proposing a feature. Help us evaluate by filling every section.
+
+        Note: feature requests that conflict with the project's design principles (local-first, zero external servers, MCP-native) are unlikely to be accepted. Proposals that fit those principles get prioritized.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / use case
+      description: |
+        What are you trying to do? Describe the actual workflow or pain point.
+        Avoid jumping straight to a solution — focus on the underlying need.
+      placeholder: |
+        I work with multilingual documents (Portuguese + English) and the current
+        keyword router only matches English security terms. When I search "evasão de credenciais"
+        I get zero hits even though I have related Portuguese-language docs.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed
+    attributes:
+      label: Proposed solution
+      description: How would you solve this? Be specific.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: |
+        What other approaches did you think about? Why does the proposed one win?
+        Mention if you tried existing config options or MCP tools that came close.
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope estimate
+      description: How big is this change in your view?
+      options:
+        - Tiny — config flag or new keyword in existing list
+        - Small — single function or new MCP tool
+        - Medium — new module, touches one of search/index/embed
+        - Large — architectural change, new dependency, breaking change
+    validations:
+      required: true
+
+  - type: dropdown
+    id: contribution
+    attributes:
+      label: Are you willing to contribute?
+      options:
+        - "Yes — I will open the PR myself"
+        - "Yes — I can help review or test"
+        - "No — flagging for the maintainer to decide"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Code of Conduct
+      options:
+        - label: I agree to follow this project's [Code of Conduct](https://github.com/lyonzin/knowledge-rag/blob/master/CODE_OF_CONDUCT.md)
+          required: true
+        - label: I searched existing issues and discussions for similar proposals
+          required: true

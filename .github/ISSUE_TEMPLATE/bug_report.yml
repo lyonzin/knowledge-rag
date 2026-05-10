@@ -1,0 +1,119 @@
+name: Bug report
+description: Report a defect in knowledge-rag
+title: "[Bug] "
+labels: ["bug", "needs-triage"]
+assignees:
+  - lyonzin
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report. Complete every section so we can reproduce quickly.
+
+        For security issues, do **not** use this form — see [SECURITY.md](https://github.com/lyonzin/knowledge-rag/blob/master/SECURITY.md).
+
+  - type: input
+    id: version
+    attributes:
+      label: knowledge-rag version
+      description: "Output of `pip show knowledge-rag | grep Version` or `npx knowledge-rag --version`"
+      placeholder: "3.8.1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: Install method
+      options:
+        - pip (PyPI)
+        - npx (NPM wrapper)
+        - Docker (ghcr.io)
+        - From source (git clone + pip install -e .)
+        - Other (describe below)
+    validations:
+      required: true
+
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+      description: "Output of `python --version`"
+      placeholder: "3.12.5"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - Windows
+        - macOS
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: A clear description of the bug. What did you observe?
+      placeholder: |
+        When I run `search_knowledge(query="kerberoast", category="security")`, I get 0 results
+        even though I have indexed 100+ security documents.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps. Include exact commands and inputs.
+      value: |
+        1. Install: `pip install knowledge-rag==X.Y.Z`
+        2. Run: `...`
+        3. Observe: `...`
+      render: markdown
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / stack traces
+      description: |
+        Paste relevant output. **Redact secrets, paths with usernames, or any sensitive data.**
+        Logs from `mcp_server.server` print to stderr.
+      render: shell
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Relevant config (redacted)
+      description: |
+        Paste relevant lines from `config.yaml` if it influences the bug.
+        **Redact any private paths or identifiers.**
+      render: yaml
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Code of Conduct
+      options:
+        - label: I agree to follow this project's [Code of Conduct](https://github.com/lyonzin/knowledge-rag/blob/master/CODE_OF_CONDUCT.md)
+          required: true
+        - label: I searched existing issues and confirmed this is not a duplicate
+          required: true
+        - label: This is **not** a security vulnerability (those go through [SECURITY.md](https://github.com/lyonzin/knowledge-rag/blob/master/SECURITY.md))
+          required: true

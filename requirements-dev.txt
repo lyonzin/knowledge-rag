@@ -1,0 +1,33 @@
+# Development dependencies for knowledge-rag contributors.
+#
+# Install:
+#     pip install -r requirements-dev.txt
+#
+# Production dependencies live in pyproject.toml [project.dependencies].
+# Keep this file lean — only what's needed to run tests, linters, and benches.
+
+# ── Linting & formatting ────────────────────────────────────────────────────
+ruff>=0.14.0,<1.0
+pre-commit>=3.7.0,<5.0
+
+# ── Tests ───────────────────────────────────────────────────────────────────
+pytest>=9.0.0,<10.0
+pytest-cov>=7.0.0
+pytest-rerunfailures>=14.0    # flake detection (Pillar 2: Stability)
+pytest-memray>=1.7.0; sys_platform != "win32"  # memory baseline (Pillar 3); memray Linux/macOS only
+pytest-benchmark>=4.0.0       # micro-benchmarks
+pytest-timeout>=2.3.0         # safety net for hung tests
+hypothesis>=6.100.0            # property-based testing (Pillar 4: Versatility)
+
+# ── Type checking & quality ─────────────────────────────────────────────────
+mypy>=1.11.0
+interrogate>=1.7.0             # docstring coverage (Pillar 7)
+radon>=6.0.1                   # cyclomatic complexity
+vulture>=2.13                  # dead-code detection
+
+# ── Security & supply chain ─────────────────────────────────────────────────
+bandit>=1.7.10                 # SAST (Pillar 1: Security)
+pip-audit>=2.7.3               # CVE check on installed deps
+
+# ── Mutation testing (nightly only, optional locally) ───────────────────────
+# mutmut>=2.5.0

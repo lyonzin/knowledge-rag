@@ -32,8 +32,9 @@ documents/**/*.csv
 models_cache/
 *.onnx
 
-# Local scripts (not part of distribution)
-scripts/
+# Local one-off scripts (not part of distribution)
+# Note: tracked utility scripts under scripts/ (e.g. check_version_sync.py) are
+# committed; this rule only catches ad-hoc local files outside that directory.
 setup-notebook.ps1
 demo-real.yml
 documents/.sync-log.txt
