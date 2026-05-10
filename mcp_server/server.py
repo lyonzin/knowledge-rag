@@ -136,6 +136,17 @@ class FastEmbedEmbeddings:
     Uses ONNX Runtime in-process for embedding generation.
     No external server required (replaces Ollama).
     Model: BAAI/bge-small-en-v1.5 (384-dim, MTEB score 62.x)
+
+    Lazy-loading (since v3.8.0):
+        The ONNX model (~200MB resident) is NOT loaded in __init__.
+        It loads on the first call to __call__/embed_query/embed_documents.
+        This makes idle MCP server processes cheap, which matters when
+        multiple stdio clients spawn parallel knowledge-rag processes
+        (e.g. multiple Claude Code windows). The CrossEncoderReranker
+        already follows this same pattern.
+
+        Thread-safe: load is guarded by a lock so concurrent first-callers
+        don't double-initialize the model.
     """
 
     @staticmethod
@@ -174,20 +185,34 @@ class FastEmbedEmbeddings:
     def __init__(self, model: str = None):
         self.model_name = model or config.embedding_model
         self._dim = config.embedding_dim
-        kwargs = {"model_name": self.model_name, "cache_dir": str(config.models_cache_dir)}
-        if config.gpu_acceleration:
-            self._setup_cuda_dll_paths()
-            kwargs["providers"] = ["CUDAExecutionProvider", "CPUExecutionProvider"]
-            print(f"[INFO] Loading embedding model: {self.model_name} ({self._dim}D) [GPU accelerated]...")
-            try:
-                self._model = TextEmbedding(**kwargs)
-                print("[INFO] Embedding model loaded successfully [GPU]")
-            except (ValueError, RuntimeError) as e:
-                print(f"[WARN] GPU init failed ({e}), falling back to CPU...")
-                kwargs["providers"] = ["CPUExecutionProvider"]
-                self._model = TextEmbedding(**kwargs)
-                print("[INFO] Embedding model loaded successfully [CPU fallback]")
-        else:
+        # Build kwargs once; defer the heavy TextEmbedding(**kwargs) call to first use.
+        self._init_kwargs = {"model_name": self.model_name, "cache_dir": str(config.models_cache_dir)}
+        self._gpu = bool(config.gpu_acceleration)
+        self._model: Optional[TextEmbedding] = None
+        self._load_lock = threading.Lock()
+
+    def _load_model(self) -> None:
+        """Load the ONNX model on demand. Idempotent and thread-safe."""
+        if self._model is not None:
+            return
+        with self._load_lock:
+            if self._model is not None:  # double-checked under the lock
+                return
+            kwargs = dict(self._init_kwargs)
+            if self._gpu:
+                self._setup_cuda_dll_paths()
+                kwargs["providers"] = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+                print(f"[INFO] Loading embedding model: {self.model_name} ({self._dim}D) [GPU accelerated]...")
+                try:
+                    self._model = TextEmbedding(**kwargs)
+                    print("[INFO] Embedding model loaded successfully [GPU]")
+                    return
+                except (ValueError, RuntimeError) as e:
+                    print(f"[WARN] GPU init failed ({e}), falling back to CPU...")
+                    kwargs["providers"] = ["CPUExecutionProvider"]
+                    self._model = TextEmbedding(**kwargs)
+                    print("[INFO] Embedding model loaded successfully [CPU fallback]")
+                    return
             kwargs["providers"] = ["CPUExecutionProvider"]
             print(f"[INFO] Loading embedding model: {self.model_name} ({self._dim}D)...")
             self._model = TextEmbedding(**kwargs)
@@ -203,6 +228,7 @@ class FastEmbedEmbeddings:
         if not input:
             return []
 
+        self._load_model()
         try:
             embeddings = list(self._model.embed(input))
             return [emb.tolist() for emb in embeddings]
