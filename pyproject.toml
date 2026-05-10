@@ -95,6 +95,11 @@ exclude = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+# Limit retained tmp_path directories to avoid pytest's atexit cleanup race
+# on Windows (cleanup_numbered_dir + pathlib.glob "garbage-*" can fail when
+# many tmp dirs accumulate). Tests run isolated; we don't need history.
+tmp_path_retention_count = 1
+tmp_path_retention_policy = "failed"
 
 [tool.ruff]
 target-version = "py311"
