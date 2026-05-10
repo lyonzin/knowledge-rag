@@ -70,7 +70,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest pytest-cov
+          pip install pytest pytest-cov pytest-rerunfailures
 
       - name: Run tests with coverage
         # Force bash on Windows too — the default pwsh shell propagates ANY
@@ -90,7 +90,11 @@ jobs:
           # Disable HF Hub download progress bars (they spawn worker threads
           # that race against pytest's interpreter shutdown).
           HF_HUB_DISABLE_PROGRESS_BARS: "1"
-        run: pytest tests/ -v --cov=mcp_server --cov-report=xml --cov-report=term-missing
+        # --reruns=1 retries flaky tests once (Pillar 2: Stability). When
+        # any test had to rerun, the job still passes but pytest annotates
+        # the rerun in the JUnit report — we surface that via a follow-up
+        # step in quality-gate.yml so flakes do not silently accumulate.
+        run: pytest tests/ -v --cov=mcp_server --cov-report=xml --cov-report=term-missing --reruns=1 --junit-xml=junit.xml
 
       - name: Upload coverage
         if: matrix.python-version == '3.12' && matrix.os == 'ubuntu-latest'

@@ -382,6 +382,124 @@ jobs:
           fi
 
   # ════════════════════════════════════════════════════════════════════════
+  # PILLAR 2: STABILITY
+  # ════════════════════════════════════════════════════════════════════════
+
+  test-count:
+    name: "Pillar 2 — Test count anti-regression"
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install package + pytest
+        shell: bash
+        run: |
+          pip install -e .
+          pip install pytest
+      - name: Verify test count has not regressed
+        shell: bash
+        env:
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+          HF_HUB_DISABLE_PROGRESS_BARS: "1"
+        run: python scripts/check_test_count.py
+
+  # ════════════════════════════════════════════════════════════════════════
+  # PILLAR 3: MEMORY
+  # ════════════════════════════════════════════════════════════════════════
+
+  memory-baseline:
+    name: "Pillar 3 — Memory baseline"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install package + memory deps
+        shell: bash
+        run: |
+          pip install -e .
+          pip install pytest psutil numpy
+      - name: Run memory baseline tests
+        shell: bash
+        env:
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+          HF_HUB_DISABLE_PROGRESS_BARS: "1"
+        run: pytest tests/test_memory_baseline.py -v
+
+  property-fuzz:
+    name: "Pillar 4 (innovation) — Property-based fuzz"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install package + hypothesis
+        shell: bash
+        run: |
+          pip install -e .
+          pip install pytest hypothesis
+      - name: Run property-based parser tests
+        shell: bash
+        env:
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+          HF_HUB_DISABLE_PROGRESS_BARS: "1"
+        run: pytest tests/test_ingestion_property.py -v
+
+  # ════════════════════════════════════════════════════════════════════════
+  # PILLAR 5: SCALABILITY (perf gate)
+  # ════════════════════════════════════════════════════════════════════════
+
+  perf-bench:
+    name: "Pillar 5 — Performance regression gate (10%)"
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    # Initial rollout: report-only while we establish baseline stability.
+    # Promotes to required after a few cycles of clean nightly bench data.
+    continue-on-error: true
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install package + bench deps
+        shell: bash
+        run: |
+          pip install -e .
+          pip install pytest pytest-benchmark psutil numpy
+      - name: Bench against PR branch
+        shell: bash
+        env:
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+          HF_HUB_DISABLE_PROGRESS_BARS: "1"
+        run: pytest bench/ --benchmark-only --benchmark-min-rounds=3 --benchmark-json=branch.json
+      - name: Checkout master and bench it
+        shell: bash
+        run: |
+          git fetch origin master:master-base
+          git checkout master-base -- bench/ scripts/ mcp_server/
+          pytest bench/ --benchmark-only --benchmark-min-rounds=3 --benchmark-json=master.json || echo "[WARN] master bench step incomplete; treating as informational"
+          git checkout HEAD -- bench/ scripts/ mcp_server/
+      - name: Compare and gate
+        shell: bash
+        run: |
+          if [ -f master.json ] && [ -f branch.json ]; then
+            python scripts/check_perf_regression.py master.json branch.json
+          else
+            echo "[INFO] Master bench unavailable on first run; gate is non-blocking."
+          fi
+
+  # ════════════════════════════════════════════════════════════════════════
   # SUMMARY
   # ════════════════════════════════════════════════════════════════════════
 
@@ -395,10 +513,13 @@ jobs:
       - semgrep
       - pip-audit
       - gitleaks
+      # Pillar 3 — Memory
+      - memory-baseline
       # Pillar 4 — Versatility
       - versatility-presets
       - versatility-locale
       - versatility-formats
+      - property-fuzz
       # Pillar 6 — Versioning
       - version-sync
       - api-surface
@@ -418,9 +539,11 @@ jobs:
           echo "| 1 Security | Semgrep | ${{ needs.semgrep.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 1 Security | pip-audit | ${{ needs.pip-audit.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 1 Security | Gitleaks | ${{ needs.gitleaks.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 3 Memory | Baseline tests | ${{ needs.memory-baseline.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 4 Versatility | Preset matrix | ${{ needs.versatility-presets.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 4 Versatility | Locale matrix | ${{ needs.versatility-locale.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 4 Versatility | Format matrix | ${{ needs.versatility-formats.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 4 Versatility | Property-based fuzz | ${{ needs.property-fuzz.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 6 Versioning | Version sync | ${{ needs.version-sync.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 6 Versioning | API surface | ${{ needs.api-surface.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 6 Versioning | Backwards-compat | ${{ needs.backwards-compat.result }} |" >> $GITHUB_STEP_SUMMARY
@@ -434,9 +557,11 @@ jobs:
             "${{ needs.semgrep.result }}" \
             "${{ needs.pip-audit.result }}" \
             "${{ needs.gitleaks.result }}" \
+            "${{ needs.memory-baseline.result }}" \
             "${{ needs.versatility-presets.result }}" \
             "${{ needs.versatility-locale.result }}" \
             "${{ needs.versatility-formats.result }}" \
+            "${{ needs.property-fuzz.result }}" \
             "${{ needs.version-sync.result }}" \
             "${{ needs.api-surface.result }}" \
             "${{ needs.backwards-compat.result }}" \

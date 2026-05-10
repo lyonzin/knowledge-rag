@@ -1,0 +1,34 @@
+# Codecov configuration for knowledge-rag.
+#
+# Enforces Pillar 2 (Stability): coverage cannot regress by more than
+# 0.5 percentage points without explicit override.
+# https://docs.codecov.com/docs/codecov-yaml
+
+coverage:
+  status:
+    project:
+      default:
+        # Compare against the base branch (master). Block PR when total
+        # project coverage drops by more than 0.5pp.
+        target: auto
+        threshold: 0.5%
+        if_ci_failed: error   # don't pretend coverage is OK if tests broke
+        only_pulls: false
+    patch:
+      default:
+        # New code introduced by the PR must itself be at least 70% covered.
+        target: 70%
+        threshold: 5%
+        if_ci_failed: error
+
+comment:
+  layout: "header, diff, flags, components, files"
+  behavior: default
+  require_changes: false   # always post the comment so PR readers see numbers
+
+ignore:
+  - "tests/**"
+  - "bench/**"
+  - "scripts/**"
+  - "documents/**"
+  - "**/__init__.py"

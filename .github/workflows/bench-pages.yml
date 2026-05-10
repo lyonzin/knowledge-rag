@@ -1,0 +1,142 @@
+name: Bench Dashboard
+
+# Runs ``bench/`` on every push to master and publishes the results
+# as a static dashboard on GitHub Pages. Public transparency is the
+# differentiator vs other RAG projects in the OSS space.
+#
+# IMPORTANT: this workflow is dormant until the maintainer enables
+# GitHub Pages on the repo (Settings -> Pages -> Source: GitHub Actions).
+# Until then, the deploy step skips with a warning. Bench results are
+# still produced as workflow artifacts so the data is available for
+# manual inspection.
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  bench:
+    name: "Run benchmarks + build dashboard"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install package + bench deps
+        shell: bash
+        run: |
+          pip install -e .
+          pip install pytest pytest-benchmark psutil numpy
+
+      - name: Run benchmarks
+        shell: bash
+        env:
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+          HF_HUB_DISABLE_PROGRESS_BARS: "1"
+        run: |
+          pytest bench/ --benchmark-only --benchmark-min-rounds=5 \
+            --benchmark-json=bench-current.json
+
+      - name: Build static dashboard
+        shell: bash
+        run: |
+          mkdir -p site
+          # Inline a minimal chart.js dashboard — keeps the workflow
+          # self-contained without external assets.
+          python - <<'PY'
+          import json
+          import datetime
+          from pathlib import Path
+
+          data = json.loads(Path("bench-current.json").read_text(encoding="utf-8"))
+          rows = []
+          for b in data.get("benchmarks", []):
+              rows.append({
+                  "name": b["name"],
+                  "median_ns": b["stats"]["median"] * 1_000_000_000,
+                  "ops": b["stats"]["ops"],
+              })
+          rows.sort(key=lambda r: r["median_ns"])
+          payload = {
+              "generated_at": datetime.datetime.utcnow().isoformat() + "Z",
+              "commit": "${{ github.sha }}"[:7],
+              "results": rows,
+          }
+          Path("site/data.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+          html = """<!DOCTYPE html>
+          <html lang="en"><head><meta charset="utf-8">
+          <title>knowledge-rag — live performance dashboard</title>
+          <style>
+            body { font-family: -apple-system, sans-serif; max-width: 960px; margin: 2em auto; padding: 0 1em; color: #1a1a1a; }
+            h1 { border-bottom: 2px solid #2c5282; padding-bottom: 0.3em; }
+            table { width: 100%; border-collapse: collapse; margin-top: 1em; }
+            th, td { padding: 0.5em; border-bottom: 1px solid #e2e8f0; text-align: left; }
+            th { background: #edf2f7; }
+            tr:hover { background: #f7fafc; }
+            .meta { color: #718096; font-size: 0.9em; }
+          </style></head><body>
+          <h1>knowledge-rag — performance dashboard</h1>
+          <p class="meta">Updated automatically on every push to master. Median wall time per benchmark.</p>
+          <p class="meta" id="meta"></p>
+          <table id="results">
+            <thead><tr><th>Benchmark</th><th>Median time</th><th>Ops/sec</th></tr></thead>
+            <tbody></tbody>
+          </table>
+          <script>
+            fetch("data.json").then(r => r.json()).then(d => {
+              document.getElementById("meta").textContent =
+                "Commit " + d.commit + " — generated " + d.generated_at;
+              const tbody = document.querySelector("#results tbody");
+              for (const r of d.results) {
+                const tr = document.createElement("tr");
+                const median = r.median_ns < 1000 ? r.median_ns.toFixed(1) + " ns"
+                  : r.median_ns < 1_000_000 ? (r.median_ns/1000).toFixed(1) + " μs"
+                  : r.median_ns < 1_000_000_000 ? (r.median_ns/1_000_000).toFixed(2) + " ms"
+                  : (r.median_ns/1_000_000_000).toFixed(2) + " s";
+                tr.innerHTML = "<td>" + r.name + "</td><td>" + median +
+                  "</td><td>" + r.ops.toFixed(2) + "</td>";
+                tbody.appendChild(tr);
+              }
+            });
+          </script>
+          </body></html>
+          """
+          Path("site/index.html").write_text(html, encoding="utf-8")
+          print("Dashboard written to site/")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-dashboard
+          path: site/
+
+      - name: Setup Pages
+        if: github.event_name == 'push'
+        uses: actions/configure-pages@v5
+        continue-on-error: true   # Pages may not be enabled on the repo yet
+
+      - name: Upload to Pages
+        if: github.event_name == 'push'
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+        continue-on-error: true
+
+      - name: Deploy to Pages
+        if: github.event_name == 'push'
+        uses: actions/deploy-pages@v4
+        continue-on-error: true

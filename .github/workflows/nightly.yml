@@ -1,0 +1,158 @@
+name: Nightly
+
+# Nightly resilience matrix that does not run on every PR (too slow)
+# but catches deeper regressions weekly:
+#   * mutation testing — finds tests that are too weak
+#   * soak test — proves no leak after 1h continuous queries
+#   * chaos suite — failure injection (HF down, ONNX zeroed, etc.)
+#   * determinism — full suite x3 to surface flaky tests
+#
+# Failures DO NOT block PRs. They open issues so the maintainer triages
+# during the next session. This is by design — nightly is a safety net,
+# not a wall.
+
+on:
+  schedule:
+    # 02:00 UTC every day
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write   # required to auto-open issues for nightly findings
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  chaos:
+    name: "Nightly — Chaos suite"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install package + chaos deps
+        shell: bash
+        run: |
+          pip install -e .
+          pip install pytest psutil numpy
+      - name: Run chaos tests
+        shell: bash
+        env:
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+          HF_HUB_DISABLE_PROGRESS_BARS: "1"
+        run: pytest -m chaos -v
+
+  soak:
+    name: "Nightly — Soak test (1h queries)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install package + memory deps
+        shell: bash
+        run: |
+          pip install -e .
+          pip install pytest psutil numpy
+      - name: Run extended memory baselines
+        shell: bash
+        env:
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+          HF_HUB_DISABLE_PROGRESS_BARS: "1"
+          # The baseline test caps iterations at 1000; the env var lets
+          # the nightly job amplify to 50000 iterations for a true soak.
+          KNOWLEDGE_RAG_SOAK_ITERATIONS: "50000"
+        run: pytest tests/test_memory_baseline.py -v
+
+  determinism:
+    name: "Nightly — Determinism (full suite x3)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install package + tests
+        shell: bash
+        run: |
+          pip install -e .
+          pip install pytest pytest-cov pytest-rerunfailures hypothesis psutil numpy pyyaml
+      - name: Run suite three times
+        shell: bash
+        env:
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+          HF_HUB_DISABLE_PROGRESS_BARS: "1"
+        run: |
+          set -e
+          for run in 1 2 3; do
+            echo "=== Determinism run ${run} ==="
+            pytest tests/ -q --no-header --tb=no
+          done
+
+  mutation:
+    name: "Nightly — Mutation testing (mutmut)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    continue-on-error: true   # mutmut output is exploratory, never blocking
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install package + mutmut
+        shell: bash
+        run: |
+          pip install -e .
+          pip install mutmut pytest pytest-cov hypothesis psutil numpy pyyaml
+      - name: Run mutation testing on instance_lock + preflight
+        shell: bash
+        # Limit mutation scope to recently authored modules — running
+        # mutmut on server.py would take hours per nightly. We grow the
+        # scope as more modules earn full annotations + tests.
+        env:
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+          HF_HUB_DISABLE_PROGRESS_BARS: "1"
+        run: |
+          mutmut run \
+            --paths-to-mutate=mcp_server/instance_lock.py,mcp_server/preflight.py \
+            --runner='pytest tests/test_instance_lock.py tests/test_preflight.py -q' \
+            || true
+          mutmut results > mutation-report.txt
+          cat mutation-report.txt >> $GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mutation-report
+          path: mutation-report.txt
+
+  open-issue-on-failure:
+    name: "Auto-issue on nightly failure"
+    runs-on: ubuntu-latest
+    if: failure()
+    needs: [chaos, soak, determinism]
+    steps:
+      - uses: actions/github-script@v8
+        with:
+          script: |
+            const date = new Date().toISOString().split("T")[0];
+            const title = `[NIGHTLY] Resilience workflow failed on ${date}`;
+            const body = `One or more nightly resilience jobs failed on ${date}.\n\n` +
+              `See the run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\n\n` +
+              `Triage: investigate which job (chaos / soak / determinism) is red and decide whether ` +
+              `to fix the underlying flake or relax the threshold.`;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body,
+              labels: ["nightly", "needs-triage"],
+            });
