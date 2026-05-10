@@ -56,7 +56,10 @@ def read_npm_version() -> str:
     data = json.loads(PACKAGE_JSON.read_text(encoding="utf-8"))
     if "version" not in data:
         raise RuntimeError(f"Could not find version in {PACKAGE_JSON}")
-    return data["version"]
+    version = data["version"]
+    if not isinstance(version, str):
+        raise RuntimeError(f"npm version field has wrong type: {type(version).__name__}")
+    return version
 
 
 def main() -> int:

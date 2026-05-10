@@ -161,7 +161,7 @@ def collect_package_surface() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _diff_function(name: str, old: dict, new: dict, breaks: list[str]) -> None:
+def _diff_function(name: str, old: dict[str, Any], new: dict[str, Any], breaks: list[str]) -> None:
     old_args = old.get("args", [])
     new_args = new.get("args", [])
 
@@ -193,7 +193,7 @@ def _diff_function(name: str, old: dict, new: dict, breaks: list[str]) -> None:
         breaks.append(f"{name}: async/sync flipped")
 
 
-def diff_surfaces(old_surface: dict, new_surface: dict) -> list[str]:
+def diff_surfaces(old_surface: dict[str, Any], new_surface: dict[str, Any]) -> list[str]:
     breaks: list[str] = []
     old_modules = old_surface.get("modules", {})
     new_modules = new_surface.get("modules", {})

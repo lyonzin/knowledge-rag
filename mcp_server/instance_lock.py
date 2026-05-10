@@ -155,7 +155,7 @@ def single_instance_lock() -> Iterator[Optional[Path]]:
     # Wire signal handlers so SIGINT/SIGTERM cleanup the lock before exit
     previous_handlers: dict[int, object] = {}
 
-    def _signal_cleanup(signum: int, frame) -> None:
+    def _signal_cleanup(signum: int, frame: object) -> None:
         _remove_if_ours(lock_path)
         # Restore original handler and re-raise so default action runs
         prev = previous_handlers.get(signum, signal.SIG_DFL)

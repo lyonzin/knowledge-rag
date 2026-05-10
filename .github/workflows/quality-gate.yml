@@ -210,6 +210,178 @@ jobs:
         run: pytest tests/test_backwards_compat.py -v
 
   # ════════════════════════════════════════════════════════════════════════
+  # PILLAR 4: VERSATILITY
+  # ════════════════════════════════════════════════════════════════════════
+
+  versatility-presets:
+    name: "Pillar 4 — Preset matrix"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install minimal deps for YAML parsing
+        shell: bash
+        run: pip install pytest pyyaml
+      - name: Run preset structural validation
+        shell: bash
+        run: pytest tests/test_presets.py -v
+
+  versatility-locale:
+    name: "Pillar 4 — Locale matrix"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install package
+        shell: bash
+        run: |
+          pip install -e .
+          pip install pytest
+      - name: Run locale + encoding tests
+        shell: bash
+        env:
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+          HF_HUB_DISABLE_PROGRESS_BARS: "1"
+        run: pytest tests/test_locale.py -v
+
+  versatility-formats:
+    name: "Pillar 4 — Format smoke matrix"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install package
+        shell: bash
+        run: |
+          pip install -e .
+          pip install pytest
+      - name: Run format smoke tests
+        shell: bash
+        env:
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+          HF_HUB_DISABLE_PROGRESS_BARS: "1"
+        run: pytest tests/test_format_smoke.py -v
+
+  # ════════════════════════════════════════════════════════════════════════
+  # PILLAR 7: QUALITY
+  # ════════════════════════════════════════════════════════════════════════
+
+  mypy:
+    name: "Pillar 7 — mypy strict (gradual)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install mypy + package
+        shell: bash
+        run: |
+          pip install mypy
+          pip install -e .
+      - name: Run mypy on annotated modules + scripts
+        shell: bash
+        # Gradual rollout: only modules already fully annotated. As legacy
+        # code earns annotations, append paths here.
+        run: mypy mcp_server/instance_lock.py mcp_server/preflight.py scripts/
+
+  interrogate:
+    name: "Pillar 7 — Docstring coverage"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install interrogate
+      - name: Verify docstring coverage >= 80%
+        shell: bash
+        run: interrogate -c pyproject.toml mcp_server/
+
+  radon:
+    name: "Pillar 7 — Cyclomatic complexity"
+    runs-on: ubuntu-latest
+    # Report-only for now: we know Config / orchestrator.query are D/E
+    # (legacy hot-spots). Visibility helps the maintainer prioritize
+    # refactors without blocking unrelated PRs.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install radon
+      - name: Report C+ complexity blocks
+        shell: bash
+        run: |
+          echo "## Radon Cyclomatic Complexity (C and higher)" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          radon cc mcp_server/ -a -nc | tee -a $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          # Fail only when a NEW block is rated D+ — placeholder for now.
+          # The followup PR will diff against master baseline.
+
+  vulture:
+    name: "Pillar 7 — Dead code (vulture)"
+    runs-on: ubuntu-latest
+    continue-on-error: true   # report-only initially
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install vulture
+      - name: Scan for dead code (high-confidence only)
+        shell: bash
+        run: |
+          vulture mcp_server/ scripts/ .vulture_whitelist.py --min-confidence 80 \
+            | tee vulture-report.txt || true
+          if [ -s vulture-report.txt ] && grep -v "^$" vulture-report.txt > /dev/null; then
+            echo "## Vulture findings (informational)" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cat vulture-report.txt >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+  pr-size:
+    name: "Pillar 7 — PR size guard"
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    continue-on-error: true   # warn-only by design
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Measure code change size (excluding docs/lockfiles)
+        shell: bash
+        run: |
+          base="${{ github.event.pull_request.base.sha }}"
+          head="${{ github.event.pull_request.head.sha }}"
+          changed=$(git diff --numstat "${base}" "${head}" \
+            -- 'mcp_server/**' 'scripts/**' 'tests/**' 'bench/**' \
+            ':!*.md' ':!*.json' ':!*.lock' ':!*.txt' ':!*.yaml' ':!*.yml' \
+            | awk '{added+=$1; removed+=$2} END {print added+removed}')
+          changed=${changed:-0}
+          echo "## PR size: ${changed} lines changed (code only)" >> $GITHUB_STEP_SUMMARY
+          if [ "${changed}" -gt 500 ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "⚠️ This PR exceeds 500 lines of code change. Consider splitting into smaller PRs for easier review." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "(Warning only — this does not block merge.)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "✅ PR size is reasonable." >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # ════════════════════════════════════════════════════════════════════════
   # SUMMARY
   # ════════════════════════════════════════════════════════════════════════
 
@@ -218,13 +390,22 @@ jobs:
     runs-on: ubuntu-latest
     if: always()
     needs:
+      # Pillar 1 — Security
       - bandit
       - semgrep
       - pip-audit
       - gitleaks
+      # Pillar 4 — Versatility
+      - versatility-presets
+      - versatility-locale
+      - versatility-formats
+      # Pillar 6 — Versioning
       - version-sync
       - api-surface
       - backwards-compat
+      # Pillar 7 — Quality (blocking)
+      - mypy
+      - interrogate
     steps:
       - name: Aggregate results
         shell: bash
@@ -237,9 +418,14 @@ jobs:
           echo "| 1 Security | Semgrep | ${{ needs.semgrep.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 1 Security | pip-audit | ${{ needs.pip-audit.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 1 Security | Gitleaks | ${{ needs.gitleaks.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 4 Versatility | Preset matrix | ${{ needs.versatility-presets.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 4 Versatility | Locale matrix | ${{ needs.versatility-locale.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 4 Versatility | Format matrix | ${{ needs.versatility-formats.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 6 Versioning | Version sync | ${{ needs.version-sync.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 6 Versioning | API surface | ${{ needs.api-surface.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 6 Versioning | Backwards-compat | ${{ needs.backwards-compat.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 7 Quality | mypy strict | ${{ needs.mypy.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 7 Quality | Docstring coverage | ${{ needs.interrogate.result }} |" >> $GITHUB_STEP_SUMMARY
           # `skipped` is acceptable (PR-only jobs running on push events skip cleanly).
           # `cancelled` is acceptable (concurrency cancel of older runs).
           # Only `failure` blocks the gate.
@@ -248,9 +434,14 @@ jobs:
             "${{ needs.semgrep.result }}" \
             "${{ needs.pip-audit.result }}" \
             "${{ needs.gitleaks.result }}" \
+            "${{ needs.versatility-presets.result }}" \
+            "${{ needs.versatility-locale.result }}" \
+            "${{ needs.versatility-formats.result }}" \
             "${{ needs.version-sync.result }}" \
             "${{ needs.api-surface.result }}" \
-            "${{ needs.backwards-compat.result }}"; do
+            "${{ needs.backwards-compat.result }}" \
+            "${{ needs.mypy.result }}" \
+            "${{ needs.interrogate.result }}"; do
             if [[ "$r" == "failure" ]]; then
               echo "" >> $GITHUB_STEP_SUMMARY
               echo "❌ One or more pillars failed. Address the issues above before review." >> $GITHUB_STEP_SUMMARY
@@ -258,4 +449,4 @@ jobs:
             fi
           done
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "✅ All Quality Gate pillars passed." >> $GITHUB_STEP_SUMMARY
+          echo "✅ All blocking Quality Gate pillars passed." >> $GITHUB_STEP_SUMMARY
