@@ -85,7 +85,10 @@ jobs:
               ignore_args="${ignore_args} --ignore-vuln ${id}"
             done
           fi
-          pip-audit --strict ${ignore_args}
+          # --skip-editable avoids "Dependency not found on PyPI" when the
+          # PR itself is the one bumping the version that does not yet
+          # exist on PyPI (release PRs).
+          pip-audit --strict --skip-editable ${ignore_args}
 
   gitleaks:
     name: "Pillar 1 — Gitleaks (secrets)"
@@ -504,6 +507,8 @@ jobs:
           fi
       - name: Compare and gate
         shell: bash
+        env:
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
         run: |
           if [ -f master.json ] && [ -f branch.json ]; then
             python scripts/check_perf_regression.py master.json branch.json

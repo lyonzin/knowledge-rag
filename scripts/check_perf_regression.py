@@ -21,11 +21,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
 
 REGRESSION_THRESHOLD = 0.10  # 10%
+BYPASS_LABEL = "skip-perf-gate"
 
 
 def _load(path: Path) -> dict[str, dict[str, Any]]:
@@ -96,6 +98,17 @@ def main() -> int:
         print()
 
     if regressions:
+        # Honor the bypass label when set deliberately on a PR
+        labels = {label.strip() for label in os.environ.get("PR_LABELS", "").split(",") if label.strip()}
+        if BYPASS_LABEL in labels:
+            print(f"[WARN] Regressions detected but PR has '{BYPASS_LABEL}' label — bypassing:", file=sys.stderr)
+            for name, m, b, delta in regressions:
+                print(
+                    f"  - {name}  median {m:.2f} -> {b:.2f}  ({_format_delta(delta)})",
+                    file=sys.stderr,
+                )
+            return 0
+
         print("[FAIL] Performance regressions detected:", file=sys.stderr)
         for name, m, b, delta in regressions:
             print(
@@ -105,7 +118,7 @@ def main() -> int:
         print(
             "\nIf this regression is intentional and accepted:\n"
             "  - Document the trade-off in the PR description\n"
-            "  - Apply the 'skip-perf-gate' label to bypass\n",
+            f"  - Apply the '{BYPASS_LABEL}' label to bypass\n",
             file=sys.stderr,
         )
         return 1
