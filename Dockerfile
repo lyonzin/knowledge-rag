@@ -8,8 +8,8 @@ WORKDIR /app
 
 COPY pyproject.toml requirements.txt ./
 COPY mcp_server/ ./mcp_server/
-COPY documents/examples/ ./documents/examples/
-COPY LICENSE README.md ./
+COPY presets/ ./presets/
+COPY config.example.yaml LICENSE README.md ./
 
 RUN pip install --no-cache-dir -r requirements.txt
 
