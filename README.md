@@ -1122,7 +1122,7 @@ A second instance exits immediately with code 75. Default is OFF (multi-client f
 - **NEW** CI matrix expanded to 9 cells: Linux + Windows + **macOS** × 3.11 + 3.12 + **3.13** (all required at v3.9.0; macOS / 3.13 promoted from experimental after two clean cycles).
 - **NEW** Governance docs: `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`, `.github/PULL_REQUEST_TEMPLATE.md`, 3 issue templates, expanded `CODEOWNERS`.
 - **NEW** Pre-commit hooks: ruff, gitleaks, version-sync, conventional commits.
-- **CHORE** `.codecov.yml` enforcing coverage trend gate (-0.5pp blocks; new code ≥ 70%).
+- **CHORE** `.github/codecov.yml` enforcing coverage trend gate (-0.5pp blocks; new code ≥ 70%).
 
 ### v3.8.1 (2026-05-10) — hotfix
 

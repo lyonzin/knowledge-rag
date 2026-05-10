@@ -103,7 +103,7 @@ jobs:
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITLEAKS_CONFIG: .gitleaks.toml
+          GITLEAKS_CONFIG: .github/gitleaks.toml
 
   dependency-review:
     name: "Pillar 1 — Dependency Review"
@@ -347,7 +347,7 @@ jobs:
       - name: Scan for dead code (high-confidence only)
         shell: bash
         run: |
-          vulture mcp_server/ scripts/ .vulture_whitelist.py --min-confidence 80 \
+          vulture mcp_server/ scripts/ tests/_vulture_whitelist.py --min-confidence 80 \
             | tee vulture-report.txt || true
           if [ -s vulture-report.txt ] && grep -v "^$" vulture-report.txt > /dev/null; then
             echo "## Vulture findings (informational)" >> $GITHUB_STEP_SUMMARY

@@ -16,10 +16,9 @@ description = "Test fixtures, sample configs, and AAR documents"
 paths = [
     '''(?i)tests/fixtures/.*''',
     '''(?i)examples/.*''',
-    '''(?i)documents/aar/.*\.md$''',  # AAR write-ups may include redacted hashes
     '''(?i)config\.example\.ya?ml$''',
     '''(?i)presets/.*\.ya?ml$''',
-    '''^\.gitleaks\.toml$''',  # this file
+    '''^\.github/gitleaks\.toml$''',  # this file
 ]
 
 [[allowlists]]

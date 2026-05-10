@@ -19,9 +19,19 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
-      - run: |
+      - name: Install package + test deps
+        # Same install list as ci.yml — collect-only loads every test
+        # module including those that depend on hypothesis / psutil / numpy
+        # / pyyaml. Without these the run errors out during collection.
+        shell: bash
+        env:
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+          HF_HUB_DISABLE_PROGRESS_BARS: "1"
+        run: |
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest
+          pip install pytest pytest-cov pytest-rerunfailures hypothesis psutil numpy pyyaml
           pytest tests/ -v
 
   build:
