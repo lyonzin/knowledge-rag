@@ -129,6 +129,18 @@ class QueryCache:
 # =============================================================================
 
 
+class EmbeddingError(RuntimeError):
+    """Raised when embedding generation fails after a successful model load."""
+
+
+class EmbeddingModelLoadError(RuntimeError):
+    """Raised when the embedding model itself cannot be loaded.
+
+    Distinct from EmbeddingError so callers can decide whether to retry
+    (transient runtime failure) or surface a hard configuration problem.
+    """
+
+
 class FastEmbedEmbeddings:
     """
     FastEmbed-based embedding function for ChromaDB (v1.4.0+ compatible).
@@ -190,33 +202,57 @@ class FastEmbedEmbeddings:
         self._gpu = bool(config.gpu_acceleration)
         self._model: Optional[TextEmbedding] = None
         self._load_lock = threading.Lock()
+        # Sticky failure flag: once load fails, subsequent calls re-raise immediately
+        # instead of looping through download/retry. Same pattern as CrossEncoderReranker.
+        self._load_failed: Optional[Exception] = None
 
     def _load_model(self) -> None:
-        """Load the ONNX model on demand. Idempotent and thread-safe."""
+        """Load the ONNX model on demand. Idempotent and thread-safe.
+
+        Raises:
+            EmbeddingModelLoadError: when the underlying ONNX runtime cannot
+                instantiate the model (missing files, hash mismatch, etc.). The
+                exception is sticky — subsequent calls raise the same error
+                without retrying so callers do not loop through HF downloads.
+        """
         if self._model is not None:
             return
+        if self._load_failed is not None:
+            raise EmbeddingModelLoadError(
+                f"Embedding model previously failed to load: {self._load_failed}"
+            ) from self._load_failed
         with self._load_lock:
             if self._model is not None:  # double-checked under the lock
                 return
+            if self._load_failed is not None:
+                raise EmbeddingModelLoadError(
+                    f"Embedding model previously failed to load: {self._load_failed}"
+                ) from self._load_failed
             kwargs = dict(self._init_kwargs)
-            if self._gpu:
-                self._setup_cuda_dll_paths()
-                kwargs["providers"] = ["CUDAExecutionProvider", "CPUExecutionProvider"]
-                print(f"[INFO] Loading embedding model: {self.model_name} ({self._dim}D) [GPU accelerated]...")
-                try:
-                    self._model = TextEmbedding(**kwargs)
-                    print("[INFO] Embedding model loaded successfully [GPU]")
-                    return
-                except (ValueError, RuntimeError) as e:
-                    print(f"[WARN] GPU init failed ({e}), falling back to CPU...")
+            try:
+                if self._gpu:
+                    self._setup_cuda_dll_paths()
+                    kwargs["providers"] = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+                    print(f"[INFO] Loading embedding model: {self.model_name} ({self._dim}D) [GPU accelerated]...")
+                    try:
+                        self._model = TextEmbedding(**kwargs)
+                        print("[INFO] Embedding model loaded successfully [GPU]")
+                    except (ValueError, RuntimeError) as e:
+                        print(f"[WARN] GPU init failed ({e}), falling back to CPU...")
+                        kwargs["providers"] = ["CPUExecutionProvider"]
+                        self._model = TextEmbedding(**kwargs)
+                        print("[INFO] Embedding model loaded successfully [CPU fallback]")
+                else:
                     kwargs["providers"] = ["CPUExecutionProvider"]
+                    print(f"[INFO] Loading embedding model: {self.model_name} ({self._dim}D)...")
                     self._model = TextEmbedding(**kwargs)
-                    print("[INFO] Embedding model loaded successfully [CPU fallback]")
-                    return
-            kwargs["providers"] = ["CPUExecutionProvider"]
-            print(f"[INFO] Loading embedding model: {self.model_name} ({self._dim}D)...")
-            self._model = TextEmbedding(**kwargs)
-            print("[INFO] Embedding model loaded successfully")
+                    print("[INFO] Embedding model loaded successfully")
+            except Exception as exc:
+                # ONNXRuntimeError, FileNotFoundError, etc. — record and re-raise loud
+                self._load_failed = exc
+                self._model = None
+                print(f"[ERROR] Embedding model load FAILED: {exc}", file=sys.stderr)
+                raise EmbeddingModelLoadError(f"Failed to load embedding model: {exc}") from exc
 
     def __call__(self, input: List[str]) -> List[List[float]]:
         """
@@ -224,17 +260,38 @@ class FastEmbedEmbeddings:
 
         ChromaDB embedding_function interface: __call__(input: List[str]) -> List[List[float]]
         FastEmbed.embed() returns a generator, so we consume it into a list.
+
+        Raises:
+            EmbeddingModelLoadError: when the model could not be loaded.
+            EmbeddingError: when embedding generation fails after a successful load.
+
+        Behavior note (changed in v3.8.1):
+            Previously this method swallowed any exception and returned vectors
+            of zeros (``[[0.0]*dim for _ in input]``). That silently corrupted
+            the index — ChromaDB stored zero vectors as document embeddings,
+            ``count()`` returned the right number of chunks, smart-reindex
+            would skip them as "already indexed", and queries returned garbage
+            similarity scores. Failures are now LOUD: the caller (ChromaDB
+            ``add()``, MCP search tool, etc.) sees the real error and can
+            surface it to the user.
         """
         if not input:
             return []
 
-        self._load_model()
+        self._load_model()  # may raise EmbeddingModelLoadError
         try:
             embeddings = list(self._model.embed(input))
-            return [emb.tolist() for emb in embeddings]
-        except Exception as e:
-            print(f"[WARN] Embedding failed: {e}")
-            return [[0.0] * self._dim for _ in input]
+        except Exception as exc:
+            print(f"[ERROR] Embedding generation FAILED: {exc}", file=sys.stderr)
+            raise EmbeddingError(f"Embedding generation failed: {exc}") from exc
+
+        # Sanity check: model returned the right number of vectors with the right dim
+        if len(embeddings) != len(input):
+            raise EmbeddingError(f"Embedding count mismatch: expected {len(input)}, got {len(embeddings)}")
+        result = [emb.tolist() for emb in embeddings]
+        if result and len(result[0]) != self._dim:
+            raise EmbeddingError(f"Embedding dim mismatch: expected {self._dim}, got {len(result[0])}")
+        return result
 
     def name(self) -> str:
         """Return embedding function name (required by ChromaDB v1.4.0+)"""
