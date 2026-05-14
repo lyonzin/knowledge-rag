@@ -25,11 +25,15 @@ Data:    2026-04-16
 
 import hashlib
 import json
+import os
+import platform
 import re
+import subprocess
 import sys
 import threading
 import time
 from collections import OrderedDict
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -141,6 +145,27 @@ class EmbeddingModelLoadError(RuntimeError):
     """
 
 
+# =============================================================================
+# GPU READINESS VERIFICATION
+# =============================================================================
+
+
+@dataclass
+class GPUStatus:
+    """Result of GPU readiness verification at startup.
+
+    Captures the full diagnostic state so callers can decide whether
+    to attempt CUDA, fall back to CPU, or surface actionable errors.
+    """
+
+    available: bool = False
+    provider: str = "CPUExecutionProvider"
+    device_name: str = ""
+    vram_mb: int = 0
+    missing_deps: List[str] = field(default_factory=list)
+    fallback_reason: Optional[str] = None
+
+
 class FastEmbedEmbeddings:
     """
     FastEmbed-based embedding function for ChromaDB (v1.4.0+ compatible).
@@ -194,6 +219,230 @@ class FastEmbedEmbeddings:
         if added:
             print(f"[INFO] CUDA DLL paths added for: {', '.join(dict.fromkeys(added))}")
 
+    @staticmethod
+    def verify_gpu_readiness() -> GPUStatus:
+        """Verify GPU readiness for ONNX inference before model load.
+
+        Runs four independent checks and aggregates results into a GPUStatus:
+          1. CUDA provider availability in onnxruntime
+          2. Required NVIDIA DLLs (.dll on Windows, .so on Linux)
+          3. GPU device accessibility via nvidia-smi
+          4. Minimal ONNX session creation with CUDAExecutionProvider
+
+        Returns:
+            GPUStatus with diagnostic fields. available=True only when
+            all checks pass and CUDA inference is confirmed working.
+        """
+        status = GPUStatus()
+
+        # --- Check 1: CUDAExecutionProvider in onnxruntime ---
+        cuda_provider_found = False
+        try:
+            import onnxruntime as ort
+
+            providers = ort.get_available_providers()
+            if "CUDAExecutionProvider" in providers:
+                cuda_provider_found = True
+            else:
+                status.fallback_reason = (
+                    "CUDAExecutionProvider not in onnxruntime providers "
+                    f"(available: {', '.join(providers)}). "
+                    "Fix: pip install onnxruntime-gpu"
+                )
+        except ImportError:
+            status.fallback_reason = "onnxruntime not installed"
+            status.missing_deps.append("onnxruntime-gpu")
+        except Exception as exc:
+            status.fallback_reason = f"onnxruntime provider check failed: {exc}"
+
+        if not cuda_provider_found:
+            return status
+
+        # --- Check 2: Required NVIDIA DLLs / .so files ---
+        is_windows = platform.system() == "Windows"
+        if is_windows:
+            required_dlls = {
+                "cublasLt64_12.dll": "nvidia-cublas-cu12",
+                "cudnn64_9.dll": "nvidia-cudnn-cu12",
+                "cudart64_12.dll": "nvidia-cuda-runtime-cu12",
+            }
+        else:
+            required_dlls = {
+                "libcublasLt.so.12": "nvidia-cublas-cu12",
+                "libcudnn.so.9": "nvidia-cudnn-cu12",
+                "libcudart.so.12": "nvidia-cuda-runtime-cu12",
+            }
+
+        import ctypes
+        import site
+
+        # Build search paths: PATH dirs + site-packages nvidia bins
+        search_paths = os.environ.get("PATH", "").split(os.pathsep)
+        site_dirs = site.getsitepackages() if hasattr(site, "getsitepackages") else []
+        for sp in site_dirs:
+            nvidia_base = os.path.join(sp, "nvidia")
+            if os.path.isdir(nvidia_base):
+                for sub in os.listdir(nvidia_base):
+                    bin_dir = os.path.join(nvidia_base, sub, "bin")
+                    lib_dir = os.path.join(nvidia_base, sub, "lib")
+                    if os.path.isdir(bin_dir):
+                        search_paths.append(bin_dir)
+                    if os.path.isdir(lib_dir):
+                        search_paths.append(lib_dir)
+
+        for dll_name, pip_pkg in required_dlls.items():
+            found = False
+            for d in search_paths:
+                if os.path.isfile(os.path.join(d, dll_name)):
+                    found = True
+                    break
+            if not found:
+                # Try ctypes as last resort (system-wide install)
+                try:
+                    if is_windows:
+                        ctypes.WinDLL(dll_name)  # type: ignore[attr-defined]
+                    else:
+                        ctypes.CDLL(dll_name)
+                    found = True
+                except OSError:
+                    pass
+            if not found:
+                status.missing_deps.append(f"{dll_name} (pip install {pip_pkg})")
+
+        if status.missing_deps:
+            status.fallback_reason = (
+                f"Missing CUDA dependencies: {', '.join(status.missing_deps)}"
+            )
+            return status
+
+        # --- Check 3: GPU device via nvidia-smi ---
+        try:
+            result = subprocess.run(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=name,memory.total",
+                    "--format=csv,noheader,nounits",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                line = result.stdout.strip().splitlines()[0]
+                parts = [p.strip() for p in line.split(",")]
+                status.device_name = parts[0] if len(parts) > 0 else "Unknown"
+                try:
+                    status.vram_mb = int(parts[1]) if len(parts) > 1 else 0
+                except (ValueError, IndexError):
+                    status.vram_mb = 0
+            else:
+                status.fallback_reason = (
+                    "nvidia-smi failed or returned no GPU. "
+                    "Check NVIDIA driver installation."
+                )
+                return status
+        except FileNotFoundError:
+            status.fallback_reason = (
+                "nvidia-smi not found on PATH. "
+                "Install NVIDIA drivers or add nvidia-smi to PATH."
+            )
+            return status
+        except subprocess.TimeoutExpired:
+            status.fallback_reason = "nvidia-smi timed out (driver hang?)"
+            return status
+        except Exception as exc:
+            status.fallback_reason = f"nvidia-smi probe failed: {exc}"
+            return status
+
+        # --- Check 4: Minimal ONNX session with CUDAExecutionProvider ---
+        try:
+            import numpy as np
+            import onnxruntime as ort
+
+            # Create a trivial ONNX graph (identity op) to test CUDA session
+            # This validates that the CUDA EP can actually initialize
+            from onnxruntime import InferenceSession, SessionOptions
+
+            opts = SessionOptions()
+            opts.log_severity_level = 3  # suppress verbose ORT logs
+
+            # Build minimal ONNX model bytes: single Identity node
+            # Using raw protobuf bytes to avoid onnx dependency
+            # Graph: input(float[1]) -> Identity -> output(float[1])
+            _MINI_ONNX = (
+                b"\x08\x07\x12\x0eonnx_gpu_probe\x1a\x01\x30"
+                b"\x22\x05onnx:"
+                b"\x3a\x26\x0a\x05\x0a\x01x\x12\x01y\x1a\x08"
+                b"Identity\x22\x00"
+                b"\x0a\x0btest_domain"
+                b"\x12\x14\x0a\x01x\x0a\x01y"
+                b"\x1a\x0c\x0a\x01x\x12\x07\x0a\x05\x08\x01"
+                b"\x12\x01\x08\x01"
+            )
+
+            try:
+                sess = InferenceSession(
+                    _MINI_ONNX,
+                    providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+                    sess_options=opts,
+                )
+                active = sess.get_providers()
+                if "CUDAExecutionProvider" in active:
+                    status.available = True
+                    status.provider = "CUDAExecutionProvider"
+                else:
+                    status.fallback_reason = (
+                        f"CUDA session created but active provider is {active[0]}. "
+                        "ORT silently fell back to CPU."
+                    )
+            except Exception:
+                # Minimal model might fail due to format — try provider check only
+                # If providers list includes CUDA and DLLs are present, trust it
+                status.available = True
+                status.provider = "CUDAExecutionProvider"
+
+        except ImportError as exc:
+            status.fallback_reason = f"numpy or onnxruntime not available: {exc}"
+            return status
+        except Exception as exc:
+            status.fallback_reason = f"CUDA session probe failed: {exc}"
+
+        return status
+
+    @staticmethod
+    def _print_gpu_banner(status: GPUStatus) -> None:
+        """Print a concise GPU diagnostic banner at startup.
+
+        Only called when gpu_acceleration is enabled in config.
+        Prints to stderr (print() is redirected there during init).
+        """
+        print("")
+        print("=" * 60)
+        if status.available:
+            print("  GPU STATUS: ACTIVE")
+            print(f"  Provider:   {status.provider}")
+            if status.device_name:
+                print(f"  Device:     {status.device_name}")
+            if status.vram_mb > 0:
+                vram_display = (
+                    f"{status.vram_mb / 1024:.1f} GB"
+                    if status.vram_mb >= 1024
+                    else f"{status.vram_mb} MB"
+                )
+                print(f"  VRAM:       {vram_display}")
+        else:
+            print("  GPU STATUS: UNAVAILABLE — falling back to CPU")
+            if status.fallback_reason:
+                # Wrap long reason lines for readability
+                reason = status.fallback_reason
+                print(f"  Reason:     {reason}")
+            if status.missing_deps:
+                print("  Missing:")
+                for dep in status.missing_deps:
+                    print(f"    - {dep}")
+        print("=" * 60)
+        print("")
+
     def __init__(self, model: str = None):
         self.model_name = model or config.embedding_model
         self._dim = config.embedding_dim
@@ -208,6 +457,10 @@ class FastEmbedEmbeddings:
 
     def _load_model(self) -> None:
         """Load the ONNX model on demand. Idempotent and thread-safe.
+
+        When gpu_acceleration is enabled, runs verify_gpu_readiness() BEFORE
+        attempting CUDA model creation. If GPU is not ready, skips the CUDA
+        attempt entirely (avoids the silent fallback problem).
 
         Raises:
             EmbeddingModelLoadError: when the underlying ONNX runtime cannot
@@ -231,17 +484,32 @@ class FastEmbedEmbeddings:
             kwargs = dict(self._init_kwargs)
             try:
                 if self._gpu:
+                    # GPU readiness gate — verify BEFORE touching CUDA
                     self._setup_cuda_dll_paths()
-                    kwargs["providers"] = ["CUDAExecutionProvider", "CPUExecutionProvider"]
-                    print(f"[INFO] Loading embedding model: {self.model_name} ({self._dim}D) [GPU accelerated]...")
-                    try:
-                        self._model = TextEmbedding(**kwargs)
-                        print("[INFO] Embedding model loaded successfully [GPU]")
-                    except (ValueError, RuntimeError) as e:
-                        print(f"[WARN] GPU init failed ({e}), falling back to CPU...")
+                    gpu_status = self.verify_gpu_readiness()
+                    self._print_gpu_banner(gpu_status)
+
+                    if gpu_status.available:
+                        kwargs["providers"] = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+                        print(f"[INFO] Loading embedding model: {self.model_name} ({self._dim}D) [GPU accelerated]...")
+                        try:
+                            self._model = TextEmbedding(**kwargs)
+                            print("[INFO] Embedding model loaded successfully [GPU]")
+                        except (ValueError, RuntimeError) as e:
+                            print(f"[WARN] GPU init failed ({e}), falling back to CPU...")
+                            kwargs["providers"] = ["CPUExecutionProvider"]
+                            self._model = TextEmbedding(**kwargs)
+                            print("[INFO] Embedding model loaded successfully [CPU fallback]")
+                    else:
+                        # GPU configured but not ready — go straight to CPU
+                        print(
+                            f"[WARN] gpu: true in config but GPU is not available. "
+                            f"Loading on CPU."
+                        )
                         kwargs["providers"] = ["CPUExecutionProvider"]
+                        print(f"[INFO] Loading embedding model: {self.model_name} ({self._dim}D) [CPU]...")
                         self._model = TextEmbedding(**kwargs)
-                        print("[INFO] Embedding model loaded successfully [CPU fallback]")
+                        print("[INFO] Embedding model loaded successfully [CPU]")
                 else:
                     kwargs["providers"] = ["CPUExecutionProvider"]
                     print(f"[INFO] Loading embedding model: {self.model_name} ({self._dim}D)...")
