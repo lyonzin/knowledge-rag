@@ -45,6 +45,12 @@ documents/README-CATEGORIES.md
 *.tar.gz
 *.bak
 
+# Type-checker cache (per-Python-version, auto-generated)
+.mypy_cache/
+
+# Hypothesis property-based testing cache (auto-generated)
+.hypothesis/
+
 # OS files
 .DS_Store
 Thumbs.db
