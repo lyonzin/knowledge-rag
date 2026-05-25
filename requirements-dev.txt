@@ -26,7 +26,7 @@ radon>=6.0.1                   # cyclomatic complexity
 vulture>=2.13                  # dead-code detection
 
 # ── Security & supply chain ─────────────────────────────────────────────────
-bandit>=1.7.10                 # SAST (Pillar 1: Security)
+bandit>=1.9.4                 # SAST (Pillar 1: Security)
 pip-audit>=2.7.3               # CVE check on installed deps
 
 # ── Memory + benchmarking (Pillar 3 + Pillar 5) ─────────────────────────────
