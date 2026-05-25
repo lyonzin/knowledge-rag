@@ -331,6 +331,7 @@ flowchart LR
 
 - Python 3.11+
 - Claude Code CLI
+- *…or any other MCP client (Claude Desktop, Cursor, VS Code, Antigravity, opencode, Windsurf) — see [Use with other MCP clients](#use-with-other-mcp-clients)*
 - ~200MB disk for model cache (auto-downloaded on first run)
 - *Optional:* NVIDIA GPU + CUDA for accelerated embeddings (`pip install knowledge-rag[gpu]` + `models.embedding.gpu: true` in config)
 
@@ -445,6 +446,70 @@ Add to `~/.claude.json`:
 ```
 > Replace `YOUR_USER` with your username, or use the full path from `echo $HOME`.
 </details>
+
+### Use with other MCP clients
+
+`knowledge-rag` is a standard **stdio MCP server** — it works with any MCP-compatible client, not only Claude Code. The launch command is the same everywhere (the `python -m mcp_server.server` from whichever install method you picked); only the **config file location** and **JSON shape** differ per client.
+
+#### Clients using the standard `mcpServers` format
+
+For **Claude Desktop, Cursor, Antigravity, and Windsurf**, use the same block — only the file location changes:
+
+```json
+{
+  "mcpServers": {
+    "knowledge-rag": {
+      "command": "/home/YOUR_USER/knowledge-rag/venv/bin/python",
+      "args": ["-m", "mcp_server.server"]
+    }
+  }
+}
+```
+
+> **Windows**: set `command` to the full path of `venv\Scripts\python.exe`.
+
+| Client | Config file | Notes |
+|---|---|---|
+| **Claude Code** | use `claude mcp add …` (see install methods above) | The CLI writes `~/.claude.json` for you — manual edits to it aren't reliably picked up. |
+| **Claude Desktop** | macOS: `~/Library/Application Support/Claude/claude_desktop_config.json` · Windows: `%APPDATA%\Claude\claude_desktop_config.json` | Easiest: **Settings → Developer → Edit Config** opens the correct file (avoids the Windows Store/MSIX path quirk). |
+| **Cursor** | `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (per project) | — |
+| **Antigravity** | macOS/Linux: `~/.gemini/antigravity/mcp_config.json` · Windows: `%USERPROFILE%\.gemini\antigravity\mcp_config.json` | Open via Agent panel → **"…" → Manage MCP Servers → View raw config**. |
+| **Windsurf** | `~/.codeium/windsurf/mcp_config.json` (global only) | Easiest: Cascade panel → MCP → **View raw config**. |
+
+#### VS Code — uses a `servers` key
+
+VS Code (Copilot MCP) nests servers under **`servers`**, not `mcpServers`. Put this in `.vscode/mcp.json` (workspace) or the file opened by the **MCP: Open User Configuration** command:
+
+```json
+{
+  "servers": {
+    "knowledge-rag": {
+      "type": "stdio",
+      "command": "/home/YOUR_USER/knowledge-rag/venv/bin/python",
+      "args": ["-m", "mcp_server.server"]
+    }
+  }
+}
+```
+
+#### opencode — uses an `mcp` key
+
+opencode nests servers under **`mcp`**, takes `command` as a single **array**, and uses `environment` instead of `env`. Put this in `opencode.json` (project root) or `~/.config/opencode/opencode.json` (global):
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "knowledge-rag": {
+      "type": "local",
+      "command": ["/home/YOUR_USER/knowledge-rag/venv/bin/python", "-m", "mcp_server.server"],
+      "enabled": true
+    }
+  }
+}
+```
+
+> **Any other MCP client**: point it at the same command + args (`…/venv/bin/python -m mcp_server.server`). If it speaks stdio MCP, knowledge-rag works — only the config file's location and key naming differ. Check your client's docs for the exact path.
 
 ### Verify
 
