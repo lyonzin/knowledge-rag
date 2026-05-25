@@ -1918,14 +1918,24 @@ def search_knowledge(query: str, max_results: int = 5, category: str = None, hyb
     """
     Hybrid search combining semantic search + BM25 keyword search with cross-encoder reranking.
 
+    Read-only. No side effects.
+
     Args:
-        query: Search query text
+        query: Search query text (1–3 keywords recommended; phrase queries also work)
         max_results: Maximum number of results (default: 5, max: 20)
-        category: Optional category filter (security, ctf, logscale, development, general, redteam, blueteam)
-        hybrid_alpha: Balance between semantic and keyword search (0.0 = keyword only, 1.0 = semantic only, default: 0.3)
+        category: Optional category filter — one of: security, ctf, logscale, development, general,
+            redteam, blueteam. Call list_categories() first to see available categories and counts.
+        hybrid_alpha: Balance between semantic and keyword search. 0.0 = keyword-only (best for exact
+            technical terms like CVE IDs or tool names), 0.3 = balanced default, 1.0 = semantic-only
+            (best for conceptual or natural-language queries).
 
     Returns:
-        JSON string with search results including content, source, relevance score, and search method used
+        JSON string with results including content chunks, source filepath, relevance score, and
+        search method used. Returns chunks, not full document content.
+
+    Usage: Primary search tool — use for any topic or keyword lookup. Prefer search_similar() when
+    you already have a reference document and want more like it. Prefer get_document() when you
+    already know the exact filepath and need the full content.
     """
     if not query or not query.strip():
         return json.dumps({"status": "error", "message": "Query cannot be empty"})
@@ -1964,13 +1974,22 @@ def search_knowledge(query: str, max_results: int = 5, category: str = None, hyb
 @mcp.tool()
 def get_document(filepath: str) -> str:
     """
-    Get the full content of a specific document.
+    Get the full content of a specific document by filepath.
+
+    Read-only. No side effects.
 
     Args:
-        filepath: Path to the document file
+        filepath: Relative path to the document within the documents directory
+            (e.g., "security/technique.md"). Must be an indexed file — use
+            list_documents() to browse available paths, or search_knowledge()
+            to find the filepath by topic first.
 
     Returns:
-        JSON string with document content and metadata
+        JSON string with full document content and metadata (filepath, category, size).
+
+    Usage: Use when you need the complete text of a known file — search_knowledge()
+    returns chunks, not full docs. Use search_knowledge() first to find the filepath
+    if unknown. Use list_documents() to browse all available files by category.
     """
     orchestrator = get_orchestrator()
     doc = orchestrator.get_document(filepath)
@@ -1986,12 +2005,21 @@ def reindex_documents(force: bool = False, full_rebuild: bool = False) -> str:
     """
     Index or reindex all documents in the knowledge base.
 
+    Mutating — modifies the vector index. CPU/IO intensive for full_rebuild (~6 min for 200 docs).
+
     Args:
-        force: If True, smart reindex (detects changes + rebuilds BM25). FAST.
-        full_rebuild: If True, nuclear rebuild (deletes everything, re-embeds ALL). Use if model changed.
+        force: If True, smart reindex (detects changed files + rebuilds BM25 index). Fast (~5s
+            for 200 docs). Use after manually editing files on disk outside of add_document().
+        full_rebuild: If True, nuclear rebuild — deletes all vectors and re-embeds everything
+            from scratch. Use only if the embedding model changed or the index is corrupted.
 
     Returns:
-        JSON string with indexing statistics
+        JSON string with indexing statistics (docs processed, added, skipped, errors).
+
+    Usage: Normal workflow does not require this — add_document(), update_document(), and
+    add_from_url() all auto-index on call. Use force=True only after direct filesystem edits.
+    Use full_rebuild=True only for model upgrades or index corruption. No arguments runs a
+    fast incremental pass.
     """
     orchestrator = get_orchestrator()
 
@@ -2010,7 +2038,18 @@ def reindex_documents(force: bool = False, full_rebuild: bool = False) -> str:
 
 @mcp.tool()
 def list_categories() -> str:
-    """List all document categories with their document counts."""
+    """
+    List all document categories with their document counts.
+
+    Read-only. No side effects. Reflects the live index state.
+
+    Returns:
+        JSON string with category names, document counts per category, and total document count.
+
+    Usage: Use before filtering search_knowledge() or list_documents() by category to see
+    which categories exist and how many documents each contains. Use get_index_stats() instead
+    for broader system health metrics (model name, cache hit rate, BM25 status).
+    """
     orchestrator = get_orchestrator()
     categories = orchestrator.list_categories()
     return json.dumps(
@@ -2023,8 +2062,20 @@ def list_documents(category: str = None) -> str:
     """
     List all indexed documents, optionally filtered by category.
 
+    Read-only. No side effects.
+
     Args:
-        category: Optional category filter
+        category: Optional category filter. Must be a valid category name — call
+            list_categories() to see available options (e.g., security, ctf, logscale,
+            development, general, redteam, blueteam).
+
+    Returns:
+        JSON string with list of document filepaths, categories, and metadata for each indexed file.
+
+    Usage: Use to browse what's in the index or verify a specific file is indexed. Use
+    list_categories() first to see valid category names. Use search_knowledge() when you
+    want to find documents by topic rather than browsing the full list. Use get_document()
+    to read a specific file once you have its filepath.
     """
     orchestrator = get_orchestrator()
     docs = orchestrator.list_documents(category=category)
@@ -2037,7 +2088,20 @@ def list_documents(category: str = None) -> str:
 
 @mcp.tool()
 def get_index_stats() -> str:
-    """Get statistics about the knowledge base index."""
+    """
+    Get statistics and health metrics for the knowledge base index.
+
+    Read-only. No side effects.
+
+    Returns:
+        JSON string with system metrics: total documents, total chunks, embedding model name,
+        BM25 status, query cache hit rate, and file watcher status.
+
+    Usage: Use for system health checks — verifying the embedding model loaded, checking
+    index population, or monitoring cache efficiency. Use list_categories() for per-category
+    document counts instead. Use evaluate_retrieval() to measure actual search quality with
+    test queries.
+    """
     orchestrator = get_orchestrator()
     stats = orchestrator.get_stats()
     return json.dumps({"status": "success", "stats": stats}, indent=2)
@@ -2051,17 +2115,23 @@ def get_index_stats() -> str:
 @mcp.tool()
 def add_document(content: str, filepath: str, category: str = "general") -> str:
     """
-    Add a new document to the knowledge base from raw content.
+    Add a new document to the knowledge base from raw text content.
 
-    Saves the content to the documents directory and indexes it immediately.
+    Mutating — writes a file to disk and indexes it immediately. No auth required.
 
     Args:
-        content: Full text content of the document
-        filepath: Relative path within documents dir (e.g., "security/new-technique.md")
-        category: Document category (security, ctf, logscale, development, general)
+        content: Full text content of the document (markdown supported)
+        filepath: Relative path within documents directory (e.g., "security/new-technique.md").
+            The subdirectory should match the category.
+        category: Document category — one of: security, ctf, logscale, development, general,
+            redteam, blueteam (default: general)
 
     Returns:
-        JSON string with indexing results
+        JSON string with indexing results (filepath, chunks created, status).
+
+    Usage: Use to add new documents from text content. Use add_from_url() instead when
+    the source is a web page. Use update_document() to replace content of an existing file.
+    The document is immediately searchable after this call — no manual reindex needed.
     """
     if not content or not content.strip():
         return json.dumps({"status": "error", "message": "Content cannot be empty"})
@@ -2080,16 +2150,22 @@ def add_document(content: str, filepath: str, category: str = "general") -> str:
 @mcp.tool()
 def update_document(filepath: str, content: str) -> str:
     """
-    Update an existing document in the knowledge base.
+    Update the content of an existing document in the knowledge base.
 
-    Removes old chunks and re-indexes with new content.
+    Mutating — overwrites the file on disk and re-indexes immediately. Old chunks are
+    removed and replaced with new ones. Full content replacement, not a patch.
 
     Args:
-        filepath: Full path to the document file
-        content: New content for the document
+        filepath: Full or relative path to the document file. Must be an already-indexed
+            file — use list_documents() to find valid paths.
+        content: New full-text content to replace the existing content entirely
 
     Returns:
-        JSON string with update results
+        JSON string with update results (old chunk count, new chunk count, status).
+
+    Usage: Use to replace a document's content completely. Use add_document() to create
+    a new file instead. Use remove_document() to delete without replacing. Changes are
+    immediately searchable — no manual reindex needed.
     """
     if not filepath:
         return json.dumps({"status": "error", "message": "Filepath required"})
@@ -2110,12 +2186,22 @@ def remove_document(filepath: str, delete_file: bool = False) -> str:
     """
     Remove a document from the knowledge base index.
 
+    Mutating — removes index entries. If delete_file=True, also permanently deletes
+    the file from disk (irreversible, cannot be undone).
+
     Args:
-        filepath: Path to the document file
-        delete_file: If True, also delete the file from disk (default: False)
+        filepath: Path to the document file. Must be an indexed document — use
+            list_documents() to find valid paths.
+        delete_file: If True, permanently deletes the file from disk in addition to
+            removing from the index (default: False).
 
     Returns:
-        JSON string with removal results
+        JSON string with removal results (filepath, status).
+
+    Usage: Use to unindex a document while keeping the file on disk (default). Set
+    delete_file=True only for permanent removal. Use update_document() to replace
+    content instead of removing. Use reindex_documents(force=True) if you deleted
+    the file manually on disk outside of this tool.
     """
     if not filepath:
         return json.dumps({"status": "error", "message": "Filepath required"})
@@ -2132,17 +2218,23 @@ def remove_document(filepath: str, delete_file: bool = False) -> str:
 @mcp.tool()
 def add_from_url(url: str, category: str = "general", title: str = None) -> str:
     """
-    Fetch content from a URL and add it to the knowledge base.
+    Fetch content from a URL, convert to markdown, and add to the knowledge base.
 
-    Fetches the page, strips HTML, converts to markdown, and indexes.
+    Mutating — makes an outbound HTTP request (requires internet access), strips HTML,
+    converts to markdown, saves to disk, and indexes immediately.
 
     Args:
-        url: URL to fetch content from
-        category: Document category (default: general)
-        title: Optional title for the document (auto-detected if not provided)
+        url: Full URL to fetch (https:// required). The page must be publicly accessible.
+        category: Document category — one of: security, ctf, logscale, development, general,
+            redteam, blueteam (default: general)
+        title: Optional document title. Auto-detected from the page's <title> tag if omitted.
 
     Returns:
-        JSON string with indexing results
+        JSON string with indexing results (detected title, filepath, chunks created, status).
+
+    Usage: Use to ingest web content (writeups, blog posts, documentation pages) directly
+    by URL. Use add_document() instead when you already have the text content. The document
+    is immediately searchable after this call — no manual reindex needed.
     """
     if not url or not url.strip():
         return json.dumps({"status": "error", "message": "URL cannot be empty"})
@@ -2159,16 +2251,22 @@ def add_from_url(url: str, category: str = "general", title: str = None) -> str:
 @mcp.tool()
 def search_similar(filepath: str, max_results: int = 5) -> str:
     """
-    Find documents similar to a given document.
+    Find documents semantically similar to a given reference document.
 
-    Uses the document's embedding to find semantically similar documents.
+    Read-only. No side effects. Uses the document's embedding for similarity comparison.
 
     Args:
-        filepath: Path to the reference document
-        max_results: Number of similar documents to return (default: 5)
+        filepath: Path to the reference document (must already be indexed — use
+            list_documents() to verify). E.g., "security/technique.md"
+        max_results: Number of similar documents to return (default: 5, max: 20)
 
     Returns:
-        JSON string with list of similar documents and similarity scores
+        JSON string with list of similar document filepaths and similarity scores (0.0–1.0).
+
+    Usage: Use when you have a specific document and want to discover thematically related
+    ones. Use search_knowledge() instead when you have a text query rather than a reference
+    document. The reference document must be indexed — call list_documents() to confirm
+    it exists before calling this tool.
     """
     if not filepath:
         return json.dumps({"status": "error", "message": "Filepath required"})
@@ -2191,13 +2289,22 @@ def search_similar(filepath: str, max_results: int = 5) -> str:
 @mcp.tool()
 def evaluate_retrieval(test_cases: str) -> str:
     """
-    Evaluate retrieval quality with test queries.
+    Evaluate search quality by testing whether search_knowledge() retrieves expected documents.
+
+    Read-only. Runs multiple search queries internally. No side effects on the index.
 
     Args:
-        test_cases: JSON string of test cases. Format: [{"query": "search term", "expected_filepath": "path/to/doc.md"}, ...]
+        test_cases: JSON string array of test cases. Each item requires "query" (search string)
+            and "expected_filepath" (path of the document that should appear in top-5 results).
+            Example: [{"query": "suid exploit", "expected_filepath": "security/suid.md"}]
 
     Returns:
-        JSON string with MRR@5, Recall@5, and per-query results
+        JSON string with MRR@5 (Mean Reciprocal Rank), Recall@5, and per-query hit/miss breakdown.
+        MRR@5 above 0.7 indicates good retrieval quality.
+
+    Usage: Use to audit search quality after bulk document ingestion or after tuning
+    hybrid_alpha. Use get_index_stats() for system health checks instead. Use
+    search_knowledge() for actual document retrieval — this tool is for quality measurement only.
     """
     try:
         cases = json.loads(test_cases) if isinstance(test_cases, str) else test_cases
