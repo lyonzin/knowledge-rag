@@ -8,6 +8,9 @@ name: Quality Gate
 on:
   pull_request:
     branches: [master]
+    # labeled/unlabeled so bypass labels (skip-changelog, skip-test-count,
+    # skip-perf-gate) re-evaluate the gate without needing a forced push.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   push:
     branches: [master]
 
