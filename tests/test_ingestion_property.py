@@ -18,10 +18,13 @@ from __future__ import annotations
 import json
 
 import pytest
-from hypothesis import HealthCheck, given, settings
-from hypothesis import strategies as st
 
-from mcp_server.ingestion import DocumentParser
+pytest.importorskip("hypothesis", reason="hypothesis required for property-based fuzz tests")
+
+from hypothesis import HealthCheck, given, settings  # noqa: E402  — imported after the importorskip guard
+from hypothesis import strategies as st  # noqa: E402  — imported after the importorskip guard
+
+from mcp_server.ingestion import DocumentParser  # noqa: E402  — imported after the importorskip guard
 
 # Shared settings: keep CI fast (50 examples per property), suppress the
 # function-scoped fixture warning (we use tmp_path which is fine here).

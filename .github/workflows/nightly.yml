@@ -112,7 +112,7 @@ jobs:
         shell: bash
         run: |
           pip install -e .
-          pip install mutmut pytest pytest-cov hypothesis psutil numpy pyyaml
+          pip install "mutmut<3" pytest pytest-cov hypothesis psutil numpy pyyaml
       - name: Run mutation testing on instance_lock + preflight
         shell: bash
         # Limit mutation scope to recently authored modules — running
@@ -144,15 +144,35 @@ jobs:
         with:
           script: |
             const date = new Date().toISOString().split("T")[0];
-            const title = `[NIGHTLY] Resilience workflow failed on ${date}`;
-            const body = `One or more nightly resilience jobs failed on ${date}.\n\n` +
-              `See the run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\n\n` +
-              `Triage: investigate which job (chaos / soak / determinism) is red and decide whether ` +
-              `to fix the underlying flake or relax the threshold.`;
-            await github.rest.issues.create({
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            // Dedup: reuse a single rolling issue instead of opening one per night.
+            // Subsequent failures append a dated comment; a brand-new issue is only
+            // created once the previous one has been closed (i.e. triaged).
+            const existing = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title,
-              body,
-              labels: ["nightly", "needs-triage"],
+              state: "open",
+              labels: "nightly",
+              per_page: 1,
             });
+            if (existing.data.length > 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.data[0].number,
+                body: `Nightly resilience failed again on ${date}.\n\nSee the run: ${runUrl}`,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `[NIGHTLY] Resilience workflow failing (opened ${date})`,
+                body: `One or more nightly resilience jobs failed on ${date}.\n\n` +
+                  `See the run: ${runUrl}\n\n` +
+                  `Triage: investigate which job (chaos / soak / determinism) is red and decide whether ` +
+                  `to fix the underlying flake or relax the threshold.\n\n` +
+                  `This issue is reused for subsequent nightly failures (new dates appended as ` +
+                  `comments) until it is closed.`,
+                labels: ["nightly", "needs-triage"],
+              });
+            }
