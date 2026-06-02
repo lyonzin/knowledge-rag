@@ -23,7 +23,7 @@ hypothesis>=6.100.0            # property-based testing (Pillar 4: Versatility)
 mypy>=1.11.0
 interrogate>=1.7.0             # docstring coverage (Pillar 7)
 radon>=6.0.1                   # cyclomatic complexity
-vulture>=2.13                  # dead-code detection
+vulture>=2.16                  # dead-code detection
 
 # ── Security & supply chain ─────────────────────────────────────────────────
 bandit>=1.7.10                 # SAST (Pillar 1: Security)
