@@ -14,7 +14,7 @@ pre-commit>=3.7.0,<5.0
 pytest>=9.0.0,<10.0
 pytest-cov>=7.0.0
 pytest-rerunfailures>=14.0    # flake detection (Pillar 2: Stability)
-pytest-memray>=1.7.0; sys_platform != "win32"  # memory baseline (Pillar 3); memray Linux/macOS only
+pytest-memray>=1.8.0; sys_platform != "win32"  # memory baseline (Pillar 3); memray Linux/macOS only
 pytest-benchmark>=4.0.0       # micro-benchmarks
 pytest-timeout>=2.3.0         # safety net for hung tests
 hypothesis>=6.100.0            # property-based testing (Pillar 4: Versatility)
