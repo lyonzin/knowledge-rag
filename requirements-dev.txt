@@ -27,7 +27,7 @@ vulture>=2.13                  # dead-code detection
 
 # ── Security & supply chain ─────────────────────────────────────────────────
 bandit>=1.7.10                 # SAST (Pillar 1: Security)
-pip-audit>=2.7.3               # CVE check on installed deps
+pip-audit>=2.10.0               # CVE check on installed deps
 
 # ── Memory + benchmarking (Pillar 3 + Pillar 5) ─────────────────────────────
 psutil>=5.9.0                  # cross-platform RSS measurement for memory baselines
