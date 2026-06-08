@@ -384,10 +384,14 @@ _DEFAULT_QUERY_EXPANSIONS = {
 
 
 def _resolve_path(raw, default: Path) -> Path:
-    """Resolve a path from YAML (string) or use default (Path)."""
+    """Resolve a path from YAML (string) or use default (Path).
+
+    Expands ``~`` to the user home directory on all platforms
+    (Linux/macOS: $HOME, Windows: %USERPROFILE%).
+    """
     if raw is None:
         return default
-    p = Path(raw)
+    p = Path(raw).expanduser()
     if not p.is_absolute():
         p = BASE_DIR / p
     return p
@@ -584,6 +588,15 @@ class Config:
             if not isinstance(keywords, list):
                 print(f"[WARN] keyword_routes.{cat} is not a list, removing")
                 del self.keyword_routes[cat]
+
+        # Warn when documents_dir was explicitly set but does not exist
+        raw_docs = _get("paths", "documents_dir", None)
+        if raw_docs is not None and not self.documents_dir.exists():
+            print(
+                f"[WARN] documents_dir '{raw_docs}' resolved to "
+                f"'{self.documents_dir}' which does not exist — creating it. "
+                f"Verify the path in config.yaml if reindex returns 0 files."
+            )
 
         # Ensure directories exist
         self.data_dir.mkdir(parents=True, exist_ok=True)

@@ -750,26 +750,42 @@ class BM25Index:
 
 
 class DocumentWatcher(FileSystemEventHandler):
-    """Watches documents directory and triggers reindex on changes."""
+    """Watches documents directory and triggers reindex on changes.
 
-    def __init__(self, orchestrator_getter, debounce_seconds: float = 5.0):
+    Uses accumulate-mode debounce: collects changed paths during a silence
+    window instead of resetting the timer on every file event.  This prevents
+    bulk file copies (1000+ files) from starving the reindex trigger.
+    """
+
+    def __init__(self, orchestrator_getter, debounce_seconds: float = 10.0):
         self._get_orchestrator = orchestrator_getter
         self._debounce = debounce_seconds
-        self._timer = None
         self._lock = threading.Lock()
+        self._pending_paths: set = set()
+        self._timer = None
+        self._reindex_lock = threading.Lock()
 
-    def _schedule_reindex(self):
-        """Debounced reindex — waits for changes to settle before reindexing."""
+    def _schedule_reindex(self, path: str):
+        """Accumulate-mode debounce: collect paths, fire once after silence."""
         with self._lock:
-            if self._timer:
-                self._timer.cancel()
-            self._timer = threading.Timer(self._debounce, self._do_reindex)
-            self._timer.daemon = True
-            self._timer.start()
+            self._pending_paths.add(path)
+            if self._timer is None or not self._timer.is_alive():
+                self._timer = threading.Timer(self._debounce, self._do_reindex)
+                self._timer.daemon = True
+                self._timer.start()
 
     def _do_reindex(self):
-        """Perform incremental reindex in background."""
+        """Perform incremental reindex in background (serialized)."""
+        if not self._reindex_lock.acquire(blocking=False):
+            print("[WATCHER] Reindex already in progress, skipping")
+            return
         try:
+            with self._lock:
+                count = len(self._pending_paths)
+                self._pending_paths.clear()
+            if count == 0:
+                return
+            print(f"[WATCHER] {count} file(s) changed, starting incremental reindex...")
             orch = self._get_orchestrator()
             stats = orch.index_all(force=False)
             changed = stats.get("indexed", 0) + stats.get("updated", 0) + stats.get("deleted", 0)
@@ -780,18 +796,20 @@ class DocumentWatcher(FileSystemEventHandler):
                 )
         except Exception as e:
             print(f"[WATCHER] Reindex failed: {e}")
+        finally:
+            self._reindex_lock.release()
 
     def on_created(self, event):
         if not event.is_directory and Path(event.src_path).suffix in config.supported_formats:
-            self._schedule_reindex()
+            self._schedule_reindex(event.src_path)
 
     def on_modified(self, event):
         if not event.is_directory and Path(event.src_path).suffix in config.supported_formats:
-            self._schedule_reindex()
+            self._schedule_reindex(event.src_path)
 
     def on_deleted(self, event):
         if not event.is_directory and Path(event.src_path).suffix in config.supported_formats:
-            self._schedule_reindex()
+            self._schedule_reindex(event.src_path)
 
 
 # =============================================================================
@@ -928,13 +946,30 @@ class KnowledgeOrchestrator:
     # Indexing
     # =========================================================================
 
+    _index_lock = threading.Lock()
+
     def index_all(self, force: bool = False) -> Dict[str, Any]:
         """
         Index documents with incremental change detection.
 
         Compares file mtime/size against stored metadata to detect changes.
-        Only re-indexes files that are new or modified.
+        Only re-indexes files that are new or modified.  Serialized via
+        _index_lock so concurrent calls (watcher + MCP tool) don't corrupt
+        ChromaDB's SQLite database.
         """
+        if not self._index_lock.acquire(blocking=False):
+            return {
+                "total_files": 0, "indexed": 0, "updated": 0, "skipped": 0,
+                "deleted": 0, "errors": 0, "chunks_added": 0, "chunks_removed": 0,
+                "dedup_skipped": 0, "categories": {}, "skipped_reason": "reindex_already_running",
+            }
+        try:
+            return self._index_all_impl(force)
+        finally:
+            self._index_lock.release()
+
+    def _index_all_impl(self, force: bool = False) -> Dict[str, Any]:
+        """Inner implementation of index_all (caller holds _index_lock)."""
         stats = {
             "total_files": 0,
             "indexed": 0,
@@ -950,14 +985,17 @@ class KnowledgeOrchestrator:
 
         documents = self.parser.parse_directory()
         stats["total_files"] = len(documents)
+        if stats["total_files"] > 100:
+            print(f"[INDEX] Scanning {stats['total_files']} documents...")
 
         path_to_docid: Dict[str, str] = {}
         for doc_id, info in self._indexed_docs.items():
             path_to_docid[info.get("source", "")] = doc_id
 
         current_paths = set()
+        _progress_interval = max(1, stats["total_files"] // 10)
 
-        for doc in documents:
+        for idx, doc in enumerate(documents):
             current_paths.add(str(doc.source))
             try:
                 source_str = str(doc.source)
@@ -1019,6 +1057,11 @@ class KnowledgeOrchestrator:
                 stats["errors"] += 1
                 print(f"[ERROR] Failed to index {doc.source}: {e}")
 
+            if stats["total_files"] > 100 and (idx + 1) % _progress_interval == 0:
+                pct = int((idx + 1) / stats["total_files"] * 100)
+                print(f"[INDEX] Progress: {idx + 1}/{stats['total_files']} ({pct}%) "
+                      f"— {stats['indexed']} new, {stats['skipped']} skipped")
+
         # Clean up orphaned docs
         orphan_ids = []
         for doc_id, info in list(self._indexed_docs.items()):
@@ -1038,8 +1081,14 @@ class KnowledgeOrchestrator:
 
         return stats
 
+    _CHROMA_BATCH_SIZE = 500
+
     def _index_document(self, doc: Document) -> Tuple[int, int]:
-        """Index a single document's chunks into ChromaDB and BM25 with dedup."""
+        """Index a single document's chunks into ChromaDB and BM25 with dedup.
+
+        Large documents are split into batches of _CHROMA_BATCH_SIZE to
+        prevent memory spikes when embedding thousands of chunks at once.
+        """
         if not doc.chunks:
             return 0, 0
 
@@ -1074,7 +1123,13 @@ class KnowledgeOrchestrator:
             )
 
         if unique_ids:
-            self.collection.add(ids=unique_ids, documents=unique_docs, metadatas=unique_metas)
+            bs = self._CHROMA_BATCH_SIZE
+            for i in range(0, len(unique_ids), bs):
+                self.collection.add(
+                    ids=unique_ids[i : i + bs],
+                    documents=unique_docs[i : i + bs],
+                    metadatas=unique_metas[i : i + bs],
+                )
             self.bm25_index.add_documents(unique_ids, unique_docs)
 
         return len(unique_ids), dedup_skipped
@@ -2408,16 +2463,19 @@ def main():
                 print(f"[INFO] Indexed {stats['indexed']} documents with {stats['chunks_added']} chunks")
 
             # Start file watcher for auto-reindex on document changes
-            try:
-                watcher = DocumentWatcher(get_orchestrator, debounce_seconds=5.0)
-                observer = Observer()
-                observer.schedule(watcher, str(config.documents_dir), recursive=True)
-                observer.daemon = True
-                observer.start()
-                print(f"[WATCHER] Monitoring {config.documents_dir} for changes")
-            except Exception as e:
-                print(f"[WARN] Failed to start file watcher: {e}")
-                print("[WARN] Auto-reindexing disabled. Use reindex_documents tool manually.")
+            if os.environ.get("KNOWLEDGE_RAG_WATCHER_DISABLED", "").strip() == "1":
+                print("[WATCHER] Disabled via KNOWLEDGE_RAG_WATCHER_DISABLED=1")
+            else:
+                try:
+                    watcher = DocumentWatcher(get_orchestrator, debounce_seconds=10.0)
+                    observer = Observer()
+                    observer.schedule(watcher, str(config.documents_dir), recursive=True)
+                    observer.daemon = True
+                    observer.start()
+                    print(f"[WATCHER] Monitoring {config.documents_dir} for changes")
+                except Exception as e:
+                    print(f"[WARN] Failed to start file watcher: {e}")
+                    print("[WARN] Auto-reindexing disabled. Use reindex_documents tool manually.")
 
             # Restore real stdout for MCP JSON-RPC, keep print() going to stderr
             from . import _original_stdout
