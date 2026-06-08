@@ -87,7 +87,9 @@ jobs:
           # Strict mode fails on any unfixed advisory. Documented exceptions:
           #   CVE-2026-3219 (pip): tarball symlink TOCTOU — no upstream fix
           #     as of 2026-05. Does not affect us; users run pip themselves.
-          ignore_args="--ignore-vuln CVE-2026-3219"
+          #   CVE-2026-45829 (chromadb 1.5.9): no fix available as of 2026-06.
+          #     Upstream issue; 1.5.9 is latest. Remove when chromadb patches.
+          ignore_args="--ignore-vuln CVE-2026-3219 --ignore-vuln CVE-2026-45829"
           if [ -n "${IGNORE_AUDIT_IDS:-}" ]; then
             for id in ${IGNORE_AUDIT_IDS}; do
               ignore_args="${ignore_args} --ignore-vuln ${id}"

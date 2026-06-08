@@ -73,6 +73,15 @@ def _read_unreleased_section(text: str) -> str:
     return match.group("body") if match else ""
 
 
+def _read_versioned_sections(text: str) -> str:
+    """Extract all versioned headings (### v3.X.Y) that don't exist in base."""
+    pattern = re.compile(
+        r"^### v\d+\.\d+\.\d+[^\n]*\n(?P<body>.*?)(?=^### |^## |\Z)",
+        re.MULTILINE | re.DOTALL,
+    )
+    return "\n".join(m.group("body") for m in pattern.finditer(text))
+
+
 def _bullet_count(section: str) -> int:
     return sum(1 for line in section.splitlines() if line.lstrip().startswith("- "))
 
@@ -124,22 +133,31 @@ def main() -> int:
         print(f"[WARN] Could not read README.md at {args.base_ref} (first commit?). Skipping diff check.")
         return 0
 
-    current_bullets = _bullet_count(_read_unreleased_section(current))
-    base_bullets = _bullet_count(_read_unreleased_section(base))
+    unreleased_current = _bullet_count(_read_unreleased_section(current))
+    unreleased_base = _bullet_count(_read_unreleased_section(base))
+    versioned_current = _bullet_count(_read_versioned_sections(current))
+    versioned_base = _bullet_count(_read_versioned_sections(base))
 
-    if current_bullets <= base_bullets:
+    unreleased_gained = unreleased_current > unreleased_base
+    versioned_gained = versioned_current > versioned_base
+
+    if not unreleased_gained and not versioned_gained:
         print(
-            "[FAIL] User-facing PR ({type}) but README.md '## Unreleased' has not gained any new bullet.\n"
-            "       Add a single-line entry, or apply the 'skip-changelog' label if truly not needed.\n"
-            "       Current bullets: {cur}, base bullets: {base}".format(
-                type=commit_type, cur=current_bullets, base=base_bullets
+            "[FAIL] User-facing PR ({type}) but README.md changelog has not gained any new bullet.\n"
+            "       Add an entry under '### Unreleased' or a versioned '### v3.X.Y' heading,\n"
+            "       or apply the 'skip-changelog' label if truly not needed.\n"
+            "       Unreleased: {ucur} (base {ubase}), Versioned: {vcur} (base {vbase})".format(
+                type=commit_type,
+                ucur=unreleased_current, ubase=unreleased_base,
+                vcur=versioned_current, vbase=versioned_base,
             ),
             file=sys.stderr,
         )
         return 1
 
+    where = "Unreleased" if unreleased_gained else "versioned heading"
     print(
-        f"[OK] CHANGELOG updated: {base_bullets} -> {current_bullets} bullet(s) under '## Unreleased' "
+        f"[OK] CHANGELOG updated under {where} "
         f"(type: {commit_type})"
     )
     return 0
