@@ -1224,6 +1224,16 @@ A second instance exits immediately with code 75. Default is OFF (multi-client f
 - **CHORE**: pytest `tmp_path_retention_count=1` to avoid Windows atexit cleanup race in CI.
 - **ROADMAP**: Tracked v4.0 shared-service architecture (one daemon, many thin MCP clients) as the long-term fix for multi-process resource duplication. (#34)
 
+### v3.9.1 (2026-06-08)
+
+- **FIX**: Expand `~` in `config.yaml` path values (`documents_dir`, `data_dir`, `models_cache_dir`) via `expanduser()` on all platforms (#86).
+- **FIX**: Warn when `documents_dir` resolves to a non-existent path instead of silently indexing zero files.
+- **FIX**: File watcher now uses accumulate-mode debounce — bulk file copies no longer starve the reindex trigger.
+- **FIX**: Concurrent `index_all()` calls are serialized via `_index_lock` to prevent ChromaDB SQLite corruption.
+- **FIX**: `collection.add()` is batched (500 chunks/call) to cap memory usage during large reindex operations.
+- **NEW**: `KNOWLEDGE_RAG_WATCHER_DISABLED=1` env var to disable the file watcher for troubleshooting.
+- **NEW**: Progress logging every 10% for reindex operations with >100 documents.
+
 ### Unreleased
 
 - **FIX**: Startup preflight probes ChromaDB in a child process and moves crashing persistent indexes to `data/backups/auto-repair-*` before MCP initialization.

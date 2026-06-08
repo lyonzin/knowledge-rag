@@ -959,9 +959,17 @@ class KnowledgeOrchestrator:
         """
         if not self._index_lock.acquire(blocking=False):
             return {
-                "total_files": 0, "indexed": 0, "updated": 0, "skipped": 0,
-                "deleted": 0, "errors": 0, "chunks_added": 0, "chunks_removed": 0,
-                "dedup_skipped": 0, "categories": {}, "skipped_reason": "reindex_already_running",
+                "total_files": 0,
+                "indexed": 0,
+                "updated": 0,
+                "skipped": 0,
+                "deleted": 0,
+                "errors": 0,
+                "chunks_added": 0,
+                "chunks_removed": 0,
+                "dedup_skipped": 0,
+                "categories": {},
+                "skipped_reason": "reindex_already_running",
             }
         try:
             return self._index_all_impl(force)
@@ -1059,8 +1067,10 @@ class KnowledgeOrchestrator:
 
             if stats["total_files"] > 100 and (idx + 1) % _progress_interval == 0:
                 pct = int((idx + 1) / stats["total_files"] * 100)
-                print(f"[INDEX] Progress: {idx + 1}/{stats['total_files']} ({pct}%) "
-                      f"— {stats['indexed']} new, {stats['skipped']} skipped")
+                print(
+                    f"[INDEX] Progress: {idx + 1}/{stats['total_files']} ({pct}%) "
+                    f"— {stats['indexed']} new, {stats['skipped']} skipped"
+                )
 
         # Clean up orphaned docs
         orphan_ids = []
