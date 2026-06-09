@@ -28,7 +28,7 @@ pip install knowledge-rag → restart Claude Code → search_knowledge("your que
 
 **12 MCP Tools** | **Hybrid Search + Reranking** | **20 File Formats** | **Optional NVIDIA GPU** | **100% Local**
 
-[What's New](#whats-new-in-v390) | [Supported Formats](#supported-formats) | [Installation](#installation) | [Configuration](#configuration) | [API Reference](#api-reference) | [Architecture](#architecture)
+[What's New](#whats-new-in-v400) | [Supported Formats](#supported-formats) | [Installation](#installation) | [Configuration](#configuration) | [API Reference](#api-reference) | [Architecture](#architecture)
 
 </div>
 
@@ -50,7 +50,30 @@ pip install knowledge-rag → restart Claude Code → search_knowledge("your que
 
 ---
 
-## What's New in v3.9.0
+## What's New in v4.0.0
+
+### Enterprise Concurrent Access — SSE/HTTP Transport (v4.0.0)
+
+The server now supports **SSE** and **streamable-http** transport modes. Instead of spawning a separate process per client (stdio), a single server process serves all clients with shared resources — 1 embedding model, 1 ChromaDB, 1 query cache.
+
+```yaml
+# config.yaml
+server:
+  transport: "sse"        # "stdio" | "sse" | "streamable-http"
+  host: "127.0.0.1"
+  port: 8179
+```
+
+Or via CLI: `knowledge-rag --transport sse`
+
+**Optional enterprise features** (all disabled by default):
+- **Rate limiting**: Sliding-window counter, configurable RPM and burst
+- **Prometheus metrics**: `/metrics` endpoint on separate port
+- **Bearer auth**: Token validation for SSE/HTTP connections
+
+All 12 MCP tools are instrumented with `@rate_limited` and `@instrument` decorators — zero overhead when features are disabled. Default transport remains **stdio** for full backwards compatibility.
+
+> **Migration**: Existing users need zero changes. SSE mode is opt-in via `server.transport: "sse"` in config.yaml. See [Configuration](#configuration) for details.
 
 ### Quality Gate — 7-Pillar PR Validation
 
@@ -102,6 +125,7 @@ All methods produce the same MCP server. See [Installation](#installation) for f
 
 ### Recent Highlights
 
+- **v4.0.0** — **Enterprise concurrent access**: SSE/HTTP transport (1 server → N clients), thread-safe shared state, optional rate limiting + Prometheus metrics, ChromaDB WAL mode, `--transport` CLI
 - **v3.9.0** — **Quality Gate** activated: 35+ automated PR checks across 7 pillars (Security, Stability, Memory Leak, Versatility, Scalability, Versioning, Quality) + nightly resilience suite (chaos, soak, determinism, mutation)
 - **v3.8.1** — Critical hotfix: loud-fail embeddings (no more silent zero-vector corruption); Windows CI flake erradicated (HF_HUB_OFFLINE + shell:bash + atexit wrapper)
 - **v3.8.0** — Lazy-load embeddings, opt-in single-instance guard, version sync across PyPI/NPM/Docker
@@ -463,9 +487,33 @@ Add to `~/.claude.json`:
 > Replace `YOUR_USER` with your username, or use the full path from `echo $HOME`.
 </details>
 
+#### Option F: SSE Server Mode (multi-agent)
+
+For multi-agent setups where multiple clients query the same knowledge base simultaneously:
+
+```bash
+pip install knowledge-rag[server]    # Adds uvicorn for SSE/HTTP
+knowledge-rag --transport sse        # Starts on http://127.0.0.1:8179
+```
+
+Then configure each MCP client to connect via SSE:
+
+```json
+{
+  "mcpServers": {
+    "knowledge-rag": {
+      "type": "sse",
+      "url": "http://127.0.0.1:8179/sse"
+    }
+  }
+}
+```
+
+One server process serves all agents — shared embedding model, shared cache, shared ChromaDB. See [Configuration > Server](#server) for rate limiting, metrics, and auth options.
+
 ### Use with other MCP clients
 
-`knowledge-rag` is a standard **stdio MCP server** — it works with any MCP-compatible client, not only Claude Code. The launch command is the same everywhere (the `python -m mcp_server.server` from whichever install method you picked); only the **config file location** and **JSON shape** differ per client.
+`knowledge-rag` supports both **stdio** (default, 1:1) and **SSE** (1:N) transport modes. In stdio mode, it works with any MCP-compatible client, not only Claude Code. The launch command is the same everywhere (the `python -m mcp_server.server` from whichever install method you picked); only the **config file location** and **JSON shape** differ per client.
 
 #### Clients using the standard `mcpServers` format
 
@@ -923,6 +971,21 @@ query_expansions:
   privesc:
     - privilege escalation
     - privesc
+
+# Server — enterprise features (new in v4.0.0)
+server:
+  transport: "stdio"              # "stdio" | "sse" | "streamable-http"
+  host: "127.0.0.1"              # Bind address (SSE/HTTP only)
+  port: 8179                      # Bind port (SSE/HTTP only)
+  auth:
+    bearer_token: ""              # Set a secret to enable auth (SSE/HTTP only)
+  rate_limit:
+    enabled: false
+    requests_per_minute: 60
+    burst: 10
+  metrics:
+    enabled: false
+    port: 9179                    # Separate port for Prometheus scraping
 ```
 
 > See `config.example.yaml` for the fully documented template with explanations for every field.
@@ -941,6 +1004,22 @@ Pre-built configurations for common use cases:
 **Creating your own preset**: Copy `config.example.yaml`, fill in your categories/keywords/expansions, save to `presets/your-domain.yaml`.
 
 ### Configuration Reference
+
+#### Server
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `server.transport` | `"stdio"` | Transport protocol: `"stdio"`, `"sse"`, or `"streamable-http"` |
+| `server.host` | `"127.0.0.1"` | Bind address for SSE/HTTP mode |
+| `server.port` | `8179` | Bind port for SSE/HTTP mode |
+| `server.auth.bearer_token` | `""` (disabled) | Bearer token for SSE/HTTP auth. Empty = no auth |
+| `server.rate_limit.enabled` | `false` | Enable per-client rate limiting |
+| `server.rate_limit.requests_per_minute` | `60` | Max requests per minute |
+| `server.rate_limit.burst` | `10` | Burst allowance above steady rate |
+| `server.metrics.enabled` | `false` | Enable Prometheus `/metrics` endpoint |
+| `server.metrics.port` | `9179` | Port for metrics scraping |
+
+In stdio mode (default), server settings are ignored. SSE/HTTP mode auto-enables the single-instance lock.
 
 #### Paths
 
@@ -1179,9 +1258,58 @@ export KNOWLEDGE_RAG_SINGLE_INSTANCE=1
 
 A second instance exits immediately with code 75. Default is OFF (multi-client friendly). Full guide: [docs/single-instance.md](docs/single-instance.md). Sample MCP config: [examples/mcp-config-single-instance.json](examples/mcp-config-single-instance.json).
 
+### SSE server won't start
+
+```bash
+# Check if port 8179 is already in use
+# Windows:
+netstat -aon | findstr :8179
+# Linux/macOS:
+lsof -i :8179
+```
+
+If `uvicorn` is not found, install the server extras: `pip install knowledge-rag[server]`
+
+### Can't connect to SSE server
+
+Verify the server is running and the URL is correct:
+
+```bash
+curl http://127.0.0.1:8179/sse
+```
+
+Common issues:
+- Wrong URL: must end with `/sse` (not just the port)
+- Firewall blocking the port
+- Server started with a different host/port than configured in the MCP client
+
 ---
 
 ## Changelog
+
+### v4.0.0 (2026-06-09) — Enterprise Concurrent Access
+
+- **NEW**: SSE and streamable-http transport modes — 1 server serves N clients (`server.transport: "sse"` in config.yaml or `--transport sse` CLI).
+- **NEW**: Thread-safe shared state for concurrent queries — QueryCache locking, BM25 build lock, orchestrator double-checked locking.
+- **NEW**: ChromaDB WAL mode enabled automatically in SSE/HTTP mode for concurrent read performance.
+- **NEW**: Optional rate limiting — sliding-window counter, configurable RPM and burst, disabled by default.
+- **NEW**: Optional Prometheus metrics endpoint — tool call counts, latency histograms, separate port, disabled by default.
+- **NEW**: All 12 MCP tools instrumented with `@rate_limited` and `@instrument` decorators (zero-cost when disabled).
+- **NEW**: `--transport` CLI override for Docker/systemd deployments.
+- **NEW**: `pip install knowledge-rag[server]` optional dependency for SSE/HTTP (uvicorn).
+- **CHANGED**: SSE/HTTP mode auto-enables single-instance lock (port collision prevention).
+- **CHANGED**: `mcp` dependency bumped to `>=1.6.0` (SSE/streamable-http support).
+- **MIGRATION**: Default transport remains `stdio` — existing users need zero changes. See config.example.yaml for SSE setup.
+
+### v3.9.1 (2026-06-08)
+
+- **FIX**: Expand `~` in `config.yaml` path values (`documents_dir`, `data_dir`, `models_cache_dir`) via `expanduser()` on all platforms (#86).
+- **FIX**: Warn when `documents_dir` resolves to a non-existent path instead of silently indexing zero files.
+- **FIX**: File watcher now uses accumulate-mode debounce — bulk file copies no longer starve the reindex trigger.
+- **FIX**: Concurrent `index_all()` calls are serialized via `_index_lock` to prevent ChromaDB SQLite corruption.
+- **FIX**: `collection.add()` is batched (500 chunks/call) to cap memory usage during large reindex operations.
+- **NEW**: `KNOWLEDGE_RAG_WATCHER_DISABLED=1` env var to disable the file watcher for troubleshooting.
+- **NEW**: Progress logging every 10% for reindex operations with >100 documents.
 
 ### v3.9.0 (2026-05-10) — Quality Gate
 
@@ -1223,30 +1351,6 @@ A second instance exits immediately with code 75. Default is OFF (multi-client f
 - **CHORE**: Sync version across `pyproject.toml`, `mcp_server/__init__.py`, and `npm/package.json` (was drifting since v3.5.x).
 - **CHORE**: pytest `tmp_path_retention_count=1` to avoid Windows atexit cleanup race in CI.
 - **ROADMAP**: Tracked v4.0 shared-service architecture (one daemon, many thin MCP clients) as the long-term fix for multi-process resource duplication. (#34)
-
-### v4.0.0 (2026-06-09) — Enterprise Concurrent Access
-
-- **NEW**: SSE and streamable-http transport modes — 1 server serves N clients (`server.transport: "sse"` in config.yaml or `--transport sse` CLI).
-- **NEW**: Thread-safe shared state for concurrent queries — QueryCache locking, BM25 build lock, orchestrator double-checked locking.
-- **NEW**: ChromaDB WAL mode enabled automatically in SSE/HTTP mode for concurrent read performance.
-- **NEW**: Optional rate limiting — sliding-window counter, configurable RPM and burst, disabled by default.
-- **NEW**: Optional Prometheus metrics endpoint — tool call counts, latency histograms, separate port, disabled by default.
-- **NEW**: All 12 MCP tools instrumented with `@rate_limited` and `@instrument` decorators (zero-cost when disabled).
-- **NEW**: `--transport` CLI override for Docker/systemd deployments.
-- **NEW**: `pip install knowledge-rag[server]` optional dependency for SSE/HTTP (uvicorn).
-- **CHANGED**: SSE/HTTP mode auto-enables single-instance lock (port collision prevention).
-- **CHANGED**: `mcp` dependency bumped to `>=1.6.0` (SSE/streamable-http support).
-- **MIGRATION**: Default transport remains `stdio` — existing users need zero changes. See config.example.yaml for SSE setup.
-
-### v3.9.1 (2026-06-08)
-
-- **FIX**: Expand `~` in `config.yaml` path values (`documents_dir`, `data_dir`, `models_cache_dir`) via `expanduser()` on all platforms (#86).
-- **FIX**: Warn when `documents_dir` resolves to a non-existent path instead of silently indexing zero files.
-- **FIX**: File watcher now uses accumulate-mode debounce — bulk file copies no longer starve the reindex trigger.
-- **FIX**: Concurrent `index_all()` calls are serialized via `_index_lock` to prevent ChromaDB SQLite corruption.
-- **FIX**: `collection.add()` is batched (500 chunks/call) to cap memory usage during large reindex operations.
-- **NEW**: `KNOWLEDGE_RAG_WATCHER_DISABLED=1` env var to disable the file watcher for troubleshooting.
-- **NEW**: Progress logging every 10% for reindex operations with >100 documents.
 
 ### Unreleased
 
