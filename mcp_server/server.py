@@ -58,6 +58,8 @@ from watchdog.observers import Observer
 # Local imports
 from .config import config
 from .ingestion import Document, DocumentParser
+from .metrics import instrument
+from .ratelimit import rate_limited
 
 # =============================================================================
 # QUERY CACHE
@@ -80,6 +82,7 @@ class QueryCache:
         self.max_size = max_size
         self.ttl_seconds = ttl_seconds
         self._cache: OrderedDict[str, Tuple[float, Any]] = OrderedDict()
+        self._lock = threading.Lock()
         self._hits = 0
         self._misses = 0
 
@@ -92,28 +95,31 @@ class QueryCache:
         """Get cached result if exists and not expired"""
         key = self._make_key(query, max_results, category, hybrid_alpha)
 
-        if key in self._cache:
-            timestamp, result = self._cache[key]
-            if time.time() - timestamp < self.ttl_seconds:
-                self._cache.move_to_end(key)
-                self._hits += 1
-                return result
-            else:
-                del self._cache[key]
+        with self._lock:
+            if key in self._cache:
+                timestamp, result = self._cache[key]
+                if time.time() - timestamp < self.ttl_seconds:
+                    self._cache.move_to_end(key)
+                    self._hits += 1
+                    return result
+                else:
+                    del self._cache[key]
 
-        self._misses += 1
-        return None
+            self._misses += 1
+            return None
 
     def put(self, query: str, max_results: int, category: Optional[str], hybrid_alpha: float, result: Any) -> None:
         """Store result in cache"""
         key = self._make_key(query, max_results, category, hybrid_alpha)
-        if len(self._cache) >= self.max_size:
-            self._cache.popitem(last=False)
-        self._cache[key] = (time.time(), result)
+        with self._lock:
+            if len(self._cache) >= self.max_size:
+                self._cache.popitem(last=False)
+            self._cache[key] = (time.time(), result)
 
     def invalidate(self) -> None:
         """Clear entire cache (call after reindex)"""
-        self._cache.clear()
+        with self._lock:
+            self._cache.clear()
 
     def stats(self) -> Dict[str, Any]:
         """Return cache statistics"""
@@ -744,6 +750,24 @@ class BM25Index:
 # KNOWLEDGE ORCHESTRATOR
 # =============================================================================
 
+
+def _enable_wal_mode(chroma_dir: Path) -> None:
+    """Enable WAL journal mode on ChromaDB's SQLite for concurrent reads."""
+    import sqlite3
+
+    sqlite_path = chroma_dir / "chroma.sqlite3"
+    if not sqlite_path.exists():
+        return
+    try:
+        conn = sqlite3.connect(str(sqlite_path))
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA busy_timeout=5000;")
+        conn.close()
+        print("[INFO] ChromaDB SQLite: WAL mode enabled")
+    except Exception as e:
+        print(f"[WARN] Could not enable WAL mode: {e}")
+
+
 # =============================================================================
 # FILE WATCHER (auto-reindex on document changes)
 # =============================================================================
@@ -826,6 +850,8 @@ class KnowledgeOrchestrator:
 
         # Initialize ChromaDB with persistent storage (new API v1.4.0+)
         self.chroma_client = chromadb.PersistentClient(path=str(config.chroma_dir))
+        if config.transport != "stdio":
+            _enable_wal_mode(config.chroma_dir)
 
         # Get or create collection (with auto-recovery from corruption)
         self.collection = self._safe_get_collection()
@@ -924,23 +950,28 @@ class KnowledgeOrchestrator:
             print(f"[WARN] Dimension check query failed (non-dimension error): {e}")
             return False
 
+    _bm25_build_lock = threading.Lock()
+
     def _ensure_bm25_index(self) -> None:
         """Lazy initialization of BM25 index from existing ChromaDB data"""
         if self._bm25_initialized:
             return
+        with self._bm25_build_lock:
+            if self._bm25_initialized:
+                return
 
-        try:
-            count = self.collection.count()
-            if count > 0:
-                all_data = self.collection.get(include=["documents"], limit=count)
-                if all_data["ids"] and all_data["documents"]:
-                    self.bm25_index.add_documents(all_data["ids"], all_data["documents"])
-                    self.bm25_index.build_index()
-                    print(f"[INFO] BM25 index built with {len(self.bm25_index)} documents")
-        except Exception as e:
-            print(f"[WARN] Failed to build BM25 index: {e}")
+            try:
+                count = self.collection.count()
+                if count > 0:
+                    all_data = self.collection.get(include=["documents"], limit=count)
+                    if all_data["ids"] and all_data["documents"]:
+                        self.bm25_index.add_documents(all_data["ids"], all_data["documents"])
+                        self.bm25_index.build_index()
+                        print(f"[INFO] BM25 index built with {len(self.bm25_index)} documents")
+            except Exception as e:
+                print(f"[WARN] Failed to build BM25 index: {e}")
 
-        self._bm25_initialized = True
+            self._bm25_initialized = True
 
     # =========================================================================
     # Indexing
@@ -1960,16 +1991,23 @@ class KnowledgeOrchestrator:
 # MCP Server
 # =============================================================================
 
-mcp = FastMCP("knowledge-rag")
+mcp = FastMCP(
+    "knowledge-rag",
+    host=config.server_host,
+    port=config.server_port,
+)
 
 _orchestrator: Optional[KnowledgeOrchestrator] = None
+_orchestrator_lock = threading.Lock()
 
 
 def get_orchestrator() -> KnowledgeOrchestrator:
     """Get or create the orchestrator instance"""
     global _orchestrator
     if _orchestrator is None:
-        _orchestrator = KnowledgeOrchestrator()
+        with _orchestrator_lock:
+            if _orchestrator is None:
+                _orchestrator = KnowledgeOrchestrator()
     return _orchestrator
 
 
@@ -1979,6 +2017,8 @@ def get_orchestrator() -> KnowledgeOrchestrator:
 
 
 @mcp.tool()
+@rate_limited
+@instrument("search_knowledge")
 def search_knowledge(query: str, max_results: int = 5, category: str = None, hybrid_alpha: float = 0.3) -> str:
     """
     Hybrid search combining semantic search + BM25 keyword search with cross-encoder reranking.
@@ -2037,6 +2077,8 @@ def search_knowledge(query: str, max_results: int = 5, category: str = None, hyb
 
 
 @mcp.tool()
+@rate_limited
+@instrument("get_document")
 def get_document(filepath: str) -> str:
     """
     Get the full content of a specific document by filepath.
@@ -2066,6 +2108,8 @@ def get_document(filepath: str) -> str:
 
 
 @mcp.tool()
+@rate_limited
+@instrument("reindex_documents")
 def reindex_documents(force: bool = False, full_rebuild: bool = False) -> str:
     """
     Index or reindex all documents in the knowledge base.
@@ -2102,6 +2146,8 @@ def reindex_documents(force: bool = False, full_rebuild: bool = False) -> str:
 
 
 @mcp.tool()
+@rate_limited
+@instrument("list_categories")
 def list_categories() -> str:
     """
     List all document categories with their document counts.
@@ -2123,6 +2169,8 @@ def list_categories() -> str:
 
 
 @mcp.tool()
+@rate_limited
+@instrument("list_documents")
 def list_documents(category: str = None) -> str:
     """
     List all indexed documents, optionally filtered by category.
@@ -2152,6 +2200,8 @@ def list_documents(category: str = None) -> str:
 
 
 @mcp.tool()
+@rate_limited
+@instrument("get_index_stats")
 def get_index_stats() -> str:
     """
     Get statistics and health metrics for the knowledge base index.
@@ -2178,6 +2228,8 @@ def get_index_stats() -> str:
 
 
 @mcp.tool()
+@rate_limited
+@instrument("add_document")
 def add_document(content: str, filepath: str, category: str = "general") -> str:
     """
     Add a new document to the knowledge base from raw text content.
@@ -2213,6 +2265,8 @@ def add_document(content: str, filepath: str, category: str = "general") -> str:
 
 
 @mcp.tool()
+@rate_limited
+@instrument("update_document")
 def update_document(filepath: str, content: str) -> str:
     """
     Update the content of an existing document in the knowledge base.
@@ -2247,6 +2301,8 @@ def update_document(filepath: str, content: str) -> str:
 
 
 @mcp.tool()
+@rate_limited
+@instrument("remove_document")
 def remove_document(filepath: str, delete_file: bool = False) -> str:
     """
     Remove a document from the knowledge base index.
@@ -2281,6 +2337,8 @@ def remove_document(filepath: str, delete_file: bool = False) -> str:
 
 
 @mcp.tool()
+@rate_limited
+@instrument("add_from_url")
 def add_from_url(url: str, category: str = "general", title: str = None) -> str:
     """
     Fetch content from a URL, convert to markdown, and add to the knowledge base.
@@ -2314,6 +2372,8 @@ def add_from_url(url: str, category: str = "general", title: str = None) -> str:
 
 
 @mcp.tool()
+@rate_limited
+@instrument("search_similar")
 def search_similar(filepath: str, max_results: int = 5) -> str:
     """
     Find documents semantically similar to a given reference document.
@@ -2352,6 +2412,8 @@ def search_similar(filepath: str, max_results: int = 5) -> str:
 
 
 @mcp.tool()
+@rate_limited
+@instrument("evaluate_retrieval")
 def evaluate_retrieval(test_cases: str) -> str:
     """
     Evaluate search quality by testing whether search_knowledge() retrieves expected documents.
@@ -2448,6 +2510,16 @@ def main():
     from .preflight import run_preflight
 
     try:
+        # SSE/HTTP mode: auto-enable single-instance lock (port collision prevention)
+        transport = config.transport
+        for i, arg in enumerate(sys.argv[1:], 1):
+            if arg == "--transport" and i < len(sys.argv) - 1:
+                transport = sys.argv[i + 1]
+            elif arg.startswith("--transport="):
+                transport = arg.split("=", 1)[1]
+        if transport != "stdio":
+            os.environ["KNOWLEDGE_RAG_SINGLE_INSTANCE"] = "1"
+
         with single_instance_lock():
             run_preflight()
 
@@ -2487,11 +2559,32 @@ def main():
                     print(f"[WARN] Failed to start file watcher: {e}")
                     print("[WARN] Auto-reindexing disabled. Use reindex_documents tool manually.")
 
+            # Start optional metrics server
+            if config.metrics_enabled and config.transport != "stdio":
+                from .metrics import start_metrics_server
+
+                start_metrics_server(config.metrics_port)
+
             # Restore real stdout for MCP JSON-RPC, keep print() going to stderr
             from . import _original_stdout
 
             sys.stdout = _original_stdout
-            mcp.run()
+
+            # Parse --transport CLI override
+            transport = config.transport
+            for i, arg in enumerate(sys.argv[1:], 1):
+                if arg == "--transport" and i < len(sys.argv) - 1:
+                    transport = sys.argv[i + 1]
+                elif arg.startswith("--transport="):
+                    transport = arg.split("=", 1)[1]
+
+            if transport != "stdio":
+                print(
+                    f"[SERVER] Starting {transport} server on {config.server_host}:{config.server_port}",
+                    file=sys.stderr,
+                )
+
+            mcp.run(transport=transport)
     except AlreadyRunningError as e:
         print(f"[ERROR] {e}", file=sys.stderr)
         raise SystemExit(ALREADY_RUNNING_EXIT_CODE) from e

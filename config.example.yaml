@@ -245,3 +245,36 @@ query_expansions: {}
 #
 #   # Logging verbosity: DEBUG, INFO, WARNING, ERROR
 #   # log_level: "INFO"
+
+
+# ============================================================================
+# SERVER (new in v4.0.0)
+# ============================================================================
+# Controls transport, networking, and enterprise features.
+# All fields are optional — defaults preserve v3.x stdio behavior.
+
+server:
+  # Transport protocol: "stdio" (legacy), "sse", "streamable-http"
+  # stdio: 1 process per client (compatible with all MCP clients)
+  # sse: 1 server serves N clients over HTTP+SSE (recommended for multi-agent)
+  # streamable-http: 1 server, HTTP streaming
+  transport: "stdio"
+
+  # Network settings (ignored when transport is stdio)
+  host: "127.0.0.1"
+  port: 8179
+
+  # Auth: optional bearer token validation (SSE/HTTP only)
+  auth:
+    bearer_token: ""
+
+  # Rate limiting: optional per-client request throttling
+  rate_limit:
+    enabled: false
+    requests_per_minute: 60
+    burst: 10
+
+  # Metrics: optional Prometheus-compatible /metrics endpoint
+  metrics:
+    enabled: false
+    port: 9179

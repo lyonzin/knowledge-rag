@@ -1,4 +1,4 @@
-"""Configuration for Knowledge RAG System v3.4.1 — YAML-configurable"""
+"""Configuration for Knowledge RAG System v4.0.0 — YAML-configurable"""
 
 import os
 import sys
@@ -528,6 +528,49 @@ class Config:
     default_results: int = field(default_factory=lambda: _get("search", "default_results", 5))
     max_results: int = field(default_factory=lambda: _get("search", "max_results", 20))
 
+    # Server (new in v4.0.0)
+    transport: str = field(default_factory=lambda: _get("server", "transport", "stdio"))
+    server_host: str = field(default_factory=lambda: _get("server", "host", "127.0.0.1"))
+    server_port: int = field(default_factory=lambda: _get("server", "port", 8179))
+    auth_bearer_token: str = field(
+        default_factory=lambda: (
+            _get("server", "auth", {}).get("bearer_token", "") if isinstance(_get("server", "auth", {}), dict) else ""
+        )
+    )
+    rate_limit_enabled: bool = field(
+        default_factory=lambda: (
+            _get("server", "rate_limit", {}).get("enabled", False)
+            if isinstance(_get("server", "rate_limit", {}), dict)
+            else False
+        )
+    )
+    rate_limit_rpm: int = field(
+        default_factory=lambda: (
+            _get("server", "rate_limit", {}).get("requests_per_minute", 60)
+            if isinstance(_get("server", "rate_limit", {}), dict)
+            else 60
+        )
+    )
+    rate_limit_burst: int = field(
+        default_factory=lambda: (
+            _get("server", "rate_limit", {}).get("burst", 10)
+            if isinstance(_get("server", "rate_limit", {}), dict)
+            else 10
+        )
+    )
+    metrics_enabled: bool = field(
+        default_factory=lambda: (
+            _get("server", "metrics", {}).get("enabled", False)
+            if isinstance(_get("server", "metrics", {}), dict)
+            else False
+        )
+    )
+    metrics_port: int = field(
+        default_factory=lambda: (
+            _get("server", "metrics", {}).get("port", 9179) if isinstance(_get("server", "metrics", {}), dict) else 9179
+        )
+    )
+
     def __post_init__(self):
         """Validate config values and ensure directories exist."""
         # Bounds validation
@@ -553,6 +596,20 @@ class Config:
             self.reranker_enabled = True
         if not isinstance(self.reranker_top_k_multiplier, int) or self.reranker_top_k_multiplier < 1:
             self.reranker_top_k_multiplier = 3
+
+        # Server transport validation
+        if self.transport not in ("stdio", "sse", "streamable-http"):
+            print(f"[WARN] server.transport={self.transport!r} invalid, using 'stdio'")
+            self.transport = "stdio"
+        if not isinstance(self.server_port, int) or not (1 <= self.server_port <= 65535):
+            self.server_port = 8179
+        if not isinstance(self.metrics_port, int) or not (1 <= self.metrics_port <= 65535):
+            self.metrics_port = 9179
+        if not isinstance(self.rate_limit_rpm, int) or self.rate_limit_rpm < 1:
+            self.rate_limit_rpm = 60
+        if not isinstance(self.rate_limit_burst, int) or self.rate_limit_burst < 0:
+            self.rate_limit_burst = 10
+
         if not isinstance(self.supported_formats, list) or not self.supported_formats:
             print("[WARN] supported_formats is empty or invalid, using defaults")
             self.supported_formats = [
