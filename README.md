@@ -1224,6 +1224,20 @@ A second instance exits immediately with code 75. Default is OFF (multi-client f
 - **CHORE**: pytest `tmp_path_retention_count=1` to avoid Windows atexit cleanup race in CI.
 - **ROADMAP**: Tracked v4.0 shared-service architecture (one daemon, many thin MCP clients) as the long-term fix for multi-process resource duplication. (#34)
 
+### v4.0.0 (2026-06-09) — Enterprise Concurrent Access
+
+- **NEW**: SSE and streamable-http transport modes — 1 server serves N clients (`server.transport: "sse"` in config.yaml or `--transport sse` CLI).
+- **NEW**: Thread-safe shared state for concurrent queries — QueryCache locking, BM25 build lock, orchestrator double-checked locking.
+- **NEW**: ChromaDB WAL mode enabled automatically in SSE/HTTP mode for concurrent read performance.
+- **NEW**: Optional rate limiting — sliding-window counter, configurable RPM and burst, disabled by default.
+- **NEW**: Optional Prometheus metrics endpoint — tool call counts, latency histograms, separate port, disabled by default.
+- **NEW**: All 12 MCP tools instrumented with `@rate_limited` and `@instrument` decorators (zero-cost when disabled).
+- **NEW**: `--transport` CLI override for Docker/systemd deployments.
+- **NEW**: `pip install knowledge-rag[server]` optional dependency for SSE/HTTP (uvicorn).
+- **CHANGED**: SSE/HTTP mode auto-enables single-instance lock (port collision prevention).
+- **CHANGED**: `mcp` dependency bumped to `>=1.6.0` (SSE/streamable-http support).
+- **MIGRATION**: Default transport remains `stdio` — existing users need zero changes. See config.example.yaml for SSE setup.
+
 ### v3.9.1 (2026-06-08)
 
 - **FIX**: Expand `~` in `config.yaml` path values (`documents_dir`, `data_dir`, `models_cache_dir`) via `expanduser()` on all platforms (#86).
