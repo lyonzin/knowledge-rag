@@ -1353,12 +1353,15 @@ Common issues:
 
 ### Unreleased
 
+### v4.0.1 (2026-06-16)
+
+- **FIX**: Orphan cleanup now runs before indexing loop, preventing chunk loss when files are moved (#90).
+- **FIX**: Chunk deduplication is now per-document instead of global, preventing cross-document chunk deletion (#91).
+- **FIX**: Added `on_moved` handler to `DocumentWatcher` for proper file move detection.
 - **FIX**: Startup preflight probes ChromaDB in a child process and moves crashing persistent indexes to `data/backups/auto-repair-*` before MCP initialization.
 - **FIX**: Reranker load failures now fall back to RRF ordering instead of failing `search_knowledge` on offline machines.
 - **FIX**: Virtualenv project-root detection now handles Python symlinks that resolve to the system interpreter.
 - **NEW**: `knowledge-rag-guarded` console script kept as an explicit guarded startup alias.
-- **FIX**: Orphan cleanup now runs before indexing loop, preventing chunk loss when files are moved (#90).
-- **FIX**: Chunk deduplication is now per-document instead of global, preventing cross-document chunk deletion (#91).
 
 ### v3.6.2 (2026-04-23)
 
