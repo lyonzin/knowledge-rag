@@ -112,8 +112,7 @@ class TestFileMovePreservesChunks:
         chunks_after = orch.collection.count()
 
         assert chunks_after >= chunks_before, (
-            f"Chunks dropped from {chunks_before} to {chunks_after} after move. "
-            "Orphan cleanup raced dedup (issue #90)."
+            f"Chunks dropped from {chunks_before} to {chunks_after} after move. Orphan cleanup raced dedup (issue #90)."
         )
         assert stats2["deleted"] >= 1
 
@@ -122,18 +121,14 @@ class TestFileMovePreservesChunks:
 
         (docs_dir / "alpha.md").write_text(CONTENT_A, encoding="utf-8")
         orch.index_all(force=True)
-        chunks_before = len(
-            orch.collection.get(where={"filename": "alpha.md"}, include=[])["ids"]
-        )
+        chunks_before = len(orch.collection.get(where={"filename": "alpha.md"}, include=[])["ids"])
 
         sub = docs_dir / "sub"
         sub.mkdir()
         (docs_dir / "alpha.md").rename(sub / "alpha.md")
         orch.index_all(force=False)
 
-        chunks_after = len(
-            orch.collection.get(where={"filename": "alpha.md"}, include=[])["ids"]
-        )
+        chunks_after = len(orch.collection.get(where={"filename": "alpha.md"}, include=[])["ids"])
         assert chunks_after == chunks_before, (
             f"Chunks went from {chunks_before} to {chunks_after} after move+reindex. "
             "File content should still be fully searchable."
@@ -150,17 +145,13 @@ class TestCrossDocDedup:
         (docs_dir / "beta.md").write_text(CONTENT_B, encoding="utf-8")
         orch.index_all(force=True)
 
-        beta_chunks_before = orch.collection.get(
-            where={"filename": "beta.md"}, include=[]
-        )
+        beta_chunks_before = orch.collection.get(where={"filename": "beta.md"}, include=[])
         assert len(beta_chunks_before["ids"]) > 0
 
         (docs_dir / "alpha.md").unlink()
         orch.index_all(force=False)
 
-        beta_chunks_after = orch.collection.get(
-            where={"filename": "beta.md"}, include=[]
-        )
+        beta_chunks_after = orch.collection.get(where={"filename": "beta.md"}, include=[])
         assert len(beta_chunks_after["ids"]) == len(beta_chunks_before["ids"]), (
             f"Beta chunks dropped from {len(beta_chunks_before['ids'])} to "
             f"{len(beta_chunks_after['ids'])} after removing alpha. "
@@ -179,9 +170,7 @@ class TestCrossDocDedup:
 
         assert len(c1["ids"]) > 0, "copy1 has no chunks"
         assert len(c2["ids"]) > 0, "copy2 has no chunks — global dedup suppressed it"
-        assert len(c1["ids"]) == len(c2["ids"]), (
-            "Identical files should have the same number of chunks each."
-        )
+        assert len(c1["ids"]) == len(c2["ids"]), "Identical files should have the same number of chunks each."
 
     def test_remove_one_copy_other_intact(self, rag_env):
         orch, docs_dir = rag_env
@@ -190,16 +179,12 @@ class TestCrossDocDedup:
         (docs_dir / "copy2.md").write_text(CONTENT_A, encoding="utf-8")
         orch.index_all(force=True)
 
-        count_before = len(
-            orch.collection.get(where={"filename": "copy2.md"}, include=[])["ids"]
-        )
+        count_before = len(orch.collection.get(where={"filename": "copy2.md"}, include=[])["ids"])
 
         (docs_dir / "copy1.md").unlink()
         orch.index_all(force=False)
 
-        count_after = len(
-            orch.collection.get(where={"filename": "copy2.md"}, include=[])["ids"]
-        )
+        count_after = len(orch.collection.get(where={"filename": "copy2.md"}, include=[])["ids"])
         assert count_after == count_before, (
             f"copy2 chunks dropped from {count_before} to {count_after} "
             "after removing copy1 — cross-doc dedup coupling."
