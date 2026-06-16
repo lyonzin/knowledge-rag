@@ -835,6 +835,14 @@ class DocumentWatcher(FileSystemEventHandler):
         if not event.is_directory and Path(event.src_path).suffix in config.supported_formats:
             self._schedule_reindex(event.src_path)
 
+    def on_moved(self, event):
+        if event.is_directory:
+            return
+        src_supported = Path(event.src_path).suffix in config.supported_formats
+        dest_supported = Path(event.dest_path).suffix in config.supported_formats
+        if src_supported or dest_supported:
+            self._schedule_reindex(event.dest_path)
+
 
 # =============================================================================
 # KNOWLEDGE ORCHESTRATOR
@@ -869,9 +877,6 @@ class KnowledgeOrchestrator:
         # Index metadata cache
         self._metadata_file = config.data_dir / "index_metadata.json"
         self._indexed_docs: Dict[str, Dict] = self._load_metadata()
-
-        # Chunk dedup tracking (content_hash -> chunk_id)
-        self._chunk_hashes: Dict[str, str] = self._build_dedup_index()
 
         # Migration: deferred — checked in main() after full init
         self._needs_rebuild = False
@@ -1031,11 +1036,24 @@ class KnowledgeOrchestrator:
         for doc_id, info in self._indexed_docs.items():
             path_to_docid[info.get("source", "")] = doc_id
 
-        current_paths = set()
+        current_paths = {str(doc.source) for doc in documents}
+
+        # Clean up orphaned docs BEFORE indexing so that moved files
+        # are not blocked by stale content hashes (fixes #90).
+        orphan_ids = []
+        for doc_id, info in list(self._indexed_docs.items()):
+            if info.get("source", "") not in current_paths:
+                removed = self._remove_document_chunks(doc_id)
+                stats["chunks_removed"] += removed
+                stats["deleted"] += 1
+                orphan_ids.append(doc_id)
+
+        for doc_id in orphan_ids:
+            del self._indexed_docs[doc_id]
+
         _progress_interval = max(1, stats["total_files"] // 10)
 
         for idx, doc in enumerate(documents):
-            current_paths.add(str(doc.source))
             try:
                 source_str = str(doc.source)
                 existing_doc_id = path_to_docid.get(source_str)
@@ -1103,18 +1121,6 @@ class KnowledgeOrchestrator:
                     f"— {stats['indexed']} new, {stats['skipped']} skipped"
                 )
 
-        # Clean up orphaned docs
-        orphan_ids = []
-        for doc_id, info in list(self._indexed_docs.items()):
-            if info.get("source", "") not in current_paths:
-                removed = self._remove_document_chunks(doc_id)
-                stats["chunks_removed"] += removed
-                stats["deleted"] += 1
-                orphan_ids.append(doc_id)
-
-        for doc_id in orphan_ids:
-            del self._indexed_docs[doc_id]
-
         self._save_metadata()
 
         if stats["indexed"] > 0 or stats["updated"] > 0 or stats["deleted"] > 0:
@@ -1137,16 +1143,17 @@ class KnowledgeOrchestrator:
         unique_docs = []
         unique_metas = []
         dedup_skipped = 0
+        seen_hashes: set = set()
 
         for chunk in doc.chunks:
             content_hash = hashlib.sha256(chunk.content.encode("utf-8")).hexdigest()[:20]
             chunk_id = f"{doc.id}_{chunk.index}"
 
-            if content_hash in self._chunk_hashes:
+            if content_hash in seen_hashes:
                 dedup_skipped += 1
                 continue
 
-            self._chunk_hashes[content_hash] = chunk_id
+            seen_hashes.add(content_hash)
             unique_ids.append(chunk_id)
             unique_docs.append(chunk.content)
             unique_metas.append(
@@ -1178,14 +1185,9 @@ class KnowledgeOrchestrator:
     def _remove_document_chunks(self, doc_id: str) -> int:
         """Remove all chunks belonging to a document from ChromaDB and BM25."""
         try:
-            results = self.collection.get(where={"doc_id": doc_id}, include=["metadatas"])
+            results = self.collection.get(where={"doc_id": doc_id}, include=[])
 
             if results["ids"]:
-                for meta in results["metadatas"]:
-                    content_hash = meta.get("content_hash", "")
-                    if content_hash and content_hash in self._chunk_hashes:
-                        del self._chunk_hashes[content_hash]
-
                 self.collection.delete(ids=results["ids"])
                 self._bm25_initialized = False
                 return len(results["ids"])
@@ -1193,21 +1195,6 @@ class KnowledgeOrchestrator:
             print(f"[WARN] Failed to remove chunks for doc {doc_id}: {e}")
 
         return 0
-
-    def _build_dedup_index(self) -> Dict[str, str]:
-        """Build deduplication index from existing ChromaDB data"""
-        dedup = {}
-        try:
-            count = self.collection.count()
-            if count > 0:
-                all_data = self.collection.get(include=["metadatas"], limit=count)
-                for chunk_id, meta in zip(all_data["ids"], all_data["metadatas"]):
-                    content_hash = meta.get("content_hash", "")
-                    if content_hash:
-                        dedup[content_hash] = chunk_id
-        except Exception as e:
-            print(f"[WARN] Failed to build dedup index: {e}")
-        return dedup
 
     def reindex_all(self) -> Dict[str, Any]:
         """Smart reindex: incremental detection + BM25 rebuild + orphan cleanup."""
@@ -1279,7 +1266,6 @@ class KnowledgeOrchestrator:
         self._indexed_docs = {}
         self.bm25_index.clear()
         self._bm25_initialized = False
-        self._chunk_hashes = {}
         self.query_cache.invalidate()
 
         stats = self.index_all(force=True)
@@ -1961,7 +1947,6 @@ class KnowledgeOrchestrator:
         return {
             "total_documents": len(self._indexed_docs),
             "total_chunks": self.collection.count(),
-            "unique_content_hashes": len(self._chunk_hashes),
             "categories": self.list_categories(),
             "supported_formats": config.supported_formats,
             "embedding_model": config.embedding_model,

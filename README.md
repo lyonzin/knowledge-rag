@@ -789,7 +789,6 @@ Get statistics about the knowledge base index.
   "stats": {
     "total_documents": 75,
     "total_chunks": 9256,
-    "unique_content_hashes": 9100,
     "categories": {"security": 52, "development": 8},
     "supported_formats": [".md", ".txt", ".pdf", ".py", ".json", ".docx", ".xlsx", ".pptx", ".csv", ".ipynb"],
     "embedding_model": "BAAI/bge-small-en-v1.5",
