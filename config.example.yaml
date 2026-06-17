@@ -225,6 +225,20 @@ keyword_routes: {}
 
 query_expansions: {}
 
+# Symmetric query expansion groups — every term expands to every other term
+# in the same group. Use this when you want mutual synonyms without writing
+# duplicate directional entries in query_expansions.
+#
+# Format:
+#   - ["term a", "term b", "term c"]
+#   - ["abbreviation", "full phrase"]
+#
+# The final expansion table is built from BOTH query_expansions and
+# query_expansion_groups. Legacy query_expansions entries are kept, then group
+# links are added on top.
+
+query_expansion_groups: []
+
 
 # ============================================================================
 # ADVANCED

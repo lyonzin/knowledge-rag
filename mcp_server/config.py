@@ -141,10 +141,70 @@ def _get_top(key: str, default):
     val = _yaml.get(key)
     if val is None:
         return default
-    if not isinstance(val, dict):
-        print(f"[WARN] config.yaml: {key} has wrong type (expected dict, got {type(val).__name__}), using default")
+    if not isinstance(val, type(default)):
+        print(f"[WARN] config.yaml: {key} has wrong type, using default")
         return default
     return val
+
+
+def _normalize_query_term(term: str) -> str:
+    """Normalize a query-expansion term for consistent matching."""
+    return term.strip().lower()
+
+
+def _append_unique(values: List[str], value: str) -> None:
+    """Append a normalized value while preserving order and removing duplicates."""
+    if value and value not in values:
+        values.append(value)
+
+
+def _merge_query_expansion_sources(
+    expansions: Dict[str, List[str]], expansion_groups: List[List[str]]
+) -> Dict[str, List[str]]:
+    """
+    Merge legacy directional expansions and symmetric expansion groups.
+
+    Legacy `query_expansions` entries are copied first. Then every
+    `query_expansion_groups` entry contributes pairwise synonym links for all
+    normalized terms in the group. Overlaps are merged by union while keeping
+    insertion order stable.
+    """
+    merged: Dict[str, List[str]] = {}
+
+    for raw_term, raw_synonyms in expansions.items():
+        if not isinstance(raw_term, str):
+            continue
+        term = _normalize_query_term(raw_term)
+        if not term:
+            continue
+
+        bucket = merged.setdefault(term, [])
+        if isinstance(raw_synonyms, list):
+            for synonym in raw_synonyms:
+                if not isinstance(synonym, str):
+                    continue
+                _append_unique(bucket, _normalize_query_term(synonym))
+
+    for raw_group in expansion_groups:
+        if not isinstance(raw_group, list):
+            continue
+
+        group_terms: List[str] = []
+        for raw_term in raw_group:
+            if not isinstance(raw_term, str):
+                continue
+            _append_unique(group_terms, _normalize_query_term(raw_term))
+
+        if len(group_terms) < 2:
+            continue
+
+        for term in group_terms:
+            bucket = merged.setdefault(term, [])
+            for related_term in group_terms:
+                if related_term != term:
+                    _append_unique(bucket, related_term)
+
+    return merged
 
 
 # ============================================================================
@@ -377,6 +437,8 @@ _DEFAULT_QUERY_EXPANSIONS = {
     "proxyshell": ["proxyshell", "cve-2021-34473", "exchange"],
 }
 
+_DEFAULT_QUERY_EXPANSION_GROUPS: List[List[str]] = []
+
 
 # ============================================================================
 # CONFIG DATACLASS
@@ -524,6 +586,11 @@ class Config:
         default_factory=lambda: _get_top("query_expansions", _DEFAULT_QUERY_EXPANSIONS)
     )
 
+    # Symmetric query expansion groups
+    query_expansion_groups: List[List[str]] = field(
+        default_factory=lambda: _get_top("query_expansion_groups", _DEFAULT_QUERY_EXPANSION_GROUPS)
+    )
+
     # Search settings
     default_results: int = field(default_factory=lambda: _get("search", "default_results", 5))
     max_results: int = field(default_factory=lambda: _get("search", "max_results", 20))
@@ -645,6 +712,21 @@ class Config:
             if not isinstance(keywords, list):
                 print(f"[WARN] keyword_routes.{cat} is not a list, removing")
                 del self.keyword_routes[cat]
+
+        if not isinstance(self.query_expansions, dict):
+            print("[WARN] query_expansions is invalid, using defaults")
+            self.query_expansions = dict(_DEFAULT_QUERY_EXPANSIONS)
+
+        for term, synonyms in list(self.query_expansions.items()):
+            if not isinstance(term, str) or not isinstance(synonyms, list):
+                print(f"[WARN] query_expansions.{term} is invalid, removing")
+                del self.query_expansions[term]
+
+        if not isinstance(self.query_expansion_groups, list):
+            print("[WARN] query_expansion_groups is invalid, ignoring")
+            self.query_expansion_groups = []
+
+        self.query_expansions = _merge_query_expansion_sources(self.query_expansions, self.query_expansion_groups)
 
         # Warn when documents_dir was explicitly set but does not exist
         raw_docs = _get("paths", "documents_dir", None)

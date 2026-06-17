@@ -1116,6 +1116,22 @@ query_expansions:
 
 Set `query_expansions: {}` for no expansion.
 
+`query_expansions` is directional: only the key on the left triggers the terms on the right. If you need mutual expansion without duplicating entries, use `query_expansion_groups`.
+
+```yaml
+query_expansion_groups:
+  - ["triple barrier", "tb", "trip_barr"]
+  - ["profit factor", "pf"]
+```
+
+Each group is interpreted symmetrically, so every term expands to the rest of the group. The final internal expansion table is built by merging both sources:
+
+1. `query_expansions` entries are loaded as-is.
+2. `query_expansion_groups` adds reciprocal links for every term in each group.
+3. Overlaps are merged by union with duplicate terms removed.
+
+This keeps backward compatibility while allowing concise synonym groups.
+
 ### Hybrid Search Tuning
 
 | hybrid_alpha | Behavior | Best For |
@@ -1352,6 +1368,8 @@ Common issues:
 - **ROADMAP**: Tracked v4.0 shared-service architecture (one daemon, many thin MCP clients) as the long-term fix for multi-process resource duplication. (#34)
 
 ### Unreleased
+
+- **Added:** `query_expansion_groups` config for symmetric synonym expansion (#92)
 
 ### v4.0.1 (2026-06-16)
 

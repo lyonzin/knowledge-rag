@@ -1,5 +1,6 @@
 """Tests for search pipeline components (no model/DB required)."""
 
+from mcp_server.config import _merge_query_expansion_sources
 from mcp_server.server import BM25Index, QueryCache
 
 # ── BM25 Query Expansion ──
@@ -43,6 +44,52 @@ class TestQueryExpansion:
         """Two-word terms must expand."""
         expanded = self.bm25.expand_query("reverse shell")
         assert "revshell" in expanded
+
+    def test_legacy_directional_expansion_still_works(self, monkeypatch):
+        """Legacy directional mappings must still expand from the left-hand key."""
+        monkeypatch.setattr(
+            "mcp_server.server.config.query_expansions",
+            {"tb": ["triple barrier", "trip_barr"]},
+        )
+
+        expanded = self.bm25.expand_query("tb")
+
+        assert "triple barrier" in expanded
+        assert "trip_barr" in expanded
+
+    def test_group_expansion_is_symmetric(self, monkeypatch):
+        """Any term from a group must expand to the rest of the group."""
+        merged = _merge_query_expansion_sources({}, [["triple barrier", "tb", "trip_barr"]])
+        monkeypatch.setattr("mcp_server.server.config.query_expansions", merged)
+
+        expanded = self.bm25.expand_query("tb")
+
+        assert "triple barrier" in expanded
+        assert "trip_barr" in expanded
+
+    def test_group_bigram_expansion(self, monkeypatch):
+        """Multi-word group members must match via full query and bigrams."""
+        merged = _merge_query_expansion_sources({}, [["triple barrier", "tb", "trip_barr"]])
+        monkeypatch.setattr("mcp_server.server.config.query_expansions", merged)
+
+        expanded = self.bm25.expand_query("triple barrier")
+
+        assert "tb" in expanded
+        assert "trip_barr" in expanded
+
+    def test_mixed_expansion_sources_merge_cleanly(self, monkeypatch):
+        """Legacy and grouped expansions must combine without losing entries."""
+        merged = _merge_query_expansion_sources(
+            {"pf": ["profit factor", "profit-factor"]},
+            [["profit factor", "pf", "profit_factor"]],
+        )
+        monkeypatch.setattr("mcp_server.server.config.query_expansions", merged)
+
+        expanded = self.bm25.expand_query("pf")
+
+        assert "profit factor" in expanded
+        assert "profit-factor" in expanded
+        assert "profit_factor" in expanded
 
 
 # ── BM25 Search ──

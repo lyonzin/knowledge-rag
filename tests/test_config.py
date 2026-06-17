@@ -1,6 +1,6 @@
 """Tests for configuration integrity."""
 
-from mcp_server.config import config
+from mcp_server.config import _merge_query_expansion_sources, config
 
 
 def test_no_ollama_references():
@@ -111,3 +111,24 @@ def test_new_code_formats_default_enabled():
     """New code formats must be in default supported_formats (not opt-in)."""
     for ext in [".c", ".h", ".cpp", ".js", ".jsx", ".ts", ".tsx", ".xml"]:
         assert ext in config.supported_formats, f"{ext} missing from supported_formats defaults"
+
+
+def test_query_expansion_groups_are_symmetric():
+    """A synonym group must generate reciprocal expansions for every member."""
+    merged = _merge_query_expansion_sources({}, [["metatrader 4", "mt4", "mql4"]])
+
+    assert merged["metatrader 4"] == ["mt4", "mql4"]
+    assert merged["mt4"] == ["metatrader 4", "mql4"]
+    assert merged["mql4"] == ["metatrader 4", "mt4"]
+
+
+def test_query_expansion_groups_extend_legacy_entries():
+    """Grouped synonyms must extend, not replace, legacy directional mappings."""
+    merged = _merge_query_expansion_sources(
+        {"tb": ["triple barrier", "trip_barr", "legacy_alias"]},
+        [["triple barrier", "tb", "trip_barr"]],
+    )
+
+    assert merged["tb"] == ["triple barrier", "trip_barr", "legacy_alias"]
+    assert "tb" in merged["triple barrier"]
+    assert "trip_barr" in merged["triple barrier"]
