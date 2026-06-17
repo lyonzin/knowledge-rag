@@ -137,6 +137,148 @@
         }
       }
     },
+    "mcp_server.metrics": {
+      "classes": {
+        "MetricsCollector": {
+          "bases": [],
+          "methods": {
+            "exposition": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "inc": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "name"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "labels"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "value"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "observe": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "name"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "value"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "labels"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "set_gauge": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "name"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "value"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "labels"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            }
+          }
+        }
+      },
+      "functions": {
+        "get_metrics": {
+          "args": [],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "instrument": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "tool_name"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "start_metrics_server": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "port"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        }
+      }
+    },
     "mcp_server.preflight": {
       "classes": {},
       "functions": {
@@ -147,6 +289,47 @@
               "has_default": true,
               "kind": "positional",
               "name": "timeout_seconds"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        }
+      }
+    },
+    "mcp_server.ratelimit": {
+      "classes": {
+        "SlidingWindowCounter": {
+          "bases": [],
+          "methods": {
+            "allow": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "client_id"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            }
+          }
+        }
+      },
+      "functions": {
+        "rate_limited": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "fn"
             }
           ],
           "is_async": false,
@@ -344,6 +527,24 @@
               ],
               "is_async": false,
               "returns_annotated": false
+            },
+            "on_moved": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "event"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": false
             }
           }
         },
@@ -415,8 +616,17 @@
               ],
               "is_async": false,
               "returns_annotated": true
+            },
+            "verify_gpu_readiness": {
+              "args": [],
+              "is_async": false,
+              "returns_annotated": true
             }
           }
+        },
+        "GPUStatus": {
+          "bases": [],
+          "methods": {}
         },
         "KnowledgeOrchestrator": {
           "bases": [],

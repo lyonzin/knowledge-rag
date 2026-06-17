@@ -1369,7 +1369,10 @@ Common issues:
 
 ### Unreleased
 
+### v4.1.0 (2026-06-17)
+
 - **Added:** `query_expansion_groups` config for symmetric synonym expansion (#92)
+- **Improved:** `expand_query()` now returns deterministic expansion order (set → ordered list with dedup)
 
 ### v4.0.1 (2026-06-16)
 
