@@ -1050,7 +1050,7 @@ class KnowledgeOrchestrator:
             print(f"[INDEX] Scanning {stats['total_files']} documents...")
 
         path_to_docid: Dict[str, str] = {}
-        for doc_id, info in self._indexed_docs.items():
+        for doc_id, info in list(self._indexed_docs.items()):
             path_to_docid[info.get("source", "")] = doc_id
 
         current_paths = {str(doc.source) for doc in documents}
@@ -1516,7 +1516,7 @@ class KnowledgeOrchestrator:
 
             # Find the doc_id from metadata lookup
             doc_id = None
-            for did, info in self._indexed_docs.items():
+            for did, info in list(self._indexed_docs.items()):
                 stored = str(Path(info.get("source", "")).resolve())
                 if stored == str(Path(source).resolve()):
                     doc_id = did
@@ -1709,7 +1709,7 @@ class KnowledgeOrchestrator:
         filepath_resolved = str(filepath.resolve())
 
         doc_id = None
-        for did, info in self._indexed_docs.items():
+        for did, info in list(self._indexed_docs.items()):
             stored = str(Path(info.get("source", "")).resolve())
             if stored == filepath_resolved:
                 doc_id = did
@@ -1763,7 +1763,7 @@ class KnowledgeOrchestrator:
         filepath_resolved = str(Path(filepath).resolve())
 
         doc_id = None
-        for did, info in self._indexed_docs.items():
+        for did, info in list(self._indexed_docs.items()):
             stored = str(Path(info.get("source", "")).resolve())
             if stored == filepath_resolved:
                 doc_id = did
@@ -1824,7 +1824,7 @@ class KnowledgeOrchestrator:
         filepath_resolved = str(Path(filepath).resolve())
 
         doc_id = None
-        for did, info in self._indexed_docs.items():
+        for did, info in list(self._indexed_docs.items()):
             stored = str(Path(info.get("source", "")).resolve())
             if stored == filepath_resolved:
                 doc_id = did
@@ -1936,7 +1936,7 @@ class KnowledgeOrchestrator:
     def list_categories(self) -> Dict[str, int]:
         """List all categories with document counts"""
         categories = {}
-        for doc_info in self._indexed_docs.values():
+        for doc_info in list(self._indexed_docs.values()):
             cat = doc_info.get("category", "unknown")
             categories[cat] = categories.get(cat, 0) + 1
         return categories
@@ -1944,7 +1944,7 @@ class KnowledgeOrchestrator:
     def list_documents(self, category: Optional[str] = None) -> List[Dict[str, str]]:
         """List all indexed documents, optionally filtered by category"""
         docs = []
-        for doc_id, info in self._indexed_docs.items():
+        for doc_id, info in list(self._indexed_docs.items()):
             if category and info.get("category") != category:
                 continue
             docs.append(

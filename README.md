@@ -1369,6 +1369,10 @@ Common issues:
 
 ### Unreleased
 
+### v4.1.1 (2026-06-17)
+
+- **FIX**: All `_indexed_docs` iterations now use `list()` snapshot, preventing `dictionary changed size during iteration` crash when FileWatcher modifies the index concurrently with MCP tool calls (affects `search_knowledge`, `search_similar`, `update_document`, `remove_document`, `evaluate_retrieval`, `list_categories`, `list_documents`)
+
 ### v4.1.0 (2026-06-17)
 
 - **Added:** `query_expansion_groups` config for symmetric synonym expansion (#92)
