@@ -1543,9 +1543,11 @@ class KnowledgeOrchestrator:
             else:
                 try:
                     fetched = self.collection.get(ids=[chunk_id], include=["documents", "metadatas"])
+                    if not fetched["documents"] or not fetched["metadatas"] or not fetched["documents"][0] or not fetched["metadatas"][0]:
+                        continue
                     data = {
-                        "document": fetched["documents"][0] if fetched["documents"] else "",
-                        "metadata": fetched["metadatas"][0] if fetched["metadatas"] else {},
+                        "document": fetched["documents"][0],
+                        "metadata": fetched["metadatas"][0],
                         "distance": 0,
                     }
                 except Exception:
@@ -2273,7 +2275,7 @@ def search_knowledge(
     hybrid_alpha = max(0.0, min(hybrid_alpha if hybrid_alpha is not None else 0.3, 1.0))
     min_score = max(0.0, min(min_score if min_score is not None else 0.0, 1.0))
 
-    valid_categories = list(config.keyword_routes.keys()) + list(set(config.category_mappings.values()))
+    valid_categories = list(config.keyword_routes.keys()) + list(set(config.category_mappings.values())) + ["general"]
     if category and category not in valid_categories:
         return json.dumps(
             {"status": "error", "message": f"Invalid category '{category}'. Valid: {', '.join(valid_categories)}"}
