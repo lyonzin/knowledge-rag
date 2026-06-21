@@ -1401,6 +1401,9 @@ Common issues:
 
 ### Unreleased
 
+- **FIX**: Accept `"general"` as a valid category in `search_knowledge` — the parser fallback was missing from `valid_categories`.
+- **FIX**: Skip BM25-only search results when Chroma can no longer resolve the chunk ID (stale after reindex) instead of returning records with empty fields.
+
 ### v4.3.0 (2026-06-17) — Async Reindex, GPU CUDA 12, 13th MCP Tool
 
 - **NEW**: `get_reindex_status` MCP tool — lightweight reindex progress polling without computing full index stats. Returns active/idle status, percent, processed/total, errors, and last result.

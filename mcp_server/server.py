@@ -1543,7 +1543,12 @@ class KnowledgeOrchestrator:
             else:
                 try:
                     fetched = self.collection.get(ids=[chunk_id], include=["documents", "metadatas"])
-                    if not fetched["documents"] or not fetched["metadatas"] or not fetched["documents"][0] or not fetched["metadatas"][0]:
+                    if (
+                        not fetched["documents"]
+                        or not fetched["metadatas"]
+                        or not fetched["documents"][0]
+                        or not fetched["metadatas"][0]
+                    ):
                         continue
                     data = {
                         "document": fetched["documents"][0],
