@@ -141,7 +141,11 @@ fail_under = 35
 # we incrementally annotate the legacy modules. The CI job runs strict on the
 # allowlist below; new modules are added as they earn full annotations.
 [tool.mypy]
-python_version = "3.11"
+# Pinned to 3.12 to match the CI runtime (Python 3.12) and to accept PEP 695
+# ``type`` statements that recent third-party stubs (e.g. numpy/__init__.pyi)
+# emit. The package itself still supports Python 3.11+ at runtime — this
+# setting only governs the static-analysis target.
+python_version = "3.12"
 strict = true
 show_error_codes = true
 warn_unused_configs = true
