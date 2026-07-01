@@ -11,7 +11,7 @@ ruff>=0.14.0,<1.0
 pre-commit>=3.7.0,<5.0
 
 # ── Tests ───────────────────────────────────────────────────────────────────
-pytest>=9.0.0,<10.0
+pytest>=9.1.1,<10.0
 pytest-cov>=7.0.0
 pytest-rerunfailures>=14.0    # flake detection (Pillar 2: Stability)
 pytest-memray>=1.8.0; sys_platform != "win32"  # memory baseline (Pillar 3); memray Linux/macOS only
