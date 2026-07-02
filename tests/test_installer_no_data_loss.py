@@ -175,15 +175,12 @@ def test_top_level_keys_preserved(tmp_path, client_key, target_key, fixture_fn):
 
     after = json.loads(target.read_text(encoding="utf-8"))
     assert set(after.keys()) == set(payload.keys()), (
-        f"top-level key set changed: added={set(after) - set(payload)}, "
-        f"removed={set(payload) - set(after)}"
+        f"top-level key set changed: added={set(after) - set(payload)}, removed={set(payload) - set(after)}"
     )
 
 
 @pytest.mark.parametrize("client_key,target_key,fixture_fn", SCHEMA_CASES)
-def test_sibling_servers_preserved_byte_for_byte(
-    tmp_path, client_key, target_key, fixture_fn
-):
+def test_sibling_servers_preserved_byte_for_byte(tmp_path, client_key, target_key, fixture_fn):
     """Other MCP servers under the target key must survive intact."""
     payload = fixture_fn()
     client, target = _prepare(tmp_path, client_key, payload)
@@ -199,18 +196,12 @@ def test_sibling_servers_preserved_byte_for_byte(
     for sibling_name, sibling_spec in payload[target_key].items():
         if sibling_name == install.SERVER_NAME:
             continue
-        assert sibling_name in after[target_key], (
-            f"sibling {sibling_name!r} was removed — DATA LOSS!"
-        )
-        assert after[target_key][sibling_name] == sibling_spec, (
-            f"sibling {sibling_name!r} was mutated — DATA LOSS!"
-        )
+        assert sibling_name in after[target_key], f"sibling {sibling_name!r} was removed — DATA LOSS!"
+        assert after[target_key][sibling_name] == sibling_spec, f"sibling {sibling_name!r} was mutated — DATA LOSS!"
 
 
 @pytest.mark.parametrize("client_key,target_key,fixture_fn", SCHEMA_CASES)
-def test_non_target_top_level_keys_deeply_identical(
-    tmp_path, client_key, target_key, fixture_fn
-):
+def test_non_target_top_level_keys_deeply_identical(tmp_path, client_key, target_key, fixture_fn):
     """Non-target top-level keys must be deeply identical after write."""
     payload = fixture_fn()
     client, target = _prepare(tmp_path, client_key, payload)
@@ -230,9 +221,7 @@ def test_non_target_top_level_keys_deeply_identical(
 
 
 @pytest.mark.parametrize("client_key,target_key,fixture_fn", SCHEMA_CASES)
-def test_backup_file_matches_pre_write_state(
-    tmp_path, client_key, target_key, fixture_fn
-):
+def test_backup_file_matches_pre_write_state(tmp_path, client_key, target_key, fixture_fn):
     """A byte-identical .knowledge-rag.bak backup is written before write."""
     payload = fixture_fn()
     client, target = _prepare(tmp_path, client_key, payload)
@@ -247,9 +236,7 @@ def test_backup_file_matches_pre_write_state(
 
     backup = target.with_suffix(target.suffix + install.BACKUP_SUFFIX)
     assert backup.exists(), "backup file was not created"
-    assert backup.read_bytes() == pre_write_bytes, (
-        "backup differs from pre-write bytes"
-    )
+    assert backup.read_bytes() == pre_write_bytes, "backup differs from pre-write bytes"
 
 
 @pytest.mark.parametrize("client_key,target_key,fixture_fn", SCHEMA_CASES)
@@ -261,16 +248,10 @@ def test_second_run_is_idempotent(tmp_path, client_key, target_key, fixture_fn):
     install_path = tmp_path / "install"
     venv_python = install_path / "venv" / "bin" / "python"
 
-    changed_first, _ = install.register_client(
-        client, install_path, venv_python, dry_run=False
-    )
-    changed_second, msg_second = install.register_client(
-        client, install_path, venv_python, dry_run=False
-    )
+    changed_first, _ = install.register_client(client, install_path, venv_python, dry_run=False)
+    changed_second, msg_second = install.register_client(client, install_path, venv_python, dry_run=False)
     assert changed_first is True
-    assert changed_second is False, (
-        f"expected idempotent no-op on second run, but wrote again ({msg_second!r})"
-    )
+    assert changed_second is False, f"expected idempotent no-op on second run, but wrote again ({msg_second!r})"
 
 
 @pytest.mark.parametrize("client_key,target_key,fixture_fn", SCHEMA_CASES)
@@ -386,9 +367,7 @@ def test_only_knowledge_rag_entry_added_or_updated(tmp_path):
     for k in set(payload) | set(after):
         if payload.get(k) != after.get(k):
             added_or_changed.add(k)
-    assert added_or_changed == {"mcpServers"}, (
-        f"expected only 'mcpServers' to change, got {added_or_changed}"
-    )
+    assert added_or_changed == {"mcpServers"}, f"expected only 'mcpServers' to change, got {added_or_changed}"
 
     # Within mcpServers, only the knowledge-rag entry must differ.
     mcp_before = payload["mcpServers"]
