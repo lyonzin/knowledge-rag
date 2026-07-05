@@ -1401,6 +1401,8 @@ Common issues:
 
 ### Unreleased
 
+- **NEW**: Hybrid search adds a small generic ranking boost when query terms match indexed `source` or `filename` metadata, helping exact file/path-oriented queries surface the most navigationally relevant chunks without changing the public API.
+
 ### v4.4.0 (2026-07-06) — Cross-Platform Installer & Hybrid Search Category Filter
 
 - **NEW**: Cross-platform, multi-LLM-client installer (`install.py`) driving both `install.sh` (Linux/macOS) and `install.ps1` (Windows) as thin wrappers. One codebase, one behavior across every OS.

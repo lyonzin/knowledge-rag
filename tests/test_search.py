@@ -273,3 +273,58 @@ class TestKeywordRouting:
 
         assert not re.search(r"\bapi\b", "rapid deployment")
         assert re.search(r"\bapi\b", "api endpoint")
+
+
+# ── Path-aware ranking ──
+
+
+class TestPathAwareRanking:
+    def test_path_match_can_lift_keyword_result(self, monkeypatch):
+        """Path and filename matches provide a small generic ranking signal."""
+        monkeypatch.setattr("mcp_server.server.config.reranker_enabled", False)
+
+        class FakeCache:
+            def get(self, *args, **kwargs):
+                return None
+
+            def put(self, *args, **kwargs):
+                return None
+
+        class FakeBM25:
+            def search(self, query, top_k):
+                return [("chunk_generic", 10.0), ("chunk_target", 9.0)]
+
+        class FakeCollection:
+            def get(self, ids, include):
+                chunk_id = ids[0]
+                documents = {
+                    "chunk_generic": "same keyword content",
+                    "chunk_target": "same keyword content",
+                }
+                metadatas = {
+                    "chunk_generic": {
+                        "source": "/docs/notes/general.md",
+                        "filename": "general.md",
+                        "category": "docs",
+                        "chunk_index": 0,
+                    },
+                    "chunk_target": {
+                        "source": "/docs/reports/api-security.md",
+                        "filename": "api-security.md",
+                        "category": "docs",
+                        "chunk_index": 0,
+                    },
+                }
+                return {"documents": [documents[chunk_id]], "metadatas": [metadatas[chunk_id]]}
+
+        orchestrator = object.__new__(KnowledgeOrchestrator)
+        orchestrator.query_cache = FakeCache()
+        orchestrator.bm25_index = FakeBM25()
+        orchestrator.collection = FakeCollection()
+        orchestrator._ensure_bm25_index = lambda: None
+        orchestrator._route_by_keywords = lambda query: None
+        orchestrator._expand_with_adjacent_chunks = lambda results: results
+
+        results = orchestrator.query("api security", max_results=2, hybrid_alpha=0.0)
+
+        assert results[0]["source"] == "/docs/reports/api-security.md"

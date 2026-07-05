@@ -637,6 +637,33 @@ class CrossEncoderReranker:
         return documents[:top_k]
 
 
+def _metadata_path_score(query: str, metadata: Dict[str, Any]) -> float:
+    """Return a small generic score boost when query terms match path metadata."""
+    query_terms = re.findall(r"[a-z0-9][-a-z0-9]*[a-z0-9]|[a-z0-9]", query.lower())
+    if not query_terms:
+        return 0.0
+
+    source = str(metadata.get("source", ""))
+    filename = str(metadata.get("filename", ""))
+    path_text = f"{source} {filename}".lower()
+    path_tokens = set(re.findall(r"[a-z0-9][-a-z0-9]*[a-z0-9]|[a-z0-9]", path_text))
+    if not path_tokens:
+        return 0.0
+
+    score = 0.0
+    for term in query_terms:
+        if term in path_tokens:
+            score += 0.0006
+        elif term in path_text:
+            score += 0.0003
+
+    query_phrase = query.strip().lower()
+    if query_phrase and query_phrase in path_text:
+        score += 0.0012
+
+    return min(score, 0.003)
+
+
 # =============================================================================
 # BM25 INDEX
 # =============================================================================
@@ -1583,7 +1610,7 @@ class KnowledgeOrchestrator:
                 continue
 
             combined_scores[chunk_id] = {
-                "rrf_score": combined_rrf,
+                "rrf_score": combined_rrf + _metadata_path_score(query_text, data.get("metadata", {})),
                 "semantic_rank": semantic_rank if chunk_id in semantic_results else None,
                 "bm25_rank": bm25_rank if chunk_id in bm25_results else None,
                 "document": data.get("document", ""),
