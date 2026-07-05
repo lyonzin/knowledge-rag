@@ -1,7 +1,7 @@
 """Tests for search pipeline components (no model/DB required)."""
 
 from mcp_server.config import _merge_query_expansion_sources
-from mcp_server.server import BM25Index, QueryCache
+from mcp_server.server import BM25Index, KnowledgeOrchestrator, QueryCache
 
 # ── BM25 Query Expansion ──
 
@@ -123,6 +123,65 @@ class TestBM25Search:
         bm25.build_index()
         results = bm25.search("")
         assert results == []
+
+
+class TestHybridCategoryFilter:
+    def test_bm25_results_respect_category_filter(self, monkeypatch):
+        """BM25-only results must not bypass an explicit category filter."""
+        monkeypatch.setattr("mcp_server.server.config.reranker_enabled", False)
+
+        class FakeCache:
+            def get(self, *args, **kwargs):
+                return None
+
+            def put(self, *args, **kwargs):
+                return None
+
+        class FakeBM25:
+            def search(self, query, top_k):
+                return [("chunk_report", 10.0), ("chunk_code", 9.0)]
+
+        class FakeCollection:
+            _docs = {
+                "chunk_report": "report content",
+                "chunk_code": "code content",
+            }
+            _metadatas = {
+                "chunk_report": {
+                    "source": "/docs/report.md",
+                    "filename": "report.md",
+                    "category": "reports",
+                    "chunk_index": 0,
+                    "keywords": "",
+                },
+                "chunk_code": {
+                    "source": "/src/code.py",
+                    "filename": "code.py",
+                    "category": "code",
+                    "chunk_index": 0,
+                    "keywords": "",
+                },
+            }
+
+            def get(self, ids, include):
+                return {
+                    "ids": ids,
+                    "documents": [self._docs[chunk_id] for chunk_id in ids] if "documents" in include else None,
+                    "metadatas": [self._metadatas[chunk_id] for chunk_id in ids] if "metadatas" in include else None,
+                }
+
+        orchestrator = object.__new__(KnowledgeOrchestrator)
+        orchestrator.query_cache = FakeCache()
+        orchestrator.bm25_index = FakeBM25()
+        orchestrator.collection = FakeCollection()
+        orchestrator._ensure_bm25_index = lambda: None
+        orchestrator._route_by_keywords = lambda query: None
+        orchestrator._expand_with_adjacent_chunks = lambda results: results
+
+        results = orchestrator.query("anything", max_results=5, category_filter="reports", hybrid_alpha=0.0)
+
+        assert [result["source"] for result in results] == ["/docs/report.md"]
+        assert {result["category"] for result in results} == {"reports"}
 
 
 # ── Query Cache ──

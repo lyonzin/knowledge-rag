@@ -1474,6 +1474,12 @@ class KnowledgeOrchestrator:
         elif routed_category:
             where_filter = {"category": routed_category}
 
+        def _matches_category(metadata: Dict[str, Any]) -> bool:
+            if not where_filter:
+                return True
+            expected_category = where_filter.get("category")
+            return not expected_category or metadata.get("category") == expected_category
+
         # Parallel Semantic + BM25 search (threaded for latency reduction)
         from concurrent.futures import ThreadPoolExecutor
 
@@ -1507,8 +1513,23 @@ class KnowledgeOrchestrator:
             r = {}
             if hybrid_alpha < 1.0:
                 try:
-                    bm25_hits = self.bm25_index.search(query_text, top_k=max_results * 3)
-                    for rank, (chunk_id, bm25_score) in enumerate(bm25_hits):
+                    bm25_top_k = max_results * (20 if where_filter else 3)
+                    bm25_hits = self.bm25_index.search(query_text, top_k=bm25_top_k)
+
+                    if where_filter:
+                        chunk_ids = [chunk_id for chunk_id, _ in bm25_hits]
+                        metadata_by_id = {}
+                        if chunk_ids:
+                            fetched = self.collection.get(ids=chunk_ids, include=["metadatas"])
+                            metadata_by_id = dict(zip(fetched.get("ids", []), fetched.get("metadatas", [])))
+
+                        bm25_hits = [
+                            (chunk_id, bm25_score)
+                            for chunk_id, bm25_score in bm25_hits
+                            if _matches_category(metadata_by_id.get(chunk_id, {}))
+                        ]
+
+                    for rank, (chunk_id, bm25_score) in enumerate(bm25_hits[: max_results * 3]):
                         r[chunk_id] = {"rank": rank + 1, "bm25_score": bm25_score}
                 except Exception as e:
                     print(f"[WARN] BM25 search failed: {e}")
@@ -1557,6 +1578,9 @@ class KnowledgeOrchestrator:
                     }
                 except Exception:
                     continue
+
+            if not _matches_category(data.get("metadata", {})):
+                continue
 
             combined_scores[chunk_id] = {
                 "rrf_score": combined_rrf,
