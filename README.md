@@ -1401,6 +1401,8 @@ Common issues:
 
 ### Unreleased
 
+### v4.4.0 (2026-07-06) — Cross-Platform Installer & Hybrid Search Category Filter
+
 - **NEW**: Cross-platform, multi-LLM-client installer (`install.py`) driving both `install.sh` (Linux/macOS) and `install.ps1` (Windows) as thin wrappers. One codebase, one behavior across every OS.
 - **NEW**: Auto-detects and registers `knowledge-rag` in 8 LLM clients — Claude Code, Claude Desktop, Cursor, Windsurf, VS Code (Copilot Chat), Cline, Gemini CLI, Zed — writing to each tool's canonical config path with the correct JSON schema per client (VS Code uses `servers`, Zed uses `context_servers`, everyone else uses `mcpServers`).
 - **NEW**: `--for <clients>` / `--exclude <clients>` opt-in/opt-out selection, `--dry-run` preview, `--list-clients` registry inspection, `--pypi-version <ver>` pinning, `--skip-init` / `--skip-model` for fast reruns. See `python install.py --help`.
@@ -1410,8 +1412,9 @@ Common issues:
 - **FIX**: `install.sh` guards against `sh install.sh` (bash-only features now emit a clear error instead of a cryptic syntax failure).
 - **FIX**: Both scripts now correctly advertise **13 MCP tools** (was outdated at 12; `get_reindex_status` shipped in v4.3.0).
 - **FIX**: Windows-side `install.ps1` prefers `winget install Python.Python.3.12 --scope user` (no admin), falls back to python.org 3.12.7 (was pinned to 3.12.0).
-- **FIX**: Hybrid search now applies the active category filter to BM25 results before RRF fusion, preventing keyword-only hits from other categories from leaking into filtered searches.
+- **FIX**: Hybrid search now applies the active category filter to BM25 results before RRF fusion, preventing keyword-only BM25 hits from other categories from leaking into filtered searches. Both leak paths are closed: BM25 candidates are metadata-filtered before RRF (with `top_k` widened to `max_results * 20` to compensate for post-filter drop), and the fallback fetch during fusion re-checks `category` before adding a chunk to `combined_scores`. Note: the `category_filter` guard now also applies to the keyword-routed category — `_route_by_keywords()`-inferred routing filters BM25 too, consistent with the semantic branch. Users with warm `query_cache` entries should restart the server to invalidate stale results. (#109, thanks @Hohlas)
 - **TEST**: New `tests/test_installer_no_data_loss.py` (22 tests) locks in the installer's zero-data-loss contract across all three JSON schemas (`mcpServers` / `servers` / `context_servers`): top-level keys preserved, sibling MCP servers byte-identical, `.knowledge-rag.bak` backup written before every mutation, idempotent second run, `--dry-run` writes nothing, atomic `os.replace` write. Baseline: 231 → 266.
+- **TEST**: New `TestHybridCategoryFilter::test_bm25_results_respect_category_filter` in `tests/test_search.py` — deterministic regression covering BM25-only hits with mixed categories. Baseline: 266 → 267.
 
 ### v4.3.1 (2026-06-22) — Hybrid Search Fixes
 
