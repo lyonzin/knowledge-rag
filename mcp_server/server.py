@@ -1466,13 +1466,17 @@ class KnowledgeOrchestrator:
 
         self._ensure_bm25_index()
 
-        # Keyword routing
+        # Keyword routing — informational only.
+        # `routed_category` is surfaced via the `routed_by` field for telemetry,
+        # but MUST NOT restrict the search when the user did not pass an explicit
+        # `category_filter`. Auto-routing to a sparsely-populated category (e.g. one
+        # with only a handful of docs) was hiding relevant material that lived under
+        # the top-level `security` bucket. Users who want a hard filter still get it
+        # by passing `category_filter=...` explicitly.
         routed_category = self._route_by_keywords(query_text)
         where_filter = None
         if category_filter:
             where_filter = {"category": category_filter}
-        elif routed_category:
-            where_filter = {"category": routed_category}
 
         def _matches_category(metadata: Dict[str, Any]) -> bool:
             if not where_filter:

@@ -1401,6 +1401,9 @@ Common issues:
 
 ### Unreleased
 
+- **FIX**: `search_knowledge` no longer restricts results to a single category when the user did not pass an explicit `category_filter`. Previously, the internal `_route_by_keywords()` heuristic could infer a category from query terms (e.g. "ADCS", "ESC1", "certipy" → `redteam`) and apply it as a hard where-filter on **both** the semantic and BM25 branches, hiding relevant material sitting in other categories — especially painful when the routed category was sparsely populated (2-doc corner buckets) while the real content lived under a bulkier top-level bucket (e.g. thousands of docs under `security/`). The router is now **informational only**: `routed_by` is still surfaced in each result for telemetry (public API unchanged), but never restricts the candidate set. Users who want a hard filter still get it by passing `category_filter=...` explicitly — which continues to filter BM25 consistently with #109. Warm `query_cache` entries from before the fix should be invalidated by restarting the server.
+- **TEST**: New `TestKeywordRoutingBehavior` class in `tests/test_search.py` (3 tests) pins the fix: (1) BM25 candidates from other categories survive when no explicit filter is passed, (2) the semantic branch is called with `where=None` when no explicit filter is passed, (3) explicit `category_filter` still overrides the router (regression guard for #109). Baseline: 266 → 270.
+
 ### v4.4.0 (2026-07-06) — Cross-Platform Installer & Hybrid Search Category Filter
 
 - **NEW**: Cross-platform, multi-LLM-client installer (`install.py`) driving both `install.sh` (Linux/macOS) and `install.ps1` (Windows) as thin wrappers. One codebase, one behavior across every OS.
