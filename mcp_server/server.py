@@ -1093,7 +1093,19 @@ class KnowledgeOrchestrator:
     _bm25_build_lock = threading.Lock()
 
     def _ensure_bm25_index(self) -> None:
-        """Lazy initialization of BM25 index from existing ChromaDB data"""
+        """Lazy initialization of BM25 index from existing ChromaDB data.
+
+        Only marks ``_bm25_initialized=True`` after a successful build with
+        actual content. Empty-collection bootup or build failures leave the
+        flag ``False`` so the next call retries once documents are present.
+
+        Prior behavior set the flag unconditionally at the end of the guarded
+        block, which trapped the index in an uninitialized state when the
+        server booted against an empty collection (issue #114): subsequent
+        ``add_document`` calls populate ``bm25_index.corpus`` but do not
+        rebuild the inverted index, and this method — the only path that
+        does — would short-circuit forever on the stale flag.
+        """
         if self._bm25_initialized:
             return
         with self._bm25_build_lock:
@@ -1102,16 +1114,22 @@ class KnowledgeOrchestrator:
 
             try:
                 count = self.collection.count()
-                if count > 0:
-                    all_data = self.collection.get(include=["documents"], limit=count)
-                    if all_data["ids"] and all_data["documents"]:
-                        self.bm25_index.add_documents(all_data["ids"], all_data["documents"])
-                        self.bm25_index.build_index()
-                        print(f"[INFO] BM25 index built with {len(self.bm25_index)} documents")
+                if count == 0:
+                    # Empty collection — nothing to build. Leave flag False so
+                    # a later call retries once documents become available.
+                    return
+
+                all_data = self.collection.get(include=["documents"], limit=count)
+                if not all_data["ids"] or not all_data["documents"]:
+                    return
+
+                self.bm25_index.add_documents(all_data["ids"], all_data["documents"])
+                self.bm25_index.build_index()
+                print(f"[INFO] BM25 index built with {len(self.bm25_index)} documents")
+                self._bm25_initialized = True
             except Exception as e:
                 print(f"[WARN] Failed to build BM25 index: {e}")
-
-            self._bm25_initialized = True
+                # Do not mark initialized; retry allowed on next call.
 
     # =========================================================================
     # Indexing

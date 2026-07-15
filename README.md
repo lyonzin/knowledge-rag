@@ -1401,6 +1401,9 @@ Common issues:
 
 ### Unreleased
 
+- **FIX**: `_ensure_bm25_index` no longer traps the guard flag `_bm25_initialized` in a stuck-True state when the server boots against an empty ChromaDB collection. Prior behavior set the flag unconditionally at the end of the guarded block, so a fresh-install bootup or a metadata-mapping loss left BM25 permanently uninitialized: subsequent `add_document()` calls populate `bm25_index.corpus` but do not rebuild the inverted index, and `_ensure_bm25_index` — the only path that does — short-circuited on the stale flag. All keyword-only searches returned zero results; hybrid searches returned only semantic hits with `bm25_rank: null`. The flag is now set only after a build that actually produced an index; empty collections and exceptions leave it False so the next call retries. (#114)
+- **TEST**: New `TestEmptyBootupDoesNotTrapGuardFlag` (5 tests) pins the contract — empty-collection boot leaves flag False, populated collection marks True, empty-then-populated recovery works, empty `get()` result leaves False, and `build_index()` exceptions leave False for retry. Baseline: 271 → 276.
+
 ### v4.5.0 (2026-07-06) — Hybrid Search Ranking & Routing Fix
 
 - **FIX**: `search_knowledge` now searches the entire index when the user omits `category_filter`. The internal `_route_by_keywords()` heuristic previously acted as a hard where-filter on both the semantic and BM25 branches, so queries whose terms happened to map to a sparsely-populated category could return two documents while thousands of relevant chunks in other categories were silently dropped. The router is now **informational only**: the `routed_by` field is still populated in every result for telemetry (public API unchanged), but the candidate set is never restricted. Users who want a hard filter still get it by passing `category_filter=...` explicitly — which continues to filter BM25 consistently with #109. (#112)
