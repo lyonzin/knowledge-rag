@@ -53,8 +53,7 @@ class TestEmptyBootupDoesNotTrapGuardFlag:
         # trigger a real build. The pre-fix behavior set this to True
         # unconditionally, trapping BM25 in an uninitialized state forever.
         assert o._bm25_initialized is False, (
-            "empty-collection bootup must leave _bm25_initialized=False so "
-            "the guard retries once documents are added"
+            "empty-collection bootup must leave _bm25_initialized=False so the guard retries once documents are added"
         )
         assert o.bm25_index._index_built is False
         assert len(o.bm25_index) == 0
