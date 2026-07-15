@@ -19,8 +19,6 @@ hits with ``bm25_rank: null``.
 import threading
 from unittest.mock import MagicMock
 
-import pytest
-
 from mcp_server.server import BM25Index, KnowledgeOrchestrator
 
 
