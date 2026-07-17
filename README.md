@@ -34,16 +34,12 @@ pip install knowledge-rag → restart Claude Code → search_knowledge("your que
 
 ---
 
-## Stars
+## Star History
 
 <div align="center">
 
-<a href="https://github.com/lyonzin/knowledge-rag/stargazers">
-  <img alt="GitHub stars" src="https://img.shields.io/github/stars/lyonzin/knowledge-rag?style=for-the-badge&logo=github&color=yellow&labelColor=black" />
-</a>
-<a href="https://star-history.com/#lyonzin/knowledge-rag&Date">
-  <img alt="Star History" src="https://img.shields.io/badge/Star_History-View_Chart-blue?style=for-the-badge&logo=star" />
-</a>
+<!-- star-history:start -->
+<!-- star-history:end -->
 
 </div>
 
