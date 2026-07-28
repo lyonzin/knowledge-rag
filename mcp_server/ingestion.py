@@ -1,219 +1,245 @@
-"""Document Ingestion System for Knowledge RAG
+"""Document Ingestion System for Knowledge RAG.
 
-Multi-format document parsing, chunking, and metadata extraction.
-Supports: MD, PDF, TXT, PY, C, H, CPP, JS, JSX, TS, TSX, JSON, XML, DOCX, XLSX, PPTX, CSV, IPYNB, MQH, MQ4
+Facade over :mod:`mcp_server.parsers`: preserves the historical
+``DocumentParser`` API while delegating every per-format extraction
+step to the plugin-friendly registry.
+
+Public exports — kept byte-compatible with pre-refactor releases:
+
+* :class:`Document`, :class:`Chunk` — value objects (re-exported from
+  :mod:`mcp_server.parsers.base`).
+* :class:`DocumentParser` — historical facade. New code should call
+  :func:`mcp_server.parsers.registry.parse_content` and build the
+  pipeline in place, but ``DocumentParser`` remains the supported entry
+  point for anything reading a full :class:`Document`.
+* :data:`LANGUAGE_PROFILES` — code-parser dispatch table, re-exported
+  from :mod:`mcp_server.parsers.code_parser` for downstream callers.
+* :func:`parse_documents` — convenience wrapper over
+  ``DocumentParser().parse_directory``.
+
+Supports MD, PDF, TXT, PY, C, H, CPP, JS, JSX, TS, TSX, JSON, XML,
+DOCX, XLSX, PPTX, CSV, IPYNB, MQH, MQ4 out of the box; third-party
+parsers register via the ``knowledge_rag.parsers`` entry-point group.
 """
+
+from __future__ import annotations
 
 import fnmatch
 import hashlib
-import json
+import logging
 import os
 import re
-from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-
-# PDF support (optional)
-try:
-    import fitz  # PyMuPDF
-
-    HAS_PYMUPDF = True
-except ImportError:
-    HAS_PYMUPDF = False
-
-# Office formats (optional)
-try:
-    import docx  # python-docx
-
-    HAS_DOCX = True
-except ImportError:
-    HAS_DOCX = False
-
-try:
-    import openpyxl
-
-    HAS_XLSX = True
-except ImportError:
-    HAS_XLSX = False
-
-try:
-    from pptx import Presentation
-
-    HAS_PPTX = True
-except ImportError:
-    HAS_PPTX = False
-
-import csv
-import io
+from typing import Callable, Dict, List, Optional
 
 from .config import config
+from .parsers import registry
+from .parsers.base import Chunk, Document, ParserResult
+from .parsers.chunking import chunk_hierarchical, chunk_markdown, chunk_text, chunk_text_contextual
+from .security import detect_external_marker, is_path_within, neutralize_injection_sentinels
 
-# =============================================
-# LANGUAGE PROFILES FOR CODE PARSING
-# =============================================
+# The following chunkers/classifiers ship in a follow-up PR (advanced chunking +
+# confidence labels). They are always resolved via deferred imports inside the
+# feature-flag guarded branches below, so a default install (all flags False)
+# never touches them at import time. If the follow-up module is not installed
+# and the flag is toggled on, the caller sees a clear ImportError at chunk time.
+#   - mcp_server.parsers.code_parser (LANGUAGE_PROFILES)
+#   - mcp_server.parsers.confidence (classify_chunk_confidence)
+#   - mcp_server.parsers.late_chunker (chunk_text_late)
+#   - mcp_server.parsers.tree_sitter_chunker (chunk_code_by_ast + SUPPORTED_EXTENSIONS)
 
-LANGUAGE_PROFILES = {
-    ".py": {
-        "language": "python",
-        "docstring_pattern": r'^["\'][\'"]{2}(.*?)["\'][\'"]{2}',
-        "function_pattern": r"^def\s+(\w+)\s*\(",
-        "class_pattern": r"^class\s+(\w+)\s*[:\(]",
-        "import_pattern": r"^(?:from\s+[\w.]+\s+)?import\s+[\w.,\s]+",
-    },
-    ".c": {
-        "language": "c",
-        "docstring_pattern": r"/\*\*(.*?)\*/",
-        "function_pattern": r"^(?:[\w\*]+\s+)+(\w+)\s*\([^;]*$",
-        "class_pattern": r"^(?:typedef\s+)?(?:struct|union|enum)\s+(\w+)",
-        "import_pattern": r'^#include\s+[<"][\w./]+"?',
-    },
-    ".h": {
-        "language": "c",
-        "docstring_pattern": r"/\*\*(.*?)\*/",
-        "function_pattern": r"^(?:[\w\*]+\s+)+(\w+)\s*\(",
-        "class_pattern": r"^(?:typedef\s+)?(?:struct|union|enum)\s+(\w+)",
-        "import_pattern": r'^#include\s+[<"][\w./]+"?',
-    },
-    ".cpp": {
-        "language": "cpp",
-        "docstring_pattern": r"/\*\*(.*?)\*/",
-        "function_pattern": r"^(?:[\w\*:&]+\s+)+(\w+)\s*\([^;]*$",
-        "class_pattern": r"^(?:class|struct)\s+(\w+)",
-        "import_pattern": r'^#include\s+[<"][\w./]+"?',
-    },
-    ".js": {
-        "language": "javascript",
-        "docstring_pattern": r"/\*\*(.*?)\*/",
-        "function_pattern": r"^(?:export\s+)?(?:async\s+)?function\s+(\w+)",
-        "class_pattern": r"^(?:export\s+)?class\s+(\w+)",
-        "import_pattern": r"^(?:import\s+.+|(?:const|let|var)\s+.*?=\s*require\s*\()",
-    },
-    ".jsx": {
-        "language": "javascript",
-        "docstring_pattern": r"/\*\*(.*?)\*/",
-        "function_pattern": r"^(?:export\s+)?(?:async\s+)?function\s+(\w+)",
-        "class_pattern": r"^(?:export\s+)?class\s+(\w+)",
-        "import_pattern": r"^(?:import\s+.+|(?:const|let|var)\s+.*?=\s*require\s*\()",
-    },
-    ".ts": {
-        "language": "typescript",
-        "docstring_pattern": r"/\*\*(.*?)\*/",
-        "function_pattern": r"^(?:export\s+)?(?:async\s+)?function\s+(\w+)",
-        "class_pattern": r"^(?:export\s+)?(?:class|interface|enum|type)\s+(\w+)",
-        "import_pattern": r"^import\s+.+",
-    },
-    ".tsx": {
-        "language": "typescript",
-        "docstring_pattern": r"/\*\*(.*?)\*/",
-        "function_pattern": r"^(?:export\s+)?(?:async\s+)?function\s+(\w+)",
-        "class_pattern": r"^(?:export\s+)?(?:class|interface|enum|type)\s+(\w+)",
-        "import_pattern": r"^import\s+.+",
-    },
-    ".mqh": {
-        "language": "mql4",
-        "docstring_pattern": r"/\*\*(.*?)\*/",
-        "function_pattern": r"^(?:[\w\*]+\s+)+(\w+)\s*\(",
-        "class_pattern": r"^class\s+(\w+)",
-        "import_pattern": r"^#(?:include|property)\s+.+",
-    },
-    ".mq4": {
-        "language": "mql4",
-        "docstring_pattern": r"/\*\*(.*?)\*/",
-        "function_pattern": r"^(?:[\w\*]+\s+)+(\w+)\s*\(",
-        "class_pattern": r"^class\s+(\w+)",
-        "import_pattern": r"^#(?:include|property)\s+.+",
-    },
-}
+log = logging.getLogger(__name__)
+
+__all__ = [
+    "Chunk",
+    "Document",
+    "DocumentParser",
+    "parse_documents",
+]
 
 
-@dataclass
-class Chunk:
-    """A chunk of text from a document"""
-
-    content: str
-    index: int
-    start_char: int
-    end_char: int
-    metadata: Dict[str, Any] = field(default_factory=dict)
+_CODE_AWARE_EXTENSIONS_CACHE: Optional[frozenset] = None
 
 
-@dataclass
-class Document:
-    """Parsed document with metadata and chunks"""
+def _code_aware_supports(suffix: str) -> bool:
+    """Lazy check for tree-sitter code-aware chunking support.
 
-    id: str
-    content: str
-    source: Path
-    format: str
-    category: str
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    chunks: List[Chunk] = field(default_factory=list)
-    keywords: List[str] = field(default_factory=list)
-
-    @property
-    def filename(self) -> str:
-        return self.source.name
-
-    @property
-    def relative_path(self) -> str:
+    Returns False when the follow-up advanced-chunking module is not
+    installed (default in the base install), so the opt-in
+    ``config.code_aware_chunking`` flag stays inert without raising.
+    """
+    global _CODE_AWARE_EXTENSIONS_CACHE
+    if _CODE_AWARE_EXTENSIONS_CACHE is None:
         try:
-            return str(self.source.relative_to(config.documents_dir))
-        except ValueError:
-            return str(self.source)
+            from .parsers.tree_sitter_chunker import SUPPORTED_EXTENSIONS
+            _CODE_AWARE_EXTENSIONS_CACHE = frozenset(SUPPORTED_EXTENSIONS)
+        except ImportError:
+            _CODE_AWARE_EXTENSIONS_CACHE = frozenset()
+    return suffix in _CODE_AWARE_EXTENSIONS_CACHE
+
+
+def _resolve_token_aware_provider():
+    """Return a token-aware embedding provider instance, or ``None`` on failure.
+
+    Reads ``config.embedding_provider`` and asks the registry for the
+    matching class. Returns an instance ONLY when the class exposes an
+    ``embed_tokens`` attribute (structural check — cheap enough to run on
+    every ingested doc, and safer than trying an ``isinstance`` walk
+    against a Protocol that may not import cleanly under every Python
+    version).
+
+    Any failure — unknown provider name, constructor exception, provider
+    lacks token-aware surface — resolves to ``None`` so
+    :func:`~mcp_server.parsers.late_chunker.chunk_text_late` can take its
+    documented fallback path (fixed-size chunking + standard embedding).
+
+    Returns:
+        TokenAwareEmbeddingProvider | None: A provider instance ready
+        for :meth:`embed_tokens` calls, or ``None`` when the configured
+        provider is not token-aware.
+    """
+    try:
+        from .providers.registry import get_embedding_class
+    except Exception:  # pragma: no cover — defensive
+        return None
+
+    provider_name = getattr(config, "embedding_provider", "fastembed") or "fastembed"
+    try:
+        provider_cls = get_embedding_class(provider_name)
+    except KeyError:
+        log.warning(
+            "Late chunking: embedding provider %r is not registered; falling back "
+            "to fixed-size chunking + standard embedding for this document.",
+            provider_name,
+        )
+        return None
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning(
+            "Late chunking: unexpected error resolving provider %r: %s",
+            provider_name,
+            exc,
+        )
+        return None
+
+    # Structural check up-front so we don't waste a constructor call on
+    # providers that clearly don't implement the token-aware surface
+    # (bundled ``FastEmbedEmbeddings`` is the common example).
+    if not hasattr(provider_cls, "embed_tokens"):
+        return None
+
+    try:
+        return provider_cls()
+    except Exception as exc:  # pragma: no cover — defensive; late chunker falls back
+        log.warning(
+            "Late chunking: provider %r failed to instantiate: %s",
+            provider_name,
+            exc,
+        )
+        return None
 
 
 class DocumentParser:
-    """Multi-format document parser with chunking and metadata extraction"""
+    """Facade over the parser registry with the historical public API.
 
-    def __init__(self, chunk_size: int = None, chunk_overlap: int = None):
+    Rewritten as a thin coordinator: per-format extraction lives in
+    :mod:`mcp_server.parsers`, and this class owns the cross-cutting
+    pipeline — prompt-injection sanitization, provenance-marker
+    propagation, category detection, keyword extraction, chunk
+    generation, safe directory traversal.
+
+    The API is intentionally identical to the pre-refactor class:
+
+    * ``parser.parse_file(path)`` returns a :class:`Document`.
+    * ``parser.parse_directory(dir)`` walks the corpus with symlink and
+      exclude-pattern protection.
+    * ``parser._parsers`` returns a dict of ``suffix -> parse_callable``
+      built live from the registry, so backward-compatible tests
+      inspecting the dispatch table keep working.
+    """
+
+    def __init__(self, chunk_size: Optional[int] = None, chunk_overlap: Optional[int] = None) -> None:
+        """Initialise with optional per-instance chunking overrides.
+
+        Args:
+            chunk_size: Target chunk length. Falls back to
+                ``config.chunk_size`` when ``None``.
+            chunk_overlap: Trailing chars carried into the next chunk.
+                Falls back to ``config.chunk_overlap`` when ``None``.
+        """
         self.chunk_size = chunk_size or config.chunk_size
         self.chunk_overlap = chunk_overlap or config.chunk_overlap
 
-        # Parser dispatch table
-        self._parsers = {
-            ".md": self._parse_markdown,
-            ".txt": self._parse_text,
-            ".pdf": self._parse_pdf,
-            ".py": self._parse_code,
-            ".c": self._parse_code,
-            ".h": self._parse_code,
-            ".cpp": self._parse_code,
-            ".js": self._parse_code,
-            ".jsx": self._parse_code,
-            ".ts": self._parse_code,
-            ".tsx": self._parse_code,
-            ".json": self._parse_json,
-            ".xml": self._parse_xml,
-            ".docx": self._parse_docx,
-            ".xlsx": self._parse_xlsx,
-            ".pptx": self._parse_pptx,
-            ".csv": self._parse_csv,
-            ".ipynb": self._parse_ipynb,
-            ".mqh": self._parse_code,
-            ".mq4": self._parse_code,
-        }
+    @property
+    def _parsers(self) -> Dict[str, Callable[[Path], ParserResult]]:
+        """Return a live view of the dispatch table for backward compatibility.
+
+        Tests historically wrote ``assert ".md" in parser._parsers`` and
+        called ``parser._parsers[".md"](path)`` — that shape is preserved
+        by snapshotting :func:`registry.get_parsers` on every access, so
+        newly registered plugins show up without stale references.
+
+        Returns:
+            dict[str, callable]: Suffix → parser ``parse`` callable. Later
+            registrations override earlier ones on suffix collision.
+        """
+        return registry.build_dispatch_view()
 
     def parse_file(self, filepath: Path) -> Optional[Document]:
-        """Parse a file and return a Document object with chunks"""
+        """Parse a single file into a fully hydrated :class:`Document`.
+
+        Runs the full pipeline: dispatch, sanitization (only for content
+        that already carries a provenance marker written by
+        :func:`mcp_server.security.wrap_external_content`), category
+        detection, keyword extraction, chunking, and per-chunk evidence
+        stamping for external content.
+
+        Args:
+            filepath: Path to parse. Absolute or relative to CWD.
+
+        Returns:
+            Document | None: Parsed document, or ``None`` when the file
+            exists but contains no non-whitespace content.
+
+        Raises:
+            FileNotFoundError: When ``filepath`` does not exist.
+            ValueError: When no registered parser claims the suffix.
+        """
         filepath = Path(filepath)
 
         if not filepath.exists():
             raise FileNotFoundError(f"File not found: {filepath}")
 
         suffix = filepath.suffix.lower()
-        if suffix not in self._parsers:
+        parser = registry.get_parser_for(filepath)
+        if parser is None:
             raise ValueError(f"Unsupported format: {suffix}")
 
         # Generate unique ID
         doc_id = self._generate_id(filepath)
 
         # Parse content and metadata
-        content, metadata = self._parsers[suffix](filepath)
+        content, metadata = parser.parse(filepath)
 
         if not content or not content.strip():
-            print(f"[WARN] Skipping empty file: {filepath}")
+            log.warning("[WARN] Skipping empty file: %s", filepath)
             return None
+
+        # Prompt-injection defense (OWASP LLM01:2025) — layer 2 + layer 3.
+        #
+        # Only content that carries the provenance marker written by
+        # add_from_url() is treated as untrusted. Operator-authored documents
+        # are left byte-identical: a hand-written "### System:" header is
+        # legitimate prose, and rewriting it would be a false positive.
+        #
+        # Neutralization is idempotent, so re-indexing an already-sanitized
+        # file never stacks separators.
+        external_marker = detect_external_marker(content)
+        if external_marker is not None:
+            external_uri, external_hash = external_marker
+            content = neutralize_injection_sentinels(content)
+            metadata["external_source"] = True
+            metadata["external_source_uri"] = external_uri
+            metadata["external_content_sha256"] = external_hash
 
         # Detect category from path
         category = self._detect_category(filepath)
@@ -232,11 +258,156 @@ class DocumentParser:
             keywords=keywords,
         )
 
-        # Chunk the content (markdown-aware for .md files)
-        if suffix == ".md":
-            doc.chunks = self._chunk_markdown(content, metadata)
+        # Chunk the content.
+        #
+        # Precedence — integrated across every opt-in Fase 3+5 feature so
+        # only one strategy ever runs per document:
+        #
+        # 1. Parent Document Retrieval (A3.7) — when enabled, every format
+        #    uses the hierarchical small-to-big chunker. Wins over
+        #    everything else because it is a whole-corpus retrieval mode.
+        # 2. Code-aware chunking (A3.8) — opt-in via
+        #    ``documents.code_aware_chunking``. When on and the suffix is
+        #    a source-code language tree-sitter understands, chunks split
+        #    at function/class boundaries. Falls back to fixed-size when
+        #    tree-sitter is not installed. Wins over contextual chunking
+        #    because AST-aligned chunk boundaries already carry structural
+        #    context — a per-chunk LLM sentence would be redundant.
+        # 3. Contextual chunking (A3.6, Anthropic 2024) — opt-in via
+        #    ``documents.contextual_chunking``. When on (and the two
+        #    higher-priority flags are off), every fixed-size chunk gets a
+        #    1-2 sentence LLM-generated context prepended. EXPENSIVE — one
+        #    LLM call per chunk at ingestion time. Semantic-cache backed
+        #    so re-indexing unchanged docs pays zero LLM cost.
+        # 4. Late chunking (R5.7, Jina 2024) — opt-in via
+        #    ``documents.late_chunking``. When on (and the three
+        #    higher-priority flags are off) AND the configured embedding
+        #    provider implements ``embed_tokens``, the whole document is
+        #    embedded once in a long-context model and per-chunk vectors
+        #    are produced by mean-pooling token embeddings across each
+        #    chunk span. Ranks below contextual chunking because
+        #    contextual rewrites the CHUNK CONTENT (helps BM25 + reranker
+        #    too), while late chunking only reshapes embeddings. Falls
+        #    back to fixed-size + standard embedding when the provider
+        #    lacks ``embed_tokens`` — never crashes.
+        # 5. Markdown — section-aware chunker with header propagation for
+        #    ``.md`` files when no higher-priority feature is enabled.
+        # 6. Default — the character-window chunker.
+        #
+        # ``is True`` on the flags (not truthy) so tests that patch
+        # ``config`` with a bare ``MagicMock`` — whose attribute lookups
+        # return truthy child mocks — still fall through to the flat
+        # chunker instead of activating the opt-in path with mock sizes.
+        if getattr(config, "parent_document_enabled", False) is True:
+            doc.chunks = chunk_hierarchical(
+                content,
+                metadata,
+                large_size=config.parent_document_large_size,
+                small_size=config.parent_document_small_size,
+                small_overlap=config.parent_document_small_overlap,
+            )
+            chunker_name = "hierarchical"
+        elif getattr(config, "code_aware_chunking", False) and _code_aware_supports(suffix):
+            from .parsers.tree_sitter_chunker import chunk_code_by_ast
+            doc.chunks = chunk_code_by_ast(
+                content,
+                metadata,
+                ext=suffix,
+                max_chunk_size=config.code_aware_max_chunk_size,
+                chunk_overlap=self.chunk_overlap,
+            )
+            chunker_name = "code_aware"
+        elif getattr(config, "contextual_chunking_enabled", False) is True:
+            # Deferred import: the contextual chunking module pulls in the
+            # LLM provider registry. Keeping it out of the module top-level
+            # means a default install (feature off) never even touches
+            # ``mcp_server.providers.llm`` at ingestion time.
+            from .retrieval.llm_features.contextual_chunking import get_ingestion_semantic_cache
+
+            doc.chunks = chunk_text_contextual(
+                content,
+                metadata,
+                self.chunk_size,
+                self.chunk_overlap,
+                provider_name=(getattr(config, "llm_provider", "") or None),
+                cache=get_ingestion_semantic_cache(),
+            )
+            chunker_name = "contextual"
+        elif getattr(config, "late_chunking_enabled", False) is True:
+            # Deferred import: only touches the embedding provider registry
+            # when late chunking is actually enabled. Resolving the
+            # provider here (not in the module body) keeps a default
+            # install byte-identical to pre-R5.7 behaviour — no extra
+            # imports, no extra registry lookups on the flat-chunker path.
+            #
+            # Provider resolution failure is treated the same as "no
+            # token-aware provider": the chunker's fallback path returns
+            # fixed-size chunks + None embeddings so ingestion never
+            # crashes because of a misconfigured provider name.
+            from .parsers.late_chunker import chunk_text_late
+            embed_provider = _resolve_token_aware_provider()
+            late_chunks, late_embeddings = chunk_text_late(
+                content,
+                metadata,
+                self.chunk_size,
+                self.chunk_overlap,
+                embed_provider=embed_provider,
+            )
+            doc.chunks = late_chunks
+            # The chunker already stamps ``chunk.embedding`` on every
+            # chunk when embeddings are non-None (returns matched pair
+            # by construction). The parallel list is kept in the return
+            # tuple for callers that prefer indexed access; the indexing
+            # layer downstream reads ``chunk.embedding`` directly.
+            chunker_name = "late_chunking" if late_embeddings is not None else "late_chunking_fallback"
+        elif suffix == ".md":
+            doc.chunks = chunk_markdown(content, metadata, self.chunk_size, self.chunk_overlap)
+            chunker_name = "markdown"
         else:
-            doc.chunks = self._chunk_text(content, metadata)
+            doc.chunks = chunk_text(content, metadata, self.chunk_size, self.chunk_overlap)
+            chunker_name = "flat"
+
+        # M4.7 — Confidence labels in chunks.
+        #
+        # Stamp the coarse ``source_confidence`` on every chunk based on
+        # (1) which chunker produced it and (2) doc-level extraction
+        # signals (scanned PDF, encoding fallback, U+FFFD in payload).
+        # This is a single-pass classification — chunkers stay pure and
+        # every rule change is confined to
+        # :func:`mcp_server.parsers.confidence.classify_chunk_confidence`.
+        #
+        # Backward compat: docs indexed before M4.7 will never have this
+        # key on their chunk metadata, so search results for legacy
+        # corpora return ``source_confidence=None`` at the orchestrator
+        # layer without any storage migration.
+        # Deferred import: confidence classifier ships in the advanced-chunking
+        # follow-up PR. When the module is absent (default install), skip the
+        # per-chunk confidence stamp — legacy behaviour, chunks stay unlabeled.
+        try:
+            from .parsers.confidence import classify_chunk_confidence
+        except ImportError:
+            classify_chunk_confidence = None
+
+        source_path_str = str(filepath)
+        for chunk in doc.chunks:
+            if classify_chunk_confidence is None:
+                continue
+            confidence = classify_chunk_confidence(
+                chunk_text=chunk.content,
+                source_path=source_path_str,
+                chunker_name=chunker_name,
+                metadata=metadata,
+            )
+            chunk.metadata["source_confidence"] = confidence.value
+
+        # Layer 3 — evidence marker. The <external_content> fence only lands in
+        # the first and last chunk, so provenance is stamped on every chunk's
+        # metadata instead. search_knowledge() surfaces it as `external_source`,
+        # letting the consuming LLM weigh untrusted context accordingly.
+        if external_marker is not None:
+            for chunk in doc.chunks:
+                chunk.metadata["external_source"] = True
+                chunk.metadata["external_source_uri"] = external_marker[0]
 
         return doc
 
@@ -269,9 +440,24 @@ class DocumentParser:
         return False
 
     def parse_directory(self, directory: Path = None) -> List[Document]:
-        """Parse all supported files in a directory recursively (follows symlinks)."""
+        """Parse all supported files in a directory recursively.
+
+        Symlinks are still followed (``followlinks=True``) so the documented
+        "link my notes tree into documents/" workflow keeps working, but every
+        directory *and* every file is containment-checked against ``directory``
+        after full resolution. A link pointing outside the corpus — say an
+        untrusted repo cloned into ``documents/`` that ships ``notes -> /etc``
+        — is skipped with a warning instead of leaking host files into the
+        index (CWE-59).
+
+        Args:
+            directory: Root to walk. Defaults to ``config.documents_dir``.
+
+        Returns:
+            List[Document]: Parsed documents that resolved inside ``directory``.
+        """
         directory = Path(directory) if directory else config.documents_dir
-        documents = []
+        documents: List[Document] = []
         seen_dirs = set()
         supported = set(config.supported_formats)
         exclude = config.exclude_patterns
@@ -283,6 +469,13 @@ class DocumentParser:
                 continue
             seen_dirs.add(real_root)
 
+            # CWE-59 — a symlinked directory whose target escapes the corpus is
+            # pruned here, before any file inside it is opened.
+            if not is_path_within(directory, root):
+                log.warning("[WARN] Skipping symlinked directory outside documents_dir: %s", root)
+                dirs.clear()
+                continue
+
             # Filter out excluded directories in-place (prevents os.walk from descending)
             if exclude:
                 dirs[:] = [d for d in dirs if not self._should_exclude(Path(root) / d, directory, exclude)]
@@ -293,545 +486,37 @@ class DocumentParser:
                     continue
                 if exclude and self._should_exclude(filepath, directory, exclude):
                     continue
+                # CWE-59 — os.walk lists symlinked *files* regardless of
+                # followlinks, and open() would follow them. `root` is already
+                # known contained, so a non-link file under it is contained by
+                # construction; only links need the full resolve. That keeps
+                # the common path at one cheap lstat instead of a realpath.
+                if filepath.is_symlink() and not is_path_within(directory, filepath):
+                    log.warning("[WARN] Skipping symlinked file outside documents_dir: %s", filepath)
+                    continue
                 try:
                     doc = self.parse_file(filepath)
                     if doc:
                         documents.append(doc)
                 except Exception as e:
-                    print(f"[WARN] Failed to parse {filepath}: {e}")
+                    log.warning("[WARN] Failed to parse %s: %s", filepath, e)
 
         return documents
-
-    # =========================================================================
-    # Format-specific parsers
-    # =========================================================================
-
-    def _parse_markdown(self, filepath: Path) -> tuple[str, Dict]:
-        """Parse Markdown file, extracting headers as metadata"""
-        content = filepath.read_text(encoding="utf-8", errors="ignore")
-        metadata = {
-            "type": "markdown",
-            "headers": [],
-            "has_code_blocks": "```" in content,
-            "file_size": filepath.stat().st_size,
-            "modified": datetime.fromtimestamp(filepath.stat().st_mtime).isoformat(),
-        }
-
-        # Extract headers hierarchy
-        header_pattern = r"^(#{1,6})\s+(.+)$"
-        for match in re.finditer(header_pattern, content, re.MULTILINE):
-            level = len(match.group(1))
-            title = match.group(2).strip()
-            metadata["headers"].append({"level": level, "title": title})
-
-        # Extract title from first H1 or filename
-        h1_headers = [h for h in metadata["headers"] if h["level"] == 1]
-        if h1_headers:
-            metadata["title"] = h1_headers[0]["title"]
-        else:
-            metadata["title"] = filepath.stem
-
-        # Extract frontmatter if present (YAML between ---)
-        frontmatter_match = re.match(r"^---\n(.*?)\n---\n", content, re.DOTALL)
-        if frontmatter_match:
-            metadata["has_frontmatter"] = True
-            # Remove frontmatter from content for cleaner indexing
-            content = content[frontmatter_match.end() :]
-
-        return content, metadata
-
-    def _parse_pdf(self, filepath: Path) -> tuple[str, Dict]:
-        """Parse PDF file using PyMuPDF (text extraction, no markdown conversion)."""
-        if not HAS_PYMUPDF:
-            raise ImportError("PyMuPDF (fitz) not installed. Install with: pip install pymupdf")
-
-        metadata = {
-            "type": "pdf",
-            "pages": 0,
-            "file_size": filepath.stat().st_size,
-            "modified": datetime.fromtimestamp(filepath.stat().st_mtime).isoformat(),
-        }
-
-        text_parts = []
-
-        with fitz.open(filepath) as doc:
-            metadata["pages"] = len(doc)
-            metadata["title"] = doc.metadata.get("title", filepath.stem)
-            metadata["author"] = doc.metadata.get("author", "")
-
-            for page_num, page in enumerate(doc):
-                text = page.get_text()
-                if text.strip():
-                    text_parts.append(f"[Page {page_num + 1}]\n{text}")
-
-        content = "\n\n".join(text_parts)
-        return content, metadata
-
-    def _parse_text(self, filepath: Path) -> tuple[str, Dict]:
-        """Parse plain text file"""
-        content = filepath.read_text(encoding="utf-8", errors="ignore")
-        metadata = {
-            "type": "text",
-            "title": filepath.stem,
-            "file_size": filepath.stat().st_size,
-            "modified": datetime.fromtimestamp(filepath.stat().st_mtime).isoformat(),
-            "line_count": content.count("\n") + 1,
-        }
-        return content, metadata
-
-    def _parse_code(self, filepath: Path) -> tuple[str, Dict]:
-        """Parse source code file with language-aware metadata extraction.
-
-        Language detection is automatic based on file extension.
-        Supports: Python, C, C++, JavaScript, TypeScript, MQL4/5.
-        """
-        content = filepath.read_text(encoding="utf-8", errors="ignore")
-        suffix = filepath.suffix.lower()
-        profile = LANGUAGE_PROFILES.get(suffix, LANGUAGE_PROFILES[".py"])
-
-        metadata = {
-            "type": "code",
-            "language": profile["language"],
-            "title": filepath.stem,
-            "file_size": filepath.stat().st_size,
-            "modified": datetime.fromtimestamp(filepath.stat().st_mtime).isoformat(),
-            "functions": [],
-            "classes": [],
-            "imports": [],
-        }
-
-        # Extract leading docstring / block comment
-        docstring_match = re.match(profile["docstring_pattern"], content, re.DOTALL)
-        if docstring_match:
-            metadata["docstring"] = docstring_match.group(1).strip()
-
-        # Extract function names
-        raw_functions = re.findall(profile["function_pattern"], content, re.MULTILINE)
-        if raw_functions and isinstance(raw_functions[0], tuple):
-            metadata["functions"] = [g for groups in raw_functions for g in groups if g]
-        else:
-            metadata["functions"] = list(raw_functions)
-
-        # Extract class/struct/interface names
-        metadata["classes"] = re.findall(profile["class_pattern"], content, re.MULTILINE)
-
-        # Extract imports/includes (cap at 10)
-        metadata["imports"] = re.findall(profile["import_pattern"], content, re.MULTILINE)[:10]
-
-        return content, metadata
-
-    def _parse_xml(self, filepath: Path) -> tuple[str, Dict]:
-        """Parse XML file, extracting root element and namespace metadata."""
-        content = filepath.read_text(encoding="utf-8", errors="ignore")
-        metadata = {
-            "type": "xml",
-            "title": filepath.stem,
-            "file_size": filepath.stat().st_size,
-            "modified": datetime.fromtimestamp(filepath.stat().st_mtime).isoformat(),
-            "root_element": None,
-            "namespaces": [],
-        }
-
-        # Extract root element (skip <?xml ...?> declaration and comments)
-        for match in re.finditer(r"<(\w[\w\-.:]*)[\s>]", content):
-            tag = match.group(1)
-            if tag.lower() != "xml":
-                metadata["root_element"] = tag
-                break
-
-        # Extract namespace declarations
-        ns_matches = re.findall(r'xmlns(?::(\w+))?\s*=\s*["\']([^"\']+)["\']', content)
-        metadata["namespaces"] = [{"prefix": prefix or "default", "uri": uri} for prefix, uri in ns_matches]
-
-        return content, metadata
-
-    def _parse_json(self, filepath: Path) -> tuple[str, Dict]:
-        """Parse JSON file"""
-        raw_content = filepath.read_text(encoding="utf-8", errors="ignore")
-        metadata = {
-            "type": "json",
-            "title": filepath.stem,
-            "file_size": filepath.stat().st_size,
-            "modified": datetime.fromtimestamp(filepath.stat().st_mtime).isoformat(),
-        }
-
-        try:
-            data = json.loads(raw_content)
-            metadata["is_valid_json"] = True
-
-            if isinstance(data, dict):
-                metadata["keys"] = list(data.keys())[:20]
-                metadata["structure"] = "object"
-            elif isinstance(data, list):
-                metadata["length"] = len(data)
-                metadata["structure"] = "array"
-
-            # Pretty-print for better indexing
-            content = json.dumps(data, indent=2, ensure_ascii=False)
-        except json.JSONDecodeError:
-            metadata["is_valid_json"] = False
-            content = raw_content
-
-        return content, metadata
-
-    def _parse_docx(self, filepath: Path) -> tuple[str, Dict]:
-        """Parse DOCX file extracting paragraphs and tables."""
-        if not HAS_DOCX:
-            raise ImportError("python-docx not installed. Install with: pip install python-docx")
-
-        doc = docx.Document(filepath)
-        metadata = {
-            "type": "docx",
-            "title": filepath.stem,
-            "file_size": filepath.stat().st_size,
-            "modified": datetime.fromtimestamp(filepath.stat().st_mtime).isoformat(),
-            "paragraphs": len(doc.paragraphs),
-            "tables": len(doc.tables),
-        }
-
-        parts = []
-        for para in doc.paragraphs:
-            text = para.text.strip()
-            if text:
-                # Preserve heading structure as markdown
-                if para.style and para.style.name.startswith("Heading"):
-                    try:
-                        level = int(para.style.name.split()[-1])
-                        parts.append(f"{'#' * level} {text}")
-                    except (ValueError, IndexError):
-                        parts.append(f"## {text}")
-                else:
-                    parts.append(text)
-
-        # Extract tables as markdown
-        for table in doc.tables:
-            rows = []
-            for row in table.rows:
-                cells = [cell.text.strip() for cell in row.cells]
-                rows.append(" | ".join(cells))
-            if rows:
-                parts.append("\n".join(rows))
-
-        content = "\n\n".join(parts)
-        return content, metadata
-
-    def _parse_xlsx(self, filepath: Path) -> tuple[str, Dict]:
-        """Parse XLSX file extracting all sheets as text tables."""
-        if not HAS_XLSX:
-            raise ImportError("openpyxl not installed. Install with: pip install openpyxl")
-
-        wb = openpyxl.load_workbook(filepath, read_only=True, data_only=True)
-        metadata = {
-            "type": "xlsx",
-            "title": filepath.stem,
-            "file_size": filepath.stat().st_size,
-            "modified": datetime.fromtimestamp(filepath.stat().st_mtime).isoformat(),
-            "sheets": wb.sheetnames,
-        }
-
-        parts = []
-        for sheet_name in wb.sheetnames:
-            ws = wb[sheet_name]
-            parts.append(f"## Sheet: {sheet_name}")
-            for row in ws.iter_rows(values_only=True):
-                cells = [str(c) if c is not None else "" for c in row]
-                line = " | ".join(cells).strip()
-                if line and line != " | " * (len(cells) - 1):
-                    parts.append(line)
-
-        wb.close()
-        content = "\n\n".join(parts)
-        return content, metadata
-
-    def _parse_pptx(self, filepath: Path) -> tuple[str, Dict]:
-        """Parse PPTX file extracting slide text."""
-        if not HAS_PPTX:
-            raise ImportError("python-pptx not installed. Install with: pip install python-pptx")
-
-        prs = Presentation(filepath)
-        metadata = {
-            "type": "pptx",
-            "title": filepath.stem,
-            "file_size": filepath.stat().st_size,
-            "modified": datetime.fromtimestamp(filepath.stat().st_mtime).isoformat(),
-            "slides": len(prs.slides),
-        }
-
-        parts = []
-        for i, slide in enumerate(prs.slides):
-            slide_texts = []
-            for shape in slide.shapes:
-                if shape.has_text_frame:
-                    for para in shape.text_frame.paragraphs:
-                        text = para.text.strip()
-                        if text:
-                            slide_texts.append(text)
-            if slide_texts:
-                parts.append(f"## Slide {i + 1}\n" + "\n".join(slide_texts))
-
-        content = "\n\n".join(parts)
-        return content, metadata
-
-    def _parse_csv(self, filepath: Path) -> tuple[str, Dict]:
-        """Parse CSV file as text table."""
-        raw = filepath.read_text(encoding="utf-8", errors="ignore")
-        metadata = {
-            "type": "csv",
-            "title": filepath.stem,
-            "file_size": filepath.stat().st_size,
-            "modified": datetime.fromtimestamp(filepath.stat().st_mtime).isoformat(),
-        }
-
-        parts = []
-        reader = csv.reader(io.StringIO(raw))
-        rows = list(reader)
-        metadata["rows"] = len(rows)
-        metadata["columns"] = len(rows[0]) if rows else 0
-
-        for row in rows:
-            parts.append(" | ".join(row))
-
-        content = "\n".join(parts)
-        return content, metadata
-
-    def _parse_ipynb(self, filepath: Path) -> tuple[str, Dict]:
-        """Parse Jupyter Notebook, extracting only markdown and code cell sources.
-
-        Ignores outputs, execution counts, cell metadata, and base64 images.
-        """
-        raw = filepath.read_text(encoding="utf-8", errors="ignore")
-        metadata = {
-            "type": "jupyter_notebook",
-            "title": filepath.stem,
-            "file_size": filepath.stat().st_size,
-            "modified": datetime.fromtimestamp(filepath.stat().st_mtime).isoformat(),
-        }
-
-        try:
-            nb = json.loads(raw)
-        except json.JSONDecodeError:
-            metadata["is_valid_json"] = False
-            return raw, metadata
-
-        metadata["is_valid_json"] = True
-        metadata["nbformat"] = nb.get("nbformat", 0)
-        kernel = nb.get("metadata", {}).get("kernelspec", {})
-        metadata["kernel"] = kernel.get("display_name", kernel.get("name", "unknown"))
-
-        cells = nb.get("cells", [])
-        metadata["cells"] = len(cells)
-        code_cells = 0
-        markdown_cells = 0
-
-        parts = []
-        for cell in cells:
-            cell_type = cell.get("cell_type", "")
-            source = cell.get("source", "")
-
-            if isinstance(source, list):
-                source = "".join(source)
-
-            if not source or not source.strip():
-                continue
-
-            if cell_type == "markdown":
-                parts.append(source)
-                markdown_cells += 1
-            elif cell_type == "code":
-                parts.append(f"```python\n{source}\n```")
-                code_cells += 1
-
-        metadata["code_cells"] = code_cells
-        metadata["markdown_cells"] = markdown_cells
-
-        content = "\n\n".join(parts)
-        return content, metadata
-
-    # =========================================================================
-    # Chunking
-    # =========================================================================
-
-    def _chunk_text(self, text: str, metadata: Dict) -> List[Chunk]:
-        """Split text into overlapping chunks for embedding"""
-        if not text:
-            return []
-
-        chunks = []
-        text_len = len(text)
-        start = 0
-        index = 0
-        previous_start = -1  # Track previous start to detect infinite loops
-
-        while start < text_len:
-            # Safety: detect infinite loop (start not progressing)
-            if start <= previous_start:
-                break
-            previous_start = start
-
-            # Calculate end position
-            end = min(start + self.chunk_size, text_len)
-
-            # Try to break at sentence/paragraph boundary
-            if end < text_len:
-                # Look for natural break points within last 20% of chunk
-                break_zone_start = start + int(self.chunk_size * 0.8)
-                break_zone = text[break_zone_start:end]
-
-                # Priority: paragraph > sentence > word
-                for pattern in ["\n\n", "\n", ". ", " "]:
-                    last_break = break_zone.rfind(pattern)
-                    if last_break != -1:
-                        end = break_zone_start + last_break + len(pattern)
-                        break
-
-            chunk_content = text[start:end].strip()
-
-            if chunk_content:
-                chunk = Chunk(
-                    content=chunk_content,
-                    index=index,
-                    start_char=start,
-                    end_char=end,
-                    metadata={
-                        "title": metadata.get("title", ""),
-                        "type": metadata.get("type", ""),
-                    },
-                )
-                chunks.append(chunk)
-                index += 1
-
-            # Move start position with overlap
-            # Ensure we always make forward progress
-            new_start = end - self.chunk_overlap
-
-            # If overlap would cause no progress, just move to end
-            if new_start <= start:
-                start = end
-            else:
-                start = new_start
-
-        return chunks
-
-    def _chunk_markdown(self, text: str, metadata: Dict) -> List[Chunk]:
-        """
-        Markdown-aware chunking with code block protection and min-size merging.
-
-        1. Strips code blocks before splitting (prevents # comments from being treated as headers)
-        2. Splits by ## and ### headers only (not # which catches code comments)
-        3. Merges small chunks (<min_chunk_size) with the next section
-        4. Falls back to _chunk_text() if no headers found
-
-        Args:
-            text: Full document text
-            metadata: Document metadata dict
-
-        Returns:
-            List of Chunk objects aligned to markdown sections
-        """
-        if not text:
-            return []
-
-        min_chunk_size = 100  # Minimum chars for a standalone chunk
-
-        # Step 1: Mask code blocks to prevent splitting on # inside them
-        code_blocks = []
-
-        def mask_code(match):
-            code_blocks.append(match.group(0))
-            return f"__CODE_BLOCK_{len(code_blocks) - 1}__"
-
-        masked_text = re.sub(r"```.*?```", mask_code, text, flags=re.DOTALL)
-
-        # Step 2: Split by ## and ### headers only (not # which catches code comments)
-        sections = re.split(r"(?=^#{2,3}\s+)", masked_text, flags=re.MULTILINE)
-
-        # Filter empty sections
-        sections = [s for s in sections if s.strip()]
-
-        if len(sections) <= 1:
-            return self._chunk_text(text, metadata)
-
-        # Step 3: Restore code blocks in each section
-        def restore_code(section_text):
-            for i, block in enumerate(code_blocks):
-                section_text = section_text.replace(f"__CODE_BLOCK_{i}__", block)
-            return section_text
-
-        sections = [restore_code(s) for s in sections]
-
-        # Step 4: Merge small sections with the next one
-        merged_sections = []
-        buffer = ""
-        for section in sections:
-            if buffer:
-                buffer += "\n\n" + section
-                if len(buffer.strip()) >= min_chunk_size:
-                    merged_sections.append(buffer)
-                    buffer = ""
-            elif len(section.strip()) < min_chunk_size:
-                buffer = section
-            else:
-                merged_sections.append(section)
-
-        if buffer:
-            if merged_sections:
-                merged_sections[-1] += "\n\n" + buffer
-            else:
-                merged_sections.append(buffer)
-
-        if not merged_sections:
-            return self._chunk_text(text, metadata)
-
-        # Step 5: Create chunks from merged sections
-        chunks = []
-        global_index = 0
-        char_offset = 0
-
-        for section in merged_sections:
-            section_stripped = section.strip()
-            if not section_stripped:
-                char_offset += len(section)
-                continue
-
-            header_match = re.match(r"^(#{2,3}\s+.+)$", section_stripped, re.MULTILINE)
-            header_context = header_match.group(1) if header_match else ""
-
-            if len(section_stripped) <= self.chunk_size:
-                chunk = Chunk(
-                    content=section_stripped,
-                    index=global_index,
-                    start_char=char_offset,
-                    end_char=char_offset + len(section),
-                    metadata={
-                        "title": metadata.get("title", ""),
-                        "type": metadata.get("type", ""),
-                        "section_header": header_context,
-                    },
-                )
-                chunks.append(chunk)
-                global_index += 1
-            else:
-                sub_chunks = self._chunk_text(section_stripped, metadata)
-                for i, sub_chunk in enumerate(sub_chunks):
-                    if i > 0 and header_context:
-                        sub_chunk.content = f"{header_context}\n\n{sub_chunk.content}"
-                    sub_chunk.index = global_index
-                    sub_chunk.start_char += char_offset
-                    sub_chunk.end_char += char_offset
-                    sub_chunk.metadata["section_header"] = header_context
-                    chunks.append(sub_chunk)
-                    global_index += 1
-
-            char_offset += len(section)
-
-        return chunks
 
     # =========================================================================
     # Category detection
     # =========================================================================
 
     def _detect_category(self, filepath: Path) -> str:
-        """Detect document category based on file path"""
+        """Detect document category based on file path.
+
+        Args:
+            filepath: File whose category is being resolved.
+
+        Returns:
+            str: Matching category from ``config.category_mappings`` or
+            the fallback ``"general"``.
+        """
         try:
             rel_path = filepath.relative_to(config.documents_dir)
             path_str = str(rel_path).replace("\\", "/").lower()
@@ -850,7 +535,18 @@ class DocumentParser:
     # =========================================================================
 
     def _extract_keywords(self, content: str, category: str) -> List[str]:
-        """Extract technical keywords from content"""
+        """Extract technical keywords from content.
+
+        Args:
+            content: Document text to scan.
+            category: Resolved document category (unused today, kept for
+                signature stability with downstream callers).
+
+        Returns:
+            list[str]: Sorted unique keywords covering security tools,
+            CVE IDs, MITRE ATT&CK technique IDs, and (when few enough
+            to be signal) IP addresses.
+        """
         keywords = set()
         content_lower = content.lower()
 
@@ -906,7 +602,14 @@ class DocumentParser:
     # =========================================================================
 
     def _generate_id(self, filepath: Path) -> str:
-        """Generate unique document ID based on path and modification time"""
+        """Generate a stable document ID from path, mtime, and size.
+
+        Args:
+            filepath: File whose ID is being generated.
+
+        Returns:
+            str: 16-character lowercase hex slice of the SHA-256.
+        """
         stat = filepath.stat()
         unique_str = f"{filepath}:{stat.st_mtime}:{stat.st_size}"
         return hashlib.sha256(unique_str.encode()).hexdigest()[:16]
@@ -914,6 +617,23 @@ class DocumentParser:
 
 # Convenience function
 def parse_documents(directory: Path = None) -> List[Document]:
-    """Parse all documents in a directory"""
+    """Parse all documents in ``directory`` using the default parser.
+
+    Args:
+        directory: Root to walk. Defaults to ``config.documents_dir``.
+
+    Returns:
+        list[Document]: Parsed documents contained inside ``directory``.
+    """
     parser = DocumentParser()
     return parser.parse_directory(directory)
+
+
+# ============================================================================
+# Backward-compatibility shims for callers that historically imported the
+# now-relocated private helpers directly (rare; kept out of ``__all__``).
+# ============================================================================
+
+_chunk_text = chunk_text
+_chunk_markdown = chunk_markdown
+_chunk_hierarchical = chunk_hierarchical

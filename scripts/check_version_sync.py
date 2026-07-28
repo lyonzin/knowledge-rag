@@ -30,6 +30,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 INIT_PY = REPO_ROOT / "mcp_server" / "__init__.py"
 PACKAGE_JSON = REPO_ROOT / "npm" / "package.json"
+SERVER_PY = REPO_ROOT / "mcp_server" / "server.py"
+README = REPO_ROOT / "README.md"
 
 
 def read_pyproject_version() -> str:

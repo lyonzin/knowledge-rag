@@ -67,7 +67,41 @@ def test_legacy_v3_7_0_config_with_excludes_parses():
 # Frozen contract: parameter names callers (LLMs) supply by name.
 # Bumping requires MAJOR version + CHANGELOG migration entry.
 MCP_TOOL_SIGNATURES = {
-    "search_knowledge": ["query", "max_results", "category", "hybrid_alpha", "min_score", "snippet_mode"],
+    # A2.4 — ``fusion`` is a new OPTIONAL kwarg appended at the end. Additive
+    # only (default ``None`` preserves legacy RRF), so existing LLM callers
+    # keep working unchanged. Per the maintenance note at the top of this
+    # module (step 4), the signature dict must be updated when a new param
+    # is added to a public MCP tool.
+    "search_knowledge": [
+        "query",
+        "max_results",
+        "category",
+        "hybrid_alpha",
+        "min_score",
+        "snippet_mode",
+        "fusion",
+        # A3.2 — additive kwarg for the opt-in LLM query rewriting feature.
+        # Default ``None`` inherits from ``config.query_rewrite_enabled``
+        # (default: False), so legacy callers keep the byte-identical path.
+        "query_rewrite",
+        # A3.5 — additive kwarg for the opt-in LLM self-query filter
+        # extraction feature. Default ``None`` inherits from
+        # ``config.self_query_enabled`` (default: False), so legacy callers
+        # keep the byte-identical path.
+        "self_query",
+        # A3.3 — additive kwarg for the opt-in HyDE (Hypothetical Document
+        # Embeddings) feature. Default ``None`` inherits from
+        # ``config.hyde_enabled`` (default: False).
+        "hyde",
+        # A3.4 — additive kwarg for the opt-in Multi-Query feature.
+        # Default ``None`` inherits from ``config.multi_query_enabled``
+        # (default: False).
+        "multi_query",
+        # A3.9 — additive kwarg for the opt-in Adaptive retrieval router.
+        # Default ``None`` inherits from ``config.adaptive_retrieval_enabled``
+        # (default: False), so legacy callers keep the byte-identical path.
+        "adaptive",
+    ],
     "search_similar": ["filepath", "max_results"],
     "get_document": ["filepath"],
     "add_document": ["content", "filepath", "category"],

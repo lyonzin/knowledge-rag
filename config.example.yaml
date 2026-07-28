@@ -108,6 +108,30 @@ documents:
     chunk_size: 1000
     chunk_overlap: 200
 
+  # ── Contextual Chunking (A3.6, Anthropic 2024) ─────────────────────
+  # Opt-in per-chunk contextualization. For every chunk produced by the
+  # fixed-size splitter, an LLM writes a 1-2 sentence context sentence
+  # that situates the chunk in the whole document, and that sentence is
+  # PREPENDED to the chunk before embedding + indexing. Anthropic reports
+  # up to +49% retrieval recall improvement.
+  #
+  # Trade-offs:
+  #   + significantly higher recall (per Anthropic 2024 benchmarks)
+  #   - ONE LLM CALL PER CHUNK at ingestion time (expensive on first pass)
+  #   - requires ``llm.provider`` configured or auto-detectable
+  #     (missing provider falls back to raw chunks with a WARN log)
+  #
+  # Cost control: the built-in semantic cache (``[semantic_cache]``)
+  # ensures re-indexing an UNCHANGED document pays zero LLM cost. Do
+  # NOT disable the semantic cache while this feature is on.
+  #
+  # Precedence at ingestion:
+  #   parent_document_enabled > code_aware_chunking > contextual_chunking > markdown > flat
+  #
+  # Requires a full reindex to enable/disable — chunk content changes.
+  # Default OFF so a stock install has zero LLM calls.
+  contextual_chunking: false
+
 
 # ============================================================================
 # MODELS
@@ -136,6 +160,34 @@ models:
     # Requires: pip install knowledge-rag[gpu]  (installs onnxruntime-gpu)
     # Falls back to CPU automatically if CUDA is unavailable.
     gpu: false
+    # Provider registry hook (advanced).
+    # Selects which embedding provider knowledge-rag will use. "fastembed"
+    # is the bundled default and runs the FastEmbed/ONNX pipeline exactly
+    # as before. Set this only when you have a third-party plugin
+    # registered under the `knowledge_rag.embeddings` entry-point group;
+    # changing it without installing a plugin will fail at startup with a
+    # clear error message.
+    provider: "fastembed"
+
+  # Vector store — persistent backend that holds embeddings + metadata.
+  # "chromadb" is the bundled default (SQLite-backed, zero setup). Third-
+  # party stores register themselves via the `knowledge_rag.vector_stores`
+  # entry-point group.
+  #
+  # Opt-in multi-vector alternative: "colbert" swaps ChromaDB for PyLate +
+  # PLAID late-interaction retrieval (ColBERTv2). Requires the extra:
+  #     pip install "knowledge-rag[colbert]"
+  # Storage cost scales ~10-100x versus single-vector; only enable when
+  # recall is the bottleneck and GPU capacity is available. Requires a
+  # full reindex to switch backends (embeddings shape-incompatible).
+  vector_store:
+    provider: "chromadb"
+
+  # ColBERT checkpoint id/path. Only consulted when vector_store.provider
+  # is "colbert" — inert on ChromaDB installs. Accepts any Hugging Face id
+  # or local path that PyLate can load; default is the public baseline
+  # (~360 MB download on first use).
+  colbert_model: "colbert-ir/colbertv2.0"
 
   # Reranker — re-scores search results for better accuracy.
   # Adds ~50-100ms per query but significantly improves result quality.
@@ -146,6 +198,10 @@ models:
     # How many extra candidates to fetch before reranking.
     # Higher = better accuracy but slower. 3 is a good balance.
     top_k_multiplier: 3
+    # Provider registry hook (advanced). "cross_encoder" keeps the bundled
+    # FastEmbed cross-encoder. Third-party rerankers register under the
+    # `knowledge_rag.rerankers` entry-point group.
+    provider: "cross_encoder"
 
 
 # ============================================================================
@@ -164,6 +220,28 @@ search:
   # knowledge bases in the same data directory.
   # Example: "work_kb", "research_kb", "personal_kb"
   collection_name: "knowledge_base"
+
+  # ── Parent Document Retrieval (Small-to-Big) ───────────────────────
+  # Opt-in hierarchical chunking. Indexes fine-grained "small" chunks
+  # for precise retrieval, then swaps the returned content for the
+  # broader "large" parent chunk that contains it. Classical
+  # LangChain/LlamaIndex pattern — no LLM in the loop.
+  #
+  # Trade-offs:
+  #   + more precise retrieval (small chunks match narrowly)
+  #   + broader returned context (parent chunk)
+  #   - larger vector store (more chunks per doc)
+  #   - parent content stored inline in metadata (~6x overhead per parent)
+  #
+  # Requires a full reindex to enable/disable — chunk shape changes.
+  # Default OFF so pre-existing corpora are byte-identical.
+  parent_document_enabled: false
+  # Target parent-chunk size in chars (broad-context window).
+  parent_document_large_size: 1500
+  # Target child-chunk size in chars (precise-match window).
+  parent_document_small_size: 250
+  # Overlap between adjacent children inside the same parent.
+  parent_document_small_overlap: 50
 
 
 # ============================================================================
@@ -292,3 +370,43 @@ server:
   metrics:
     enabled: false
     port: 9179
+
+
+# ============================================================================
+# TELEMETRY (A2.6)
+# ============================================================================
+# OpenTelemetry tracing + structured JSON logs. Both fields default OFF so
+# the pre-A2.6 output shape is preserved for anyone who never edits this
+# file. Tracing requires the optional [otel] extra:
+#     pip install knowledge-rag[otel]
+# Without the extra the server falls back to a no-op tracer with a warning.
+telemetry:
+  # Master switch for OpenTelemetry tracing. When false all spans collapse
+  # to a zero-cost no-op — safe to leave enabled at the code level.
+  enabled: false
+
+  # Exporter kind: "otlp" (gRPC OTLP collector), "console" (batch-print
+  # spans to stderr, useful for local debugging), or "none" (spans stay in
+  # memory only — useful when a sidecar hooks into the OTel API directly).
+  exporter: "otlp"
+
+  # Value assigned to the ``service.name`` resource attribute. This is the
+  # field APMs (Jaeger, Grafana Tempo, Datadog, New Relic) group by in the
+  # UI. Set it per deployment when you run several instances against the
+  # same collector.
+  service_name: "knowledge-rag"
+
+  # OTLP collector endpoint. Leave empty to fall back to the SDK default
+  # (http://localhost:4317) and honour the standard OTEL_EXPORTER_OTLP_*
+  # environment variables.
+  otlp_endpoint: ""
+
+  # Structured JSON logging. When true every log record becomes a single
+  # JSON line (timestamp/level/logger/message + any extra_fields the caller
+  # attached). When false plain-text formatter matches the pre-A2.6
+  # ``print()`` output shape byte-for-byte for the common case.
+  json_logs: false
+
+  # Root log level — one of DEBUG / INFO / WARNING / ERROR / CRITICAL.
+  # Invalid values silently fall back to INFO.
+  log_level: "INFO"

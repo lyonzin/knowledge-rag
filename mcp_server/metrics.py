@@ -1,6 +1,6 @@
 """Optional Prometheus-compatible metrics for knowledge-rag server."""
 
-import sys
+import logging
 import threading
 import time
 from collections import defaultdict
@@ -8,6 +8,8 @@ from functools import wraps
 from typing import Any, Callable
 
 from .config import config
+
+log = logging.getLogger(__name__)
 
 
 class MetricsCollector:
@@ -99,4 +101,4 @@ def start_metrics_server(port: int) -> None:
     server = HTTPServer(("0.0.0.0", port), _Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    print(f"[METRICS] Prometheus endpoint at http://0.0.0.0:{port}/metrics", file=sys.stderr)
+    log.info("[METRICS] Prometheus endpoint at http://0.0.0.0:%d/metrics", port)

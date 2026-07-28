@@ -1,9 +1,18 @@
+# Dependabot configuration for knowledge-rag.
+#
+# Cadence: weekly for pip/github-actions/npm (surface CVEs fast, group non-breaking
+# updates into a single PR); monthly for docker (base-image bumps only bite when the
+# CI matrix moves, so they can wait).
+#
+# See .github/openssf-best-practices.md § SCA for how this fits into the OpenSSF
+# Passing/Silver criteria.
 version: 2
 updates:
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
-      interval: "monthly"
+      interval: "weekly"
+      day: "monday"
     reviewers:
       - "lyonzin"
     labels:
@@ -21,7 +30,8 @@ updates:
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "monthly"
+      interval: "weekly"
+      day: "monday"
     reviewers:
       - "lyonzin"
     labels:
@@ -36,7 +46,8 @@ updates:
   - package-ecosystem: "npm"
     directory: "/npm"
     schedule:
-      interval: "monthly"
+      interval: "weekly"
+      day: "monday"
     reviewers:
       - "lyonzin"
     labels:

@@ -78,6 +78,11 @@ class TestParseDirectoryExclusion:
             mock_cfg.chunk_overlap = 200
             mock_cfg.category_mappings = {}
             mock_cfg.keyword_routes = {}
+            # A3.7 + A3.8 gating flags — both default OFF; explicit here so
+            # patch("config") does not leak a MagicMock (truthy) into the
+            # chunker selection branch in DocumentParser.parse_file.
+            mock_cfg.parent_document_enabled = False
+            mock_cfg.code_aware_chunking = False
 
             result = parser.parse_directory(docs)
             sources = [str(d.source.name) for d in result]
@@ -105,6 +110,11 @@ class TestParseDirectoryExclusion:
             mock_cfg.chunk_overlap = 200
             mock_cfg.category_mappings = {}
             mock_cfg.keyword_routes = {}
+            # A3.7 + A3.8 gating flags — both default OFF; explicit here so
+            # patch("config") does not leak a MagicMock (truthy) into the
+            # chunker selection branch in DocumentParser.parse_file.
+            mock_cfg.parent_document_enabled = False
+            mock_cfg.code_aware_chunking = False
 
             result = parser.parse_directory(docs)
             sources = [str(d.source.name) for d in result]
@@ -128,6 +138,11 @@ class TestParseDirectoryExclusion:
             mock_cfg.chunk_overlap = 200
             mock_cfg.category_mappings = {}
             mock_cfg.keyword_routes = {}
+            # A3.7 + A3.8 gating flags — both default OFF; explicit here so
+            # patch("config") does not leak a MagicMock (truthy) into the
+            # chunker selection branch in DocumentParser.parse_file.
+            mock_cfg.parent_document_enabled = False
+            mock_cfg.code_aware_chunking = False
 
             result = parser.parse_directory(docs)
             assert len(result) == 2

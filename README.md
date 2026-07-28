@@ -12,7 +12,13 @@
 [![CI](https://github.com/lyonzin/knowledge-rag/actions/workflows/ci.yml/badge.svg)](https://github.com/lyonzin/knowledge-rag/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/lyonzin/knowledge-rag/actions/workflows/security.yml/badge.svg)](https://github.com/lyonzin/knowledge-rag/actions/workflows/security.yml)
 [![Quality Gate](https://github.com/lyonzin/knowledge-rag/actions/workflows/quality-gate.yml/badge.svg)](https://github.com/lyonzin/knowledge-rag/actions/workflows/quality-gate.yml)
+<!-- OpenSSF Best Practices — placeholder project ID (XXXX). Replace with the assigned
+     project number after registering at https://bestpractices.coreinfrastructure.org/
+     See .github/openssf-best-practices.md for the self-assessment evidence pack. -->
+[![OpenSSF Best Practices](https://bestpractices.coreinfrastructure.org/projects/XXXX/badge)](https://bestpractices.coreinfrastructure.org/projects/XXXX)
 [![Glama Score](https://glama.ai/mcp/servers/lyonzin/knowledge-rag/badges/score.svg)](https://glama.ai/mcp/servers/lyonzin/knowledge-rag)
+
+**Read this in other languages:** [Português](docs/i18n/README.pt-BR.md) · [Español](docs/i18n/README.es.md) · [日本語](docs/i18n/README.ja.md) · [한국어](docs/i18n/README.ko.md) · [简体中文](docs/i18n/README.zh-CN.md) · [Deutsch](docs/i18n/README.de.md) · [Français](docs/i18n/README.fr.md) · [Italiano](docs/i18n/README.it.md) · [Русский](docs/i18n/README.ru.md) · [العربية](docs/i18n/README.ar.md) · [हिन्दी](docs/i18n/README.hi.md) · [Tiếng Việt](docs/i18n/README.vi.md)
 
 ### Your docs, your machine, zero cloud. Claude Code searches them natively.
 
@@ -28,7 +34,7 @@ pip install knowledge-rag → restart Claude Code → search_knowledge("your que
 
 **13 MCP Tools** | **Hybrid Search + Reranking** | **20 File Formats** | **Optional NVIDIA GPU** | **100% Local**
 
-[What's New](#whats-new-in-v420) | [Supported Formats](#supported-formats) | [Installation](#installation) | [Configuration](#configuration) | [API Reference](#api-reference) | [Architecture](#architecture)
+[What's New](#changelog) | [Supported Formats](#supported-formats) | [Installation](#installation) | [Configuration](#configuration) | [API Reference](#api-reference) | [Architecture](#architecture)
 
 </div>
 
@@ -1401,7 +1407,11 @@ Common issues:
 
 ### Unreleased
 
-- **FIX (deps)**: pin `mcp<2.0.0` in both `requirements.txt` and `pyproject.toml` after the upstream `mcp` package published 2.0.0, which drops/relocates `mcp.server.fastmcp`. Every `mcp_server.server` import chain — and therefore every test module — was failing collection with `ModuleNotFoundError: No module named 'mcp.server.fastmcp'` on fresh CI runners across all 9 OS×Python cells. Pin restores green until we migrate to the new 2.x FastMCP entry point in a follow-up. Root cause: `requirements.txt` had `mcp>=1.0.0` unbounded, so `pip install -r requirements.txt` in CI ignored the pyproject constraint. (#122)
+- **REFACTOR (v4.6.0 base)**: `server.py` (2.9k+ lines) modularized into focused subpackages — `mcp_server/{mcp_tools, storage, indexing, retrieval, parsers, providers}/` — plus new `security.py`, `stopwords.py`, and opt-in `telemetry.py` (structured JSON logs + OpenTelemetry tracing, no-op by default). `server.py` becomes a thin facade that re-exports the historical public API so existing `from mcp_server.server import X` callers keep working byte-identical. All 13 MCP tool signatures preserved (see `tests/test_backwards_compat.py`). Follow-up PRs will layer opt-in features (LLM retrieval, advanced providers/chunking, dashboard/CLI/federation/work-memory) on top of this base.
+- **NEW (security)**: Fase 1 Security Hardening — `BearerAuthMiddleware` for HTTP transports, `validate_path_within` + `PathEscapeError` (CWE-59 protection), `sanitize_external_content` + `neutralize_injection_sentinels` + `detect_external_marker` (prompt-injection defense-in-depth), `is_path_within` symlink-escape guard. New `tests/security/` suite (14 tests) pins each contract across all 9 OS×Python cells. ADR at `docs/adr/0001-fase1-security-hardening.md`. `SECURITY.md` + `.github/SECURITY.md` + `.github/openssf-best-practices.md` published.
+- **NEW**: `mcp_server.__version_date__` (`"YYYY-MM-DD"`) public attribute for tooling that pins releases by date.
+- **NEW**: `scripts/check_version_sync.py` exposes `SERVER_PY` and `README` module constants (scriptable version-hygiene enforcement from `tests/test_version_sync.py`).
+- **DEPRECATED (README)**: `#whats-new-in-v420` anchor removed in favor of the generic `#changelog` anchor — future release notes never need editing the nav link every bump.
 - **FIX**: `_ensure_bm25_index` no longer traps the guard flag `_bm25_initialized` in a stuck-True state when the server boots against an empty ChromaDB collection. Prior behavior set the flag unconditionally at the end of the guarded block, so a fresh-install bootup or a metadata-mapping loss left BM25 permanently uninitialized: subsequent `add_document()` calls populate `bm25_index.corpus` but do not rebuild the inverted index, and `_ensure_bm25_index` — the only path that does — short-circuited on the stale flag. All keyword-only searches returned zero results; hybrid searches returned only semantic hits with `bm25_rank: null`. The flag is now set only after a build that actually produced an index; empty collections and exceptions leave it False so the next call retries. (#114)
 - **TEST**: New `TestEmptyBootupDoesNotTrapGuardFlag` (5 tests) pins the contract — empty-collection boot leaves flag False, populated collection marks True, empty-then-populated recovery works, empty `get()` result leaves False, and `build_index()` exceptions leave False for retry. Baseline: 271 → 276.
 

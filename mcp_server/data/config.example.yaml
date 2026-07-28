@@ -100,6 +100,20 @@ documents:
     chunk_size: 1000
     chunk_overlap: 200
 
+  # ── Contextual Chunking (A3.6, Anthropic 2024) ─────────────────────
+  # Opt-in per-chunk contextualization. For every chunk, an LLM writes a
+  # 1-2 sentence context sentence that situates the chunk in the whole
+  # document, and that sentence is PREPENDED to the chunk before
+  # embedding + indexing. Anthropic reports up to +49% recall.
+  #
+  # EXPENSIVE — one LLM call per chunk at ingestion time. Requires
+  # ``llm.provider`` configured or auto-detectable. The semantic cache
+  # keeps re-indexing an unchanged doc free of extra LLM cost.
+  #
+  # Precedence: parent_document > code_aware > contextual > markdown > flat.
+  # Requires a full reindex to enable/disable. Default OFF.
+  contextual_chunking: false
+
 
 # ============================================================================
 # MODELS
@@ -124,6 +138,20 @@ models:
   embedding:
     model: "BAAI/bge-small-en-v1.5"
     dimensions: 384
+    # Provider registry hook (advanced). "fastembed" is the bundled default.
+    # Third-party plugins register under `knowledge_rag.embeddings`.
+    provider: "fastembed"
+
+  # Vector store — persistent backend for embeddings + metadata.
+  # Opt-in "colbert" swaps ChromaDB for PyLate + PLAID multi-vector
+  # retrieval. Requires: pip install "knowledge-rag[colbert]" and a full
+  # reindex to switch (embeddings shape-incompatible across backends).
+  vector_store:
+    provider: "chromadb"
+
+  # ColBERT checkpoint id/path — only read when vector_store.provider is
+  # "colbert". Ignored on ChromaDB installs.
+  colbert_model: "colbert-ir/colbertv2.0"
 
   # Reranker — re-scores search results for better accuracy.
   # Adds ~50-100ms per query but significantly improves result quality.
@@ -134,6 +162,10 @@ models:
     # How many extra candidates to fetch before reranking.
     # Higher = better accuracy but slower. 3 is a good balance.
     top_k_multiplier: 3
+    # Provider registry hook (advanced). "cross_encoder" keeps the bundled
+    # FastEmbed cross-encoder. Third-party plugins register under
+    # `knowledge_rag.rerankers`.
+    provider: "cross_encoder"
 
 
 # ============================================================================
@@ -152,6 +184,28 @@ search:
   # knowledge bases in the same data directory.
   # Example: "work_kb", "research_kb", "personal_kb"
   collection_name: "knowledge_base"
+
+  # ── Parent Document Retrieval (Small-to-Big) ───────────────────────
+  # Opt-in hierarchical chunking. Indexes fine-grained "small" chunks
+  # for precise retrieval, then swaps the returned content for the
+  # broader "large" parent chunk that contains it. Classical
+  # LangChain/LlamaIndex pattern — no LLM in the loop.
+  #
+  # Trade-offs:
+  #   + more precise retrieval (small chunks match narrowly)
+  #   + broader returned context (parent chunk)
+  #   - larger vector store (more chunks per doc)
+  #   - parent content stored inline in metadata (~6x overhead per parent)
+  #
+  # Requires a full reindex to enable/disable — chunk shape changes.
+  # Default OFF so pre-existing corpora are byte-identical.
+  parent_document_enabled: false
+  # Target parent-chunk size in chars (broad-context window).
+  parent_document_large_size: 1500
+  # Target child-chunk size in chars (precise-match window).
+  parent_document_small_size: 250
+  # Overlap between adjacent children inside the same parent.
+  parent_document_small_overlap: 50
 
 
 # ============================================================================
@@ -233,3 +287,19 @@ query_expansions: {}
 #
 #   # Logging verbosity: DEBUG, INFO, WARNING, ERROR
 #   # log_level: "INFO"
+
+
+# ============================================================================
+# TELEMETRY (A2.6)
+# ============================================================================
+# OpenTelemetry tracing + structured JSON logs. Both fields default OFF so
+# the pre-A2.6 output shape is preserved for anyone who never edits this
+# file. Tracing requires the optional [otel] extra:
+#     pip install knowledge-rag[otel]
+# telemetry:
+#   enabled: false
+#   exporter: "otlp"       # otlp | console | none
+#   service_name: "knowledge-rag"
+#   otlp_endpoint: ""      # empty = SDK default (localhost:4317)
+#   json_logs: false       # opt-in structured JSON logging
+#   log_level: "INFO"      # DEBUG | INFO | WARNING | ERROR | CRITICAL
