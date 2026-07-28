@@ -13,7 +13,7 @@ pymupdf>=1.23.0
 fastembed[reranking]>=0.4.0
 
 # MCP Server Framework (FastMCP)
-mcp>=1.0.0
+mcp>=1.6.0,<2.0.0
 
 # BM25 for Hybrid Search (keyword + semantic)
 rank-bm25>=0.2.2
