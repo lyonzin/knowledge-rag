@@ -64,3 +64,10 @@ desktop.ini
 dist/
 .ruff_cache/
 .pytest_cache/
+
+# Filesystem leak: Path(MagicMock()) auto-invokes __fspath__ and creates
+# literal "MagicMock/<attr>/<id>" dirs on Windows. Any test that passes an
+# unspec'd MagicMock as a config-like object into a code path that resolves
+# Path(config.data_dir) reproduces. Preventive: use spec=Config or
+# types.SimpleNamespace when mocking config in tests.
+MagicMock/
