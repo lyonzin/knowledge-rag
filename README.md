@@ -1,5 +1,7 @@
 # Knowledge RAG
 
+[![MCP Toplist](https://mcptoplist.com/badge/glama%2Flyonzin%2Fknowledge-rag.svg)](https://mcptoplist.com/server/glama%2Flyonzin%2Fknowledge-rag)
+
 <div align="center">
 
 [![PyPI](https://img.shields.io/pypi/v/knowledge-rag)](https://pypi.org/project/knowledge-rag/)
