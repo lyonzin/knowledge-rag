@@ -1,3 +1,5 @@
+import sys
+
 """CWE-22 — path traversal regression tests.
 
 Proves that ``validate_path_within`` refuses every escape shape an MCP client
@@ -60,7 +62,13 @@ def test_dotdot_escape_is_blocked(corpus, hostile):
         "/etc/passwd",
         "/root/.ssh/id_rsa",
         "//etc/passwd",
-        "\\Windows\\win.ini",
+        pytest.param(
+            "\\Windows\\win.ini",
+            marks=pytest.mark.skipif(
+                sys.platform != "win32",
+                reason="backslash-rooted path is a Windows-only concept; pathlib.Path treats it as a relative segment on POSIX",
+            ),
+        ),
     ],
 )
 def test_rooted_path_is_blocked(corpus, hostile):
