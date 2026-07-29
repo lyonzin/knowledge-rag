@@ -1,5 +1,3 @@
-import sys
-
 """CWE-22 — path traversal regression tests.
 
 Proves that ``validate_path_within`` refuses every escape shape an MCP client
@@ -9,6 +7,7 @@ forms those tools are documented to take.
 """
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
