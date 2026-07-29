@@ -13,6 +13,7 @@
 [![CodeQL](https://github.com/lyonzin/knowledge-rag/actions/workflows/security.yml/badge.svg)](https://github.com/lyonzin/knowledge-rag/actions/workflows/security.yml)
 [![Quality Gate](https://github.com/lyonzin/knowledge-rag/actions/workflows/quality-gate.yml/badge.svg)](https://github.com/lyonzin/knowledge-rag/actions/workflows/quality-gate.yml)
 [![Glama Score](https://glama.ai/mcp/servers/lyonzin/knowledge-rag/badges/score.svg)](https://glama.ai/mcp/servers/lyonzin/knowledge-rag)
+[![OpenSSF Best Practices](https://bestpractices.coreinfrastructure.org/projects/XXXX/badge)](https://bestpractices.coreinfrastructure.org/projects/XXXX)
 
 ### Your docs, your machine, zero cloud. Claude Code searches them natively.
 
@@ -1400,6 +1401,21 @@ Common issues:
 ## Changelog
 
 ### Unreleased
+
+### v4.5.1 (2026-07-28) — Fase 1 Security Hardening (library, standalone)
+
+- **NEW (security)**: Fase 1 Security Hardening — a standalone `mcp_server.security` library ships with the tools needed to close three attack classes against untrusted document ingestion. **Nothing in the existing call graph changes** in v4.5.1: `security.py` is imported by no other module in this release, so byte-identical behaviour is preserved for every user. Integration with `add_document` / `add_from_url` / `parse_file` / MCP HTTP transports lands in v4.6.0 (14 tests in `tests/security/` are marked `xfail` accordingly — they turn green once the callers are wired up). Users motivated to adopt hardening today can `from mcp_server.security import ...` explicitly. Contract per-defense:
+  - **CWE-22 / CWE-59** path traversal + symlink escape: `validate_path_within(base, candidate)` + `is_path_within(base, candidate)` + `PathEscapeError`. Rejects `..`, absolute-outside-base, and symlinks whose target leaves the corpus root.
+  - **OWASP LLM01:2025** prompt injection: `neutralize_injection_sentinels` + `sanitize_external_content` + `wrap_external_content` + `detect_external_marker`. Wraps content fetched from URLs / dropped files with tagged sentinels the downstream LLM can distinguish from operator-authored context.
+  - **CWE-287** unauthenticated HTTP transport: `BearerAuthMiddleware` + `bearer_token_matches` (constant-time comparison) + `extract_bearer_token`. Attach to a Starlette / FastAPI app; stdio transport bypasses auth by construction (no network surface).
+- **NEW**: `docs/adr/0001-fase1-security-hardening.md` — ADR capturing threat model + v4.6.0 integration roadmap.
+- **NEW**: `.github/SECURITY.md` — GitHub vulnerability reporting policy pointer + `.github/openssf-best-practices.md` (evidence pack for OpenSSF Best Practices badge registration).
+- **NEW**: `tests/security/` (71 tests total; 57 library unit tests green in v4.5.1, 14 integration tests `xfail` pending v4.6.0 wire-up, `strict=False` so they auto-turn-green after integration) + `tests/test_security_docs.py` (9 assertions pinning `SECURITY.md`, README badge block, dependabot weekly pip schedule).
+- **DOCS**: README carries the OpenSSF Best Practices badge (placeholder project ID until registration completes).
+- **DEPS**: `dependabot.yml` pip schedule tightened `monthly` → `weekly` (OpenSSF-recommended floor for language ecosystems).
+- **VERSION**: 4.5.0 → **4.5.1** (PATCH — additive library only, zero behaviour change on the default install).
+
+### v4.5.0-post (rolling fixes since v4.5.0 release)
 
 - **FIX (deps)**: pin `mcp<2.0.0` in both `requirements.txt` and `pyproject.toml` after the upstream `mcp` package published 2.0.0, which drops/relocates `mcp.server.fastmcp`. Every `mcp_server.server` import chain — and therefore every test module — was failing collection with `ModuleNotFoundError: No module named 'mcp.server.fastmcp'` on fresh CI runners across all 9 OS×Python cells. Pin restores green until we migrate to the new 2.x FastMCP entry point in a follow-up. Root cause: `requirements.txt` had `mcp>=1.0.0` unbounded, so `pip install -r requirements.txt` in CI ignored the pyproject constraint. (#122)
 - **FIX**: `_ensure_bm25_index` no longer traps the guard flag `_bm25_initialized` in a stuck-True state when the server boots against an empty ChromaDB collection. Prior behavior set the flag unconditionally at the end of the guarded block, so a fresh-install bootup or a metadata-mapping loss left BM25 permanently uninitialized: subsequent `add_document()` calls populate `bm25_index.corpus` but do not rebuild the inverted index, and `_ensure_bm25_index` — the only path that does — short-circuited on the stale flag. All keyword-only searches returned zero results; hybrid searches returned only semantic hits with `bm25_rank: null`. The flag is now set only after a build that actually produced an index; empty collections and exceptions leave it False so the next call retries. (#114)
