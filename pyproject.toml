@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "knowledge-rag"
-version = "4.5.1"
+version = "4.6.0"
 description = "Local RAG System for Claude Code — Hybrid search + Cross-encoder Reranking + 13 MCP Tools + 20 Format Parsers. Zero external servers."
 readme = "README.md"
 license = {text = "MIT"}
@@ -32,7 +32,7 @@ dependencies = [
     "chromadb>=1.4.0",
     "pymupdf>=1.23.0",
     "fastembed[reranking]>=0.4.0",
-    "mcp>=1.6.0,<2.0.0",
+    "mcp>=2.0.0,<3.0.0",
     "numpy>=1.24.0",
     "requests>=2.33.0",
     "beautifulsoup4>=4.12.0",

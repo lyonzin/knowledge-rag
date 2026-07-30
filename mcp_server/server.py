@@ -49,8 +49,11 @@ import numpy as np
 from fastembed import TextEmbedding
 from fastembed.rerank.cross_encoder import TextCrossEncoder
 
-# FastMCP
-from mcp.server.fastmcp import FastMCP
+# MCP Anthropic Tier 1 SDK v2.x (speaks the MCP spec 2026-07-28 natively).
+# FastMCP was renamed to MCPServer in mcp 2.0.0; see docs/migration.md
+# upstream. Same `@mcp.tool()` / `@mcp.resource()` / `@mcp.prompt()`
+# ergonomics — only the import path + class name change.
+from mcp.server import MCPServer
 from watchdog.events import FileSystemEventHandler
 
 # File watcher for auto-reindex
@@ -2258,10 +2261,9 @@ class KnowledgeOrchestrator:
 # MCP Server
 # =============================================================================
 
-mcp = FastMCP(
+mcp = MCPServer(
     "knowledge-rag",
-    host=config.server_host,
-    port=config.server_port,
+    version="4.6.0",
 )
 
 _orchestrator: Optional[KnowledgeOrchestrator] = None
@@ -2943,7 +2945,14 @@ def main():
                     file=sys.stderr,
                 )
 
-            mcp.run(transport=transport)
+            if transport == "stdio":
+                mcp.run(transport=transport)
+            else:
+                mcp.run(
+                    transport=transport,
+                    host=config.server_host,
+                    port=config.server_port,
+                )
     except AlreadyRunningError as e:
         print(f"[ERROR] {e}", file=sys.stderr)
         raise SystemExit(ALREADY_RUNNING_EXIT_CODE) from e

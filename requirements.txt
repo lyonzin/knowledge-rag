@@ -12,8 +12,12 @@ pymupdf>=1.23.0
 # [reranking] extra installs cross-encoder dependencies (required for reranker)
 fastembed[reranking]>=0.4.0
 
-# MCP Server Framework (FastMCP)
-mcp>=1.6.0,<2.0.0
+# MCP Server Framework — Anthropic Tier 1 SDK (v2.x, speaks the MCP spec
+# 2026-07-28 natively). FastMCP was renamed to MCPServer and lives under
+# `mcp.server` in v2.x; the standalone `fastmcp` package was intentionally
+# not adopted because its base install (`fastmcp[server]`) doubles the
+# transitive dep count and pushes idle RSS +20% vs the pre-migration baseline.
+mcp>=2.0.0,<3.0.0
 
 # BM25 for Hybrid Search (keyword + semantic)
 rank-bm25>=0.2.2
