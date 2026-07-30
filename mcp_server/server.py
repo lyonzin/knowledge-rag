@@ -49,8 +49,12 @@ import numpy as np
 from fastembed import TextEmbedding
 from fastembed.rerank.cross_encoder import TextCrossEncoder
 
-# FastMCP
-from mcp.server.fastmcp import FastMCP
+# FastMCP via the `fastmcp-slim[mcp]` distribution (see requirements.txt).
+# Prepares the ground for the MCP spec 2026-07-28 migration — the FastMCP
+# 4.x beta line is the one that actually implements the new stateless core.
+# See CHANGELOG v4.5.2 for the rationale of moving off `mcp.server.fastmcp`
+# (removed in upstream `mcp` 2.0.0) without adopting a beta SDK.
+from fastmcp import FastMCP
 from watchdog.events import FileSystemEventHandler
 
 # File watcher for auto-reindex
@@ -2260,8 +2264,7 @@ class KnowledgeOrchestrator:
 
 mcp = FastMCP(
     "knowledge-rag",
-    host=config.server_host,
-    port=config.server_port,
+    version="4.5.2",
 )
 
 _orchestrator: Optional[KnowledgeOrchestrator] = None
@@ -2943,7 +2946,14 @@ def main():
                     file=sys.stderr,
                 )
 
-            mcp.run(transport=transport)
+            if transport == "stdio":
+                mcp.run(transport=transport)
+            else:
+                mcp.run(
+                    transport=transport,
+                    host=config.server_host,
+                    port=config.server_port,
+                )
     except AlreadyRunningError as e:
         print(f"[ERROR] {e}", file=sys.stderr)
         raise SystemExit(ALREADY_RUNNING_EXIT_CODE) from e

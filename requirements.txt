@@ -12,8 +12,16 @@ pymupdf>=1.23.0
 # [reranking] extra installs cross-encoder dependencies (required for reranker)
 fastembed[reranking]>=0.4.0
 
-# MCP Server Framework (FastMCP)
+# MCP Server Framework
+# `mcp` provides low-level types + stdio server (kept at <2.0 because 2.x
+# relocated `mcp.server.fastmcp`). `fastmcp-slim[mcp]` is the dependency-slim
+# variant of FastMCP — same code, fewer transitive deps than `fastmcp` full
+# (which pulls `fastmcp-slim[client,server]` for ~20 extras we don't use).
+# Chosen to keep the base RSS footprint close to the pre-migration baseline.
+# Note: fastmcp 3.x targets the pre-2026-07-28 MCP spec; full stateless-core
+# adoption waits for fastmcp 4.x to leave beta.
 mcp>=1.6.0,<2.0.0
+fastmcp-slim[mcp]>=3.4.5,<4.0.0
 
 # BM25 for Hybrid Search (keyword + semantic)
 rank-bm25>=0.2.2
