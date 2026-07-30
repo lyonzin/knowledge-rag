@@ -49,7 +49,21 @@ pip install knowledge-rag → restart Claude Code → search_knowledge("your que
 
 ---
 
-## What's New in v4.2.0
+## What's New in v4.6.0
+
+### MCP spec 2026-07-28 via Anthropic Tier 1 SDK (v4.6.0)
+
+Adopts the [**MCP spec 2026-07-28**](https://blog.modelcontextprotocol.io/posts/2026-07-28/) — stateless request/response core, per-request `_meta.io.modelcontextprotocol/protocolVersion` + `clientCapabilities`, `serverInfo` on every response, retirement of the `initialize`/`initialized` handshake and the `Mcp-Session-Id` header. Delivered by moving directly to the **Anthropic Tier 1 Python SDK** (`mcp>=2.0.0,<3.0.0`, published 2026-07-28).
+
+**What changed under the hood**:
+- `mcp>=1.6.0,<2.0.0` → **`mcp>=2.0.0,<3.0.0`**
+- `from mcp.server.fastmcp import FastMCP` → `from mcp.server import MCPServer`
+- `FastMCP(name, host=, port=)` → `MCPServer(name, version="4.6.0")` — `host` / `port` moved to `mcp.run(transport=..., host=..., port=...)` on non-stdio transports (per v2 API)
+- Server now advertises `version` in `serverInfo`, matching the 2026-07-28 spec recommendation
+
+**Zero user-facing changes** — `@mcp.tool()` / `@mcp.resource()` / `@mcp.prompt()` decorator ergonomics are unchanged. All 13 MCP tool signatures frozen. **stdio users see zero behaviour change**. Existing clients (Claude Code, Claude Desktop, Cursor, Windsurf, VS Code Copilot, Cline, Gemini CLI, Zed) negotiate the spec version per request and continue to work.
+
+**Why the Tier 1 SDK and not the third-party `fastmcp` package**: an early experiment with jlowin's [`fastmcp`](https://gofastmcp.com) tripped the Pillar 5 perf gate — `test_bench_orchestrator_idle_rss` +21.9% and `test_bench_query_cache_5000_entries` +17.1% RSS from the ~20 transitive deps its `[client,server]` extras pull in. Cutting the extras broke `@mcp.tool()` at runtime. Anthropic's `mcp 2.x` is the direct upstream reference — no third-party intermediary, no dependency bloat. Full details in the [v4.6.0 changelog entry](#v460-2026-07-30--mcp-spec-2026-07-28-via-anthropic-tier-1-sdk-mcp-2x) and closed PR #134.
 
 ### Search Performance & Output Quality (v4.2.0)
 
