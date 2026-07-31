@@ -33,4 +33,4 @@ pip-audit>=2.10.0               # CVE check on installed deps
 psutil>=5.9.0                  # cross-platform RSS measurement for memory baselines
 
 # ── Mutation testing (nightly only, optional locally) ───────────────────────
-mutmut>=3.5.0                  # used by .github/workflows/nightly.yml
+mutmut>=3.6.0                  # used by .github/workflows/nightly.yml
