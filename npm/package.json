@@ -1,6 +1,6 @@
 {
   "name": "knowledge-rag",
-  "version": "4.7.0",
+  "version": "4.7.1",
   "description": "Local RAG System for Claude Code \u00e2\u20ac\u201d Hybrid search + Cross-encoder Reranking + 13 MCP Tools + 20 Format Parsers. Zero external servers.",
   "bin": {
     "knowledge-rag": "./bin/cli.js"
