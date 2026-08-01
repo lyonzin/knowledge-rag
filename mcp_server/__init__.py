@@ -8,7 +8,7 @@ import sys  # noqa: I001
 _original_stdout = sys.stdout
 sys.stdout = sys.stderr
 
-__version__ = "4.6.0"
+__version__ = "4.7.0"
 __author__ = "Ailton Rocha (Lyon.)"
 
 from .config import Config  # noqa: E402

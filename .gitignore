@@ -71,3 +71,4 @@ dist/
 # Path(config.data_dir) reproduces. Preventive: use spec=Config or
 # types.SimpleNamespace when mocking config in tests.
 MagicMock/
+.benchmarks/

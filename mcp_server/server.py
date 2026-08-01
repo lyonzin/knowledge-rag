@@ -696,9 +696,21 @@ class BM25Index:
         self._index_built: bool = False
 
     def _tokenize(self, text: str) -> List[str]:
-        """Simple tokenization: lowercase, split on non-alphanumeric, keep hyphens"""
+        """Tokenize: lowercase, split on non-alphanumeric, emit composite + sub-tokens.
+
+        For hyphenated tokens (e.g. "mdr-ad002", "cve-2024-1234"), emit both the
+        composite token AND its sub-parts of length >= 2. Preserves exact-match
+        ranking via IDF (composite is rarer) while enabling fragment queries.
+        """
         text_lower = text.lower()
-        tokens = re.findall(r"[a-z0-9][-a-z0-9]*[a-z0-9]|[a-z0-9]", text_lower)
+        composite_tokens = re.findall(r"[a-z0-9][-a-z0-9]*[a-z0-9]|[a-z0-9]", text_lower)
+        tokens: List[str] = []
+        for tok in composite_tokens:
+            tokens.append(tok)
+            if "-" in tok:
+                for part in tok.split("-"):
+                    if len(part) >= 2:
+                        tokens.append(part)
         return tokens
 
     def expand_query(self, query: str) -> str:

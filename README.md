@@ -1414,6 +1414,14 @@ Common issues:
 
 ### Unreleased
 
+### v4.7.0 (2026-07-31) — BM25 Fragment Query Support
+
+- **FIX (retrieval)**: BM25 tokenizer now emits **sub-tokens** for hyphenated composites, so fragment queries no longer silently return `NO_RESULTS`. Before v4.7.0, `MDR-AD002` was indexed as a single token `mdr-ad002`; queries like `AD002`, `MDR`, `CS005` returned zero even when the composite lived in the corpus. This is not a bug specific to MDR — it hit every hyphenated taxonomy in typical infosec / doc corpora (`MDR-*`, `CVE-*`, `ADR-*`, `MS17-*`, `MDR-Custom001-xxxx`). The tokenizer now emits both the composite token AND its sub-parts of length ≥ 2 (`mdr-ad002` → `["mdr-ad002", "mdr", "ad002"]`). IDF preserves ranking — composite matches still rank above fragment matches because the composite is rarer. (#140)
+- **NEW (tests)**: `tests/test_bm25_tokenizer_fragment.py` — 25 tests across 4 classes covering unit tokenizer behavior, end-to-end fragment matching, multi-doc disambiguation, and the 5 query patterns explicitly reported (`MDR-AD019`, `MDR-Custom001-xxxx`, `MDR`, `AD019`, `CS005`). Includes retrocompat sentinel + IDF ranking invariant. Baseline: 314 → 339.
+- **UPGRADE NOTE**: run `reindex_documents(force=True)` once after upgrade to rebuild the BM25 inverted index with the new sub-token emission. ChromaDB vectors are untouched. Expect a **~30–50% increase in BM25 index memory** (measured +32.5% on synthetic corpus) — negligible for typical corpora, worth reviewing for deployments with >100K docs.
+- **KNOWN LIMITATION**: alphanumeric-glued tokens without separators (`HARDLAB11`, `6a635623e114b8...`) still require exact match — no sub-token expansion possible without character n-grams (5-10× index overhead). Tracked as follow-up.
+- **VERSION**: 4.6.0 → **4.7.0** (MINOR — tokenization behavior change + reindex requirement, though no API/config break).
+
 ### v4.6.0 (2026-07-30) — MCP spec 2026-07-28 via Anthropic Tier 1 SDK (mcp 2.x)
 
 - **NEW (protocol)**: adopt the [MCP spec `2026-07-28`](https://blog.modelcontextprotocol.io/posts/2026-07-28/) — stateless request/response core, per-request `_meta.io.modelcontextprotocol/protocolVersion` + `clientCapabilities`, `serverInfo` on responses, retirement of the `initialize`/`initialized` handshake and the `Mcp-Session-Id` header. The MCP client Claude Code (and every Tier 1 client) negotiates the spec version per request, so this release stays backwards-compatible for clients speaking earlier spec revisions.
