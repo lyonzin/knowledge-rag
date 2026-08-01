@@ -8,7 +8,6 @@ fragments match while IDF preserves exact-match ranking.
 
 from mcp_server.server import BM25Index
 
-
 # ── Unit: tokenizer behavior ──
 
 
@@ -59,14 +58,19 @@ class TestTokenizerFragments:
         assert "001" in tokens
 
     def test_single_char_parts_dropped(self):
-        """Sub-parts of length 1 must be dropped to avoid index noise."""
-        tokens = self.bm25._tokenize("a-b-c-hello-world")
-        assert "a-b-c-hello-world" in tokens
+        """Sub-parts of length 1 must be dropped to avoid index noise.
+
+        Uses a code with digits (so expansion is triggered) whose sub-parts
+        include single chars like 'x' that must be filtered out.
+        """
+        tokens = self.bm25._tokenize("a-b-hello-42-world")
+        assert "a-b-hello-42-world" in tokens
         assert "hello" in tokens
         assert "world" in tokens
+        assert "42" in tokens
+        # Single-char parts must be dropped
         assert tokens.count("a") == 0
         assert tokens.count("b") == 0
-        assert tokens.count("c") == 0
 
     def test_non_hyphenated_unchanged(self):
         """Tokens without hyphens must not expand."""
@@ -77,6 +81,40 @@ class TestTokenizerFragments:
         tokens = self.bm25._tokenize("T1078.002")
         assert "t1078" in tokens
         assert "002" in tokens
+
+    def test_natural_language_hyphen_not_expanded(self):
+        """Hyphenated natural-language phrases (no digits) must NOT expand.
+
+        Words like "pass-the-hash" or "state-of-the-art" should stay as single
+        composite tokens — expanding them floods the index with stop-word-like
+        sub-parts and hurts query throughput without helping typical recall.
+        """
+        tokens = self.bm25._tokenize("pass-the-hash attack technique")
+        assert "pass-the-hash" in tokens
+        # Sub-parts must NOT be emitted (they'd match too broadly)
+        assert "pass" not in tokens
+        assert "hash" not in tokens
+        assert "the" not in tokens
+
+    def test_natural_language_multi_hyphen_not_expanded(self):
+        """Multi-hyphen natural phrase like 'state-of-the-art' stays composite."""
+        tokens = self.bm25._tokenize("state-of-the-art detection")
+        assert "state-of-the-art" in tokens
+        assert "state" not in tokens
+        assert "art" not in tokens
+
+    def test_alphanumeric_code_still_expands(self):
+        """Regression sentinel: codes with digits keep expanding after the
+        digit-required heuristic (would silently break the fix otherwise)."""
+        for code, must_include in [
+            ("MDR-AD002", ["mdr", "ad002"]),
+            ("CVE-2024-1234", ["cve", "2024", "1234"]),
+            ("MS17-010", ["ms17", "010"]),
+            ("MDR-CS005", ["mdr", "cs005"]),
+        ]:
+            tokens = self.bm25._tokenize(code)
+            for part in must_include:
+                assert part in tokens, f"{code} did not emit sub-token '{part}'"
 
     def test_empty_and_whitespace(self):
         """Empty / whitespace-only inputs return empty list."""
@@ -238,9 +276,7 @@ class TestReporterListedQueryPatterns:
         """Pattern 3: prefix-only `MDR` must return all 4 MDR-* docs, not 'unrelated'."""
         results = self.bm25.search("MDR", top_k=5)
         top_ids = {r[0] for r in results[:4]}
-        assert top_ids == {"ad019", "custom", "ad002", "cs005"}, (
-            f"Expected all 4 MDR-* docs, got {top_ids}"
-        )
+        assert top_ids == {"ad019", "custom", "ad002", "cs005"}, f"Expected all 4 MDR-* docs, got {top_ids}"
         # The 'unrelated' doc must NOT rank in the MDR family
         if len(results) >= 5:
             assert results[4][0] == "unrelated"

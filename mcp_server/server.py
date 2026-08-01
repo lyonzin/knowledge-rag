@@ -698,16 +698,25 @@ class BM25Index:
     def _tokenize(self, text: str) -> List[str]:
         """Tokenize: lowercase, split on non-alphanumeric, emit composite + sub-tokens.
 
-        For hyphenated tokens (e.g. "mdr-ad002", "cve-2024-1234"), emit both the
-        composite token AND its sub-parts of length >= 2. Preserves exact-match
-        ranking via IDF (composite is rarer) while enabling fragment queries.
+        For alphanumeric-code composites (containing at least one digit — e.g.
+        "mdr-ad002", "cve-2024-1234", "ms17-010"), emit both the composite token
+        AND its sub-parts of length >= 2. This enables fragment queries ("AD002",
+        "CVE", "010") to match while IDF preserves exact-match ranking (composite
+        is rarer).
+
+        Natural-language hyphenated words (e.g. "pass-the-hash", "state-of-the-art")
+        are kept as single tokens — expanding them would flood the inverted index
+        with high-frequency stop-word-like sub-parts and hurt query throughput
+        without helping recall for typical use cases.
         """
         text_lower = text.lower()
         composite_tokens = re.findall(r"[a-z0-9][-a-z0-9]*[a-z0-9]|[a-z0-9]", text_lower)
         tokens: List[str] = []
         for tok in composite_tokens:
             tokens.append(tok)
-            if "-" in tok:
+            # Only expand codes (composites containing at least one digit).
+            # Skips natural-language phrases like "pass-the-hash".
+            if "-" in tok and any(c.isdigit() for c in tok):
                 for part in tok.split("-"):
                     if len(part) >= 2:
                         tokens.append(part)
