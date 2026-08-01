@@ -1414,6 +1414,8 @@ Common issues:
 
 ### Unreleased
 
+- **NEW (release automation)**: `release.yml` now has a `yank-superseded` job that reads a `YANKS:` marker from the release body and automatically yanks the listed version from PyPI + deprecates it on NPM after the new version publishes. Format: `YANKS: v4.7.0` or `YANKS: v4.7.0 — some reason`. Requires the `PYPI_API_TOKEN` repo secret (classic scoped token — Trusted Publisher OIDC does not currently support yank). Job runs after `publish-pypi`/`publish-npm`/`publish-docker`, is idempotent, and degrades gracefully when secrets are missing (emits `::warning::` instead of failing). If the marker is absent, the job is a no-op.
+
 ### v4.7.1 (2026-08-01) — Documentation Hygiene
 
 - **CHORE (docs, tests)**: sanitize identifiers in test fixtures and CHANGELOG examples. v4.7.0 referenced code names from a real deployment corpus in `tests/test_bm25_tokenizer_fragment.py` and the v4.7.0 CHANGELOG entry; those are replaced with synthetic placeholders (`RULE-A00X`, `PROJECT-Custom001-xxxx`) and well-known public identifiers (`CVE-*`, `MS17-*`, `ADR-*`, `T1078.002`) that carry no organization-specific taxonomy. Zero behavior change — all 28 fragment tests pass unchanged, tokenizer logic identical.

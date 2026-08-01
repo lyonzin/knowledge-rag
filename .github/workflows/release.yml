@@ -130,3 +130,97 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # ── Optional post-publish step ──────────────────────────────────────────
+  #
+  # If the release body contains a line of the form:
+  #   YANKS: v4.7.0
+  #   YANKS: v4.7.0 — reason string
+  # then, after the new version is published, this job:
+  #   • yanks the listed version from PyPI
+  #   • deprecates the listed version on NPM
+  # so `pip install <pkg>` and `npm install <pkg>` skip the superseded release
+  # by default (users pinned to it still get it, with a warning).
+  #
+  # Requires the PYPI_API_TOKEN repo secret (classic scoped token). If the
+  # secret is missing the PyPI step is skipped and only NPM deprecation runs.
+  # Missing NPM_TOKEN also degrades gracefully.
+  yank-superseded:
+    name: Yank Superseded Version
+    needs: [publish-pypi, publish-npm, publish-docker]
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'release' && github.event.release.body != '' }}
+    steps:
+      - name: Parse YANKS marker from release body
+        id: parse
+        env:
+          BODY: ${{ github.event.release.body }}
+        run: |
+          # Match: YANKS: v1.2.3   OR   YANKS: v1.2.3 — some reason
+          line=$(printf '%s\n' "$BODY" | grep -iE '^[[:space:]]*YANKS:[[:space:]]*v?[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)
+          if [ -z "$line" ]; then
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "No YANKS marker in release body — skipping."
+            exit 0
+          fi
+          version=$(printf '%s\n' "$line" | sed -E 's/.*YANKS:[[:space:]]*v?([0-9]+\.[0-9]+\.[0-9]+).*/\1/i')
+          reason=$(printf '%s\n' "$line" | sed -E 's/^[^—-]*[—-][[:space:]]*//; t; s/.*//')
+          if [ -z "$reason" ]; then
+            reason="Superseded by ${GITHUB_REF_NAME}. Behavior-identical release available."
+          fi
+          echo "found=true" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "reason=$reason" >> "$GITHUB_OUTPUT"
+          echo "Will yank v${version}: ${reason}"
+
+      - name: Yank on PyPI
+        if: ${{ steps.parse.outputs.found == 'true' && env.PYPI_API_TOKEN != '' }}
+        env:
+          PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+          VERSION: ${{ steps.parse.outputs.version }}
+          REASON: ${{ steps.parse.outputs.reason }}
+        run: |
+          # Warehouse yank endpoint accepts classic PyPI API tokens
+          # (Trusted Publisher OIDC tokens are publish-only right now).
+          # Idempotent: PyPI returns 200 even if already yanked.
+          http=$(curl -sS -o /tmp/yank.out -w "%{http_code}" \
+            -X POST \
+            -u "__token__:${PYPI_API_TOKEN}" \
+            --data-urlencode "confirm_project_name=knowledge-rag" \
+            --data-urlencode "_method=PUT" \
+            --data-urlencode "yanked=true" \
+            --data-urlencode "yanked_reason=${REASON}" \
+            "https://pypi.org/manage/project/knowledge-rag/release/${VERSION}/" \
+            || echo "curl-failed")
+          echo "PyPI yank v${VERSION} → HTTP ${http}"
+          cat /tmp/yank.out || true
+          if [ "$http" != "200" ] && [ "$http" != "303" ]; then
+            echo "::warning::PyPI yank returned HTTP ${http} — verify manually at https://pypi.org/manage/project/knowledge-rag/release/${VERSION}/"
+          fi
+
+      - name: Skip PyPI yank (no token)
+        if: ${{ steps.parse.outputs.found == 'true' && env.PYPI_API_TOKEN == '' }}
+        env:
+          PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          echo "::warning::PYPI_API_TOKEN secret not set — cannot yank on PyPI. Do it manually at https://pypi.org/manage/project/knowledge-rag/release/${{ steps.parse.outputs.version }}/"
+
+      - name: Deprecate on NPM
+        if: ${{ steps.parse.outputs.found == 'true' && env.NPM_TOKEN != '' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ steps.parse.outputs.version }}
+          REASON: ${{ steps.parse.outputs.reason }}
+        run: |
+          npm config set //registry.npmjs.org/:_authToken "${NPM_TOKEN}"
+          # Idempotent: re-deprecating overwrites the message with no error.
+          npm deprecate "knowledge-rag@${VERSION}" "${REASON}"
+          echo "NPM deprecate v${VERSION} → done"
+
+      - name: Skip NPM deprecate (no token)
+        if: ${{ steps.parse.outputs.found == 'true' && env.NPM_TOKEN == '' }}
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          echo "::warning::NPM_TOKEN secret not set — cannot deprecate on NPM."
