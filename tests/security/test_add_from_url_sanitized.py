@@ -49,9 +49,7 @@ def sandboxed_orchestrator(tmp_path, monkeypatch):
     # The two methods under test must run for real; MagicMock would
     # short-circuit them and hide the wire we are trying to prove.
     orch.add_from_url = server_module.KnowledgeOrchestrator.add_from_url.__get__(orch)
-    orch.add_document_from_content = (
-        server_module.KnowledgeOrchestrator.add_document_from_content.__get__(orch)
-    )
+    orch.add_document_from_content = server_module.KnowledgeOrchestrator.add_document_from_content.__get__(orch)
 
     orch._index_document = MagicMock(return_value=(1, 0))
     orch._indexed_docs = {}

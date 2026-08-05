@@ -2120,9 +2120,7 @@ class KnowledgeOrchestrator:
         # The body was fetched from an untrusted URL; the sanitizer inserts a
         # provenance fence and defuses model control tokens before the text
         # ever reaches the parser or the LLM that will consume the RAG output.
-        return self.add_document_from_content(
-            clean_text, filepath, category, external_source=url
-        )
+        return self.add_document_from_content(clean_text, filepath, category, external_source=url)
 
     def search_similar(self, filepath: str, max_results: int = 5) -> List[Dict[str, Any]]:
         """Find documents similar to a given document using embedding similarity.
@@ -3008,8 +3006,7 @@ def _run_transport(transport: str) -> None:
     app = app_factory()
     guarded = BearerAuthMiddleware(app, token)
     print(
-        f"[SECURITY] Bearer auth enforced on {transport} transport "
-        f"({config.server_host}:{config.server_port})",
+        f"[SECURITY] Bearer auth enforced on {transport} transport ({config.server_host}:{config.server_port})",
         file=sys.stderr,
     )
     uvicorn.run(guarded, host=config.server_host, port=config.server_port)

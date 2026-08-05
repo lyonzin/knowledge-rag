@@ -181,8 +181,6 @@ def test_wired_stack_lets_the_correct_token_through(monkeypatch):
     wired_app = served["app"]
     downstream = wired_app.app
 
-    messages = _drive(
-        wired_app, _http_scope([(b"authorization", f"Bearer {TOKEN}".encode())])
-    )
+    messages = _drive(wired_app, _http_scope([(b"authorization", f"Bearer {TOKEN}".encode())]))
     assert _status(messages) == 200
     assert len(downstream.hits) == 1
