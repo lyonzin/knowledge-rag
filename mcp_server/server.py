@@ -64,6 +64,13 @@ from .config import config
 from .ingestion import Document, DocumentParser
 from .metrics import instrument
 from .ratelimit import rate_limited
+from .security import (
+    BearerAuthMiddleware,
+    PathEscapeError,
+    is_path_within,
+    sanitize_external_content,
+    validate_path_within,
+)
 
 # =============================================================================
 # QUERY CACHE
@@ -1883,10 +1890,20 @@ class KnowledgeOrchestrator:
     # =========================================================================
 
     def get_document(self, filepath: str) -> Optional[Dict[str, Any]]:
-        """Get full document content by filepath"""
-        filepath = Path(filepath)
+        """Get full document content by filepath.
+
+        Rejects paths that resolve outside ``config.documents_dir`` to keep
+        the endpoint from becoming an arbitrary-file-read primitive.
+        Returns ``None`` on rejection so the failure mode matches the
+        existing "not found" case exposed to MCP clients.
+        """
         try:
-            doc = self.parser.parse_file(filepath)
+            resolved = validate_path_within(config.documents_dir, filepath)
+        except PathEscapeError as exc:
+            print(f"[SECURITY] get_document refused escaping path {filepath!r}: {exc}")
+            return None
+        try:
+            doc = self.parser.parse_file(resolved)
             if doc:
                 return {
                     "content": doc.content,
@@ -1899,12 +1916,35 @@ class KnowledgeOrchestrator:
                     "chunk_count": len(doc.chunks),
                 }
         except Exception as e:
-            print(f"[ERROR] Failed to read document {filepath}: {e}")
+            print(f"[ERROR] Failed to read document {resolved}: {e}")
         return None
 
-    def add_document_from_content(self, content: str, filepath: str, category: str) -> Dict[str, Any]:
-        """Add a new document from raw content string. Saves to disk and indexes."""
-        full_path = config.documents_dir / filepath
+    def add_document_from_content(
+        self,
+        content: str,
+        filepath: str,
+        category: str,
+        external_source: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Add a new document from raw content string. Saves to disk and indexes.
+
+        When ``external_source`` is provided the content is treated as
+        attacker-influenced: sanitized against known prompt-injection
+        sentinels and wrapped in a provenance fence before ever touching
+        disk (see ``mcp_server.security.sanitize_external_content``).
+
+        The destination ``filepath`` is resolved inside
+        ``config.documents_dir``; escapes via ``..`` or absolute paths are
+        rejected with a structured error and never write to disk.
+        """
+        try:
+            full_path = validate_path_within(config.documents_dir, filepath)
+        except PathEscapeError as exc:
+            return {"error": f"Filepath rejected: {exc}"}
+
+        if external_source:
+            content = sanitize_external_content(content, external_source)
+
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(content, encoding="utf-8")
 
@@ -1949,8 +1989,16 @@ class KnowledgeOrchestrator:
         }
 
     def update_document_content(self, filepath: str, content: str) -> Dict[str, Any]:
-        """Update an existing document. Removes old chunks and re-indexes."""
-        filepath = Path(filepath)
+        """Update an existing document. Removes old chunks and re-indexes.
+
+        Rejects paths that resolve outside ``config.documents_dir`` so
+        this endpoint cannot be used to overwrite arbitrary host files.
+        """
+        try:
+            filepath = validate_path_within(config.documents_dir, filepath)
+        except PathEscapeError as exc:
+            return {"error": f"Filepath rejected: {exc}"}
+
         if not filepath.exists():
             return {"error": f"File not found: {filepath}"}
 
@@ -2005,8 +2053,18 @@ class KnowledgeOrchestrator:
         }
 
     def remove_document_by_path(self, filepath: str, delete_file: bool = False) -> Dict[str, Any]:
-        """Remove a document from the index. Optionally delete from disk."""
-        filepath_resolved = str(Path(filepath).resolve())
+        """Remove a document from the index. Optionally delete from disk.
+
+        Guarded by ``validate_path_within(documents_dir, filepath)`` so a
+        client cannot use ``delete_file=True`` as an arbitrary-file-delete
+        primitive against paths outside the corpus.
+        """
+        try:
+            resolved_path = validate_path_within(config.documents_dir, filepath)
+        except PathEscapeError as exc:
+            return {"error": f"Filepath rejected: {exc}"}
+
+        filepath_resolved = str(resolved_path)
 
         doc_id = self._source_to_docid.get(filepath_resolved)
 
@@ -2019,7 +2077,7 @@ class KnowledgeOrchestrator:
 
         if delete_file:
             try:
-                Path(filepath).unlink(missing_ok=True)
+                resolved_path.unlink(missing_ok=True)
             except Exception as e:
                 print(f"[WARN] Failed to delete file {filepath}: {e}")
 
@@ -2059,10 +2117,23 @@ class KnowledgeOrchestrator:
         filename = f"{safe_title}.md"
         filepath = f"{category}/{filename}"
 
-        return self.add_document_from_content(clean_text, filepath, category)
+        # The body was fetched from an untrusted URL; the sanitizer inserts a
+        # provenance fence and defuses model control tokens before the text
+        # ever reaches the parser or the LLM that will consume the RAG output.
+        return self.add_document_from_content(
+            clean_text, filepath, category, external_source=url
+        )
 
     def search_similar(self, filepath: str, max_results: int = 5) -> List[Dict[str, Any]]:
-        """Find documents similar to a given document using embedding similarity."""
+        """Find documents similar to a given document using embedding similarity.
+
+        Paths that resolve outside ``config.documents_dir`` return an empty
+        list rather than probing index state — an attacker must not be able
+        to use this endpoint to test for the existence of arbitrary files.
+        """
+        if not is_path_within(config.documents_dir, filepath):
+            return []
+
         filepath_resolved = str(Path(filepath).resolve())
 
         doc_id = self._source_to_docid.get(filepath_resolved)
@@ -2878,6 +2949,72 @@ def _handle_init():
         print(f"[ERROR] Failed to write files: {e}")
 
 
+#: Transports for which ``mcp.run()`` speaks HTTP. When the operator has
+#: configured a bearer token these need the auth middleware in front, which
+#: means we cannot rely on ``mcp.run()`` alone — the middleware wrapper is
+#: installed via uvicorn.
+_HTTP_TRANSPORTS: Tuple[str, ...] = ("sse", "streamable-http")
+
+
+def _http_app_factory(transport: str):
+    """Return the FastMCP ASGI factory matching ``transport``."""
+    if transport == "streamable-http":
+        return mcp.streamable_http_app
+    if transport == "sse":
+        return mcp.sse_app
+    raise ValueError(f"Unknown HTTP transport: {transport!r}")
+
+
+def _run_transport(transport: str) -> None:
+    """Boot the requested MCP transport, applying auth when configured.
+
+    * ``stdio`` — the pipe carries no HTTP metadata; auth is not applicable
+      and the middleware is not installed.
+    * HTTP transports (``sse``, ``streamable-http``) — when
+      ``config.auth_bearer_token`` is set, the FastMCP ASGI app is wrapped
+      in :class:`BearerAuthMiddleware` and served through uvicorn so no
+      unauthenticated request can reach the MCP dispatcher. When the token
+      is unset we print a one-line warning and fall back to ``mcp.run``
+      so the current, unauth open-port behaviour is preserved for
+      backwards compatibility.
+    * Anything else is refused loudly rather than silently starting an
+      unguarded server.
+    """
+    if transport == "stdio":
+        mcp.run(transport=transport)
+        return
+
+    if transport not in _HTTP_TRANSPORTS:
+        raise ValueError(f"Unknown transport: {transport!r}")
+
+    token = getattr(config, "auth_bearer_token", "") or ""
+
+    if not token:
+        print(
+            f"[WARN] Bearer auth disabled on {transport} transport — "
+            "set server.auth.bearer_token in config.yaml to require credentials.",
+            file=sys.stderr,
+        )
+        mcp.run(
+            transport=transport,
+            host=config.server_host,
+            port=config.server_port,
+        )
+        return
+
+    import uvicorn
+
+    app_factory = _http_app_factory(transport)
+    app = app_factory()
+    guarded = BearerAuthMiddleware(app, token)
+    print(
+        f"[SECURITY] Bearer auth enforced on {transport} transport "
+        f"({config.server_host}:{config.server_port})",
+        file=sys.stderr,
+    )
+    uvicorn.run(guarded, host=config.server_host, port=config.server_port)
+
+
 def main():
     """Run the MCP server"""
     if len(sys.argv) > 1 and sys.argv[1] == "init":
@@ -2966,14 +3103,7 @@ def main():
                     file=sys.stderr,
                 )
 
-            if transport == "stdio":
-                mcp.run(transport=transport)
-            else:
-                mcp.run(
-                    transport=transport,
-                    host=config.server_host,
-                    port=config.server_port,
-                )
+            _run_transport(transport)
     except AlreadyRunningError as e:
         print(f"[ERROR] {e}", file=sys.stderr)
         raise SystemExit(ALREADY_RUNNING_EXIT_CODE) from e

@@ -220,9 +220,6 @@ def orch(corpus, monkeypatch):
     return stub
 
 
-@pytest.mark.xfail(
-    reason="integration with MCP tools pending v4.6.0 (library shipped standalone in v4.5.1)", strict=False
-)
 def test_add_document_rejects_escape(orch, corpus, tmp_path):
     """Writing outside the corpus must fail and touch nothing on disk."""
     from mcp_server.server import KnowledgeOrchestrator
@@ -250,9 +247,6 @@ def test_add_document_from_file_rejects_escape(orch, corpus, tmp_path):
     orch._index_new_file.assert_not_called()
 
 
-@pytest.mark.xfail(
-    reason="integration with MCP tools pending v4.6.0 (library shipped standalone in v4.5.1)", strict=False
-)
 def test_update_document_rejects_escape(orch, tmp_path):
     """An unchecked path here overwrites any writable file on the host."""
     from mcp_server.server import KnowledgeOrchestrator
@@ -275,9 +269,6 @@ def test_remove_document_rejects_escape(orch, tmp_path):
     assert victim.exists()
 
 
-@pytest.mark.xfail(
-    reason="integration with MCP tools pending v4.6.0 (library shipped standalone in v4.5.1)", strict=False
-)
 def test_get_document_rejects_escape(orch, tmp_path):
     """The arbitrary-read primitive: any supported suffix, anywhere on disk."""
     from mcp_server.server import KnowledgeOrchestrator
@@ -297,9 +288,6 @@ def test_search_similar_rejects_escape(orch, tmp_path):
     assert KnowledgeOrchestrator.search_similar(orch, str(victim)) == []
 
 
-@pytest.mark.xfail(
-    reason="integration with MCP tools pending v4.6.0 (library shipped standalone in v4.5.1)", strict=False
-)
 def test_get_document_still_serves_in_corpus_files(orch, corpus):
     """Backwards compatibility: legitimate reads keep working."""
     from mcp_server.server import KnowledgeOrchestrator

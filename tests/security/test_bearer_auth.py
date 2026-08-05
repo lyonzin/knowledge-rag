@@ -256,9 +256,6 @@ def test_middleware_refuses_to_start_with_an_empty_token():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason="integration with MCP tools pending v4.6.0 (library shipped standalone in v4.5.1)", strict=False
-)
 def test_stdio_transport_bypasses_auth(monkeypatch):
     """A local pipe carries no HTTP headers — never gate it."""
     from mcp_server import server as server_module
@@ -289,9 +286,6 @@ def test_http_transport_without_token_warns_and_stays_open(monkeypatch, capsys):
     assert "Bearer auth disabled" in capsys.readouterr().err
 
 
-@pytest.mark.xfail(
-    reason="integration with MCP tools pending v4.6.0 (library shipped standalone in v4.5.1)", strict=False
-)
 def test_http_transport_with_token_installs_the_middleware(monkeypatch):
     """The wiring that actually closes the finding."""
     from mcp_server import server as server_module
@@ -312,9 +306,6 @@ def test_http_transport_with_token_installs_the_middleware(monkeypatch):
     assert served["app"].token == TOKEN
 
 
-@pytest.mark.xfail(
-    reason="integration with MCP tools pending v4.6.0 (library shipped standalone in v4.5.1)", strict=False
-)
 def test_unknown_transport_is_rejected(monkeypatch):
     """A typo in config must not silently start an unguarded server."""
     from mcp_server import server as server_module

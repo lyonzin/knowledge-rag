@@ -271,9 +271,6 @@ def test_internal_document_is_left_byte_identical(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason="integration with MCP tools pending v4.6.0 (library shipped standalone in v4.5.1)", strict=False
-)
 def test_add_from_url_flags_content_as_external(monkeypatch):
     """Regression guard: the URL ingester must pass ``external_source``."""
     from mcp_server.server import KnowledgeOrchestrator
