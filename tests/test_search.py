@@ -453,3 +453,118 @@ class TestPathAwareRanking:
         results = orchestrator.query("api security", max_results=2, hybrid_alpha=0.0)
 
         assert results[0]["source"] == "/docs/reports/api-security.md"
+
+
+# ── Candidate pool math (v4.8.0 Fase 3) ──
+
+
+class TestDoSemanticCandidateMath:
+    """Pin the ``_do_semantic`` candidate count against future clamping regressions.
+
+    Before v4.8.0 Fase 3 the line
+        ``n_candidates = min(max_results * 3, config.max_results)``
+    was silently capped at 20 because ``config.max_results`` defaulted to
+    20 — while BM25 pulled up to ``max_results * 20 = 400`` candidates.
+    Semantic starved on hybrid mode without any log signal.
+
+    The Fase 3 fix raised the ``max_results`` default from 20 to 100, so
+    the ``min(...)`` now yields ``max_results * 3`` for typical callers
+    (``max_results * 3 = 15 << 100``). This regression pin protects
+    against future PRs that "helpfully" restore the 20-cap.
+    """
+
+    def test_semantic_asks_chromadb_for_3x_max_results(self, monkeypatch):
+        """With max_results=5 and config.max_results=100 → 15 candidates (not 20)."""
+        monkeypatch.setattr("mcp_server.server.config.reranker_enabled", False)
+        monkeypatch.setattr("mcp_server.server.config.max_results", 100)
+
+        captured = {}
+
+        class FakeCache:
+            def get(self, *args, **kwargs):
+                return None
+
+            def put(self, *args, **kwargs):
+                return None
+
+        class FakeBM25:
+            def search(self, query, top_k):
+                return []
+
+        class FakeCollection:
+            def query(self, query_texts, n_results, where, include):
+                captured["n_results"] = n_results
+                return {
+                    "ids": [[]],
+                    "distances": [[]],
+                    "documents": [[]],
+                    "metadatas": [[]],
+                }
+
+            def get(self, ids, include):
+                return {"documents": [], "metadatas": []}
+
+        orch = object.__new__(KnowledgeOrchestrator)
+        orch.query_cache = FakeCache()
+        orch.bm25_index = FakeBM25()
+        orch.collection = FakeCollection()
+        orch._ensure_bm25_index = lambda: None
+        orch._route_by_keywords = lambda query: None
+        orch._expand_with_adjacent_chunks = lambda results: results
+
+        # hybrid_alpha=1.0 forces the semantic-only branch (skips BM25).
+        _ = orch.query("test query", max_results=5, hybrid_alpha=1.0)
+
+        # 5 * 3 = 15; min(15, 100) = 15. NOT clamped at 20 anymore.
+        assert captured["n_results"] == 15, (
+            f"Expected 15 candidates (max_results=5 * 3, capped at "
+            f"config.max_results=100), got {captured['n_results']}. "
+            f"If this fails, someone probably reverted the v4.8.0 Fase 3 "
+            f"default bump — check config.max_results and the min(...) "
+            f"expression in server.py::_do_semantic."
+        )
+
+    def test_semantic_pool_is_bounded_by_config_max_results(self, monkeypatch):
+        """When max_results * 3 exceeds config.max_results, the config value wins."""
+        monkeypatch.setattr("mcp_server.server.config.reranker_enabled", False)
+        # Cap intentionally small so max_results * 3 > cap.
+        monkeypatch.setattr("mcp_server.server.config.max_results", 50)
+
+        captured = {}
+
+        class FakeCache:
+            def get(self, *args, **kwargs):
+                return None
+
+            def put(self, *args, **kwargs):
+                return None
+
+        class FakeBM25:
+            def search(self, query, top_k):
+                return []
+
+        class FakeCollection:
+            def query(self, query_texts, n_results, where, include):
+                captured["n_results"] = n_results
+                return {
+                    "ids": [[]],
+                    "distances": [[]],
+                    "documents": [[]],
+                    "metadatas": [[]],
+                }
+
+            def get(self, ids, include):
+                return {"documents": [], "metadatas": []}
+
+        orch = object.__new__(KnowledgeOrchestrator)
+        orch.query_cache = FakeCache()
+        orch.bm25_index = FakeBM25()
+        orch.collection = FakeCollection()
+        orch._ensure_bm25_index = lambda: None
+        orch._route_by_keywords = lambda query: None
+        orch._expand_with_adjacent_chunks = lambda results: results
+
+        # 20 * 3 = 60, but config.max_results = 50 → min() clamps to 50
+        _ = orch.query("test query", max_results=20, hybrid_alpha=1.0)
+
+        assert captured["n_results"] == 50
