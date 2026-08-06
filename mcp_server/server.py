@@ -1334,6 +1334,13 @@ class KnowledgeOrchestrator:
 
         _progress_interval = max(1, stats["total_files"] // 10)
 
+        # v4.8.0 Fase 4: checkpoint enabled only for smart_reindex — the
+        # nuclear rebuild throws the whole collection away, so resuming
+        # from a partial state is meaningless there.
+        _op_mode = self._reindex_progress.get("operation")
+        _checkpoint_enabled = _op_mode == "smart_reindex"
+        _last_checkpoint_ts = time.monotonic()
+
         # v4.8.0 Fase 4: chunk-level progress + throughput sliding window
         # (deque bounded to 100 samples; older-than-30s pruned each iteration).
         chunks_processed = 0
@@ -1463,6 +1470,29 @@ class KnowledgeOrchestrator:
                 }
             )
 
+            # v4.8.0 Fase 4: persist checkpoint every 500 docs OR 30s.
+            # Whichever comes first — 500 gives coverage for fast runs
+            # (small docs, mostly-cached), 30s gives coverage for slow
+            # runs (huge PDFs, network drive). I/O is a couple ms per
+            # write; dominance is the ChromaDB add() call it follows.
+            if _checkpoint_enabled and (
+                (idx + 1) % 500 == 0
+                or (time.monotonic() - _last_checkpoint_ts) >= 30
+            ):
+                try:
+                    self._write_checkpoint(
+                        operation=_op_mode,
+                        indexed_doc_ids=list(self._indexed_docs.keys()),
+                        chunks_processed=chunks_processed,
+                        started_at=self._reindex_progress.get("started_at"),
+                    )
+                    _last_checkpoint_ts = time.monotonic()
+                except OSError as e:
+                    # Non-fatal — losing a checkpoint write means the user
+                    # will just have less to resume from. The reindex itself
+                    # continues.
+                    print(f"[WARN] Checkpoint write failed (non-fatal): {e}")
+
             if stats["total_files"] > 100 and (idx + 1) % _progress_interval == 0:
                 pct = int((idx + 1) / stats["total_files"] * 100)
                 print(
@@ -1471,6 +1501,12 @@ class KnowledgeOrchestrator:
                 )
 
         self._save_metadata()
+
+        # v4.8.0 Fase 4: checkpoint is no longer needed after a successful
+        # run — clear it so the next reindex(resume=True) does not resume
+        # into a stale state.
+        if _checkpoint_enabled:
+            self._clear_checkpoint()
 
         if stats["indexed"] > 0 or stats["updated"] > 0 or stats["deleted"] > 0:
             self.query_cache.invalidate()
