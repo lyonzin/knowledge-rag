@@ -1116,6 +1116,11 @@ class DocumentWatcher(FileSystemEventHandler):
 # =============================================================================
 
 
+# Sentinel returned by _resolve_existing_or_skip to signal "skip this doc" —
+# distinguishes from ``None`` (no existing doc yet, index as fresh).
+_SKIP_DOC = object()
+
+
 class KnowledgeOrchestrator:
     """Main orchestrator for knowledge retrieval with semantic search + keyword routing"""
 
@@ -1335,7 +1340,28 @@ class KnowledgeOrchestrator:
         resume_state: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Inner implementation of index_all (caller holds _index_lock)."""
-        stats = {
+        stats = self._init_index_stats()
+        documents = self._scan_and_count_documents(stats)
+        path_to_docid = self._build_path_to_docid_map()
+        self._prune_orphan_documents(documents, stats)
+
+        tracking = self._init_reindex_tracking(resume_state, stats)
+        _progress_interval = max(1, stats["total_files"] // 10)
+
+        for idx, doc in enumerate(documents):
+            self._process_one_document(
+                idx, doc, force, path_to_docid, stats, tracking
+            )
+            self._update_progress_metrics(idx, stats, tracking)
+            self._maybe_persist_checkpoint(idx, tracking)
+            self._maybe_print_progress(idx, stats, _progress_interval)
+
+        return self._finalize_reindex(stats, tracking)
+
+    @staticmethod
+    def _init_index_stats() -> Dict[str, Any]:
+        """Fresh zeroed stats dict for a reindex run."""
+        return {
             "total_files": 0,
             "indexed": 0,
             "updated": 0,
@@ -1348,20 +1374,30 @@ class KnowledgeOrchestrator:
             "categories": {},
         }
 
+    def _scan_and_count_documents(self, stats: Dict[str, Any]) -> list:
+        """Parse docs directory, publish total to progress, print if large."""
         documents = self.parser.parse_directory()
         stats["total_files"] = len(documents)
         self._reindex_progress["total_files"] = stats["total_files"]
         if stats["total_files"] > 100:
             print(f"[INDEX] Scanning {stats['total_files']} documents...")
+        return documents
 
+    def _build_path_to_docid_map(self) -> Dict[str, str]:
+        """Reverse index: source path → doc_id from currently indexed docs."""
         path_to_docid: Dict[str, str] = {}
         for doc_id, info in list(self._indexed_docs.items()):
             path_to_docid[info.get("source", "")] = doc_id
+        return path_to_docid
 
+    def _prune_orphan_documents(self, documents, stats: Dict[str, Any]) -> None:
+        """Delete indexed docs whose source path no longer exists (fixes #90).
+
+        Done BEFORE indexing so moved files are not blocked by stale content
+        hashes. Mutates ``stats`` (chunks_removed, deleted) and evicts from
+        both ``_indexed_docs`` and ``_source_to_docid``.
+        """
         current_paths = {str(doc.source) for doc in documents}
-
-        # Clean up orphaned docs BEFORE indexing so that moved files
-        # are not blocked by stale content hashes (fixes #90).
         orphan_ids = []
         for doc_id, info in list(self._indexed_docs.items()):
             if info.get("source", "") not in current_paths:
@@ -1376,199 +1412,285 @@ class KnowledgeOrchestrator:
                 self._source_to_docid.pop(str(Path(src).resolve()), None)
             del self._indexed_docs[doc_id]
 
-        _progress_interval = max(1, stats["total_files"] // 10)
-
-        # v4.8.0 Fase 4: checkpoint enabled only for smart_reindex — the
-        # nuclear rebuild throws the whole collection away, so resuming
-        # from a partial state is meaningless there.
-        _op_mode = self._reindex_progress.get("operation")
-        _checkpoint_enabled = _op_mode == "smart_reindex"
-        _last_checkpoint_ts = time.monotonic()
-
-        # v4.8.0 Fase 4: chunk-level progress + throughput sliding window
-        # (deque bounded to 100 samples; older-than-30s pruned each iteration).
-        # When resuming, chunks_processed inherits from the checkpoint so the
-        # status counter continues instead of restarting from zero.
-        _resume_doc_ids: set = (
+    def _init_reindex_tracking(
+        self, resume_state: Optional[Dict[str, Any]], stats: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Build the mutable per-run tracking dict (checkpoint + throughput + resume)."""
+        op_mode = self._reindex_progress.get("operation")
+        resume_ids: set = (
             set(resume_state.get("doc_ids", [])) if resume_state else set()
         )
         chunks_processed = (
             int(resume_state.get("chunks_processed", 0)) if resume_state else 0
         )
-        _throughput_window: deque = deque(maxlen=100)
-        # Warm-start chunks_total estimate from previously indexed docs so the
-        # first status poll has a meaningful number instead of 0 forever.
-        # Refined per-doc below using the running average.
+        chunks_total_estimate = self._seed_chunks_total_estimate(stats)
+
+        return {
+            "op_mode": op_mode,
+            "checkpoint_enabled": op_mode == "smart_reindex",
+            "last_checkpoint_ts": time.monotonic(),
+            "resume_doc_ids": resume_ids,
+            "chunks_processed": chunks_processed,
+            "throughput_window": deque(maxlen=100),
+            "chunks_total_estimate": chunks_total_estimate,
+        }
+
+    def _seed_chunks_total_estimate(self, stats: Dict[str, Any]) -> int:
+        """Warm-start estimate so the first status poll is meaningful. Refined per-doc later."""
         if self._indexed_docs:
-            _avg_chunks = sum(
+            avg_chunks = sum(
                 info.get("chunks", 0) for info in self._indexed_docs.values()
             ) / max(len(self._indexed_docs), 1)
-            chunks_total_estimate = int(_avg_chunks * stats["total_files"])
+            chunks_total_estimate = int(avg_chunks * stats["total_files"])
         else:
             chunks_total_estimate = 0
         self._reindex_progress["chunks_total"] = chunks_total_estimate
+        return chunks_total_estimate
 
-        for idx, doc in enumerate(documents):
-            try:
-                # v4.8.0 Fase 4: resume skip — doc was already committed
-                # in the previous interrupted run.
-                if _resume_doc_ids and doc.id in _resume_doc_ids:
-                    stats["skipped"] += 1
-                    continue
+    def _process_one_document(
+        self,
+        idx: int,
+        doc,
+        force: bool,
+        path_to_docid: Dict[str, str],
+        stats: Dict[str, Any],
+        tracking: Dict[str, Any],
+    ) -> None:
+        """Per-doc worker: resume skip / hash check / evict-and-reindex / commit.
 
-                source_str = str(doc.source)
-                existing_doc_id = path_to_docid.get(source_str)
+        Mutates ``stats`` and ``tracking['chunks_processed']``. Errors are
+        caught and logged; the caller keeps iterating.
+        """
+        try:
+            existing_doc_id = self._resolve_existing_or_skip(
+                doc, force, path_to_docid, stats, tracking
+            )
+            if existing_doc_id is _SKIP_DOC:
+                return
 
-                if not force and existing_doc_id:
-                    existing_meta = self._indexed_docs.get(existing_doc_id, {})
-                    stored_mtime = existing_meta.get("file_mtime", "")
-                    stored_size = existing_meta.get("file_size", 0)
+            chunks_added, dedup_skipped = self._index_document(doc)
+            self._commit_indexed_doc(
+                doc, chunks_added, dedup_skipped, existing_doc_id, force, stats, tracking
+            )
+        except Exception as e:
+            stats["errors"] += 1
+            print(f"[ERROR] Failed to index {doc.source}: {e}")
 
-                    try:
-                        current_stat = doc.source.stat()
-                        current_mtime = datetime.fromtimestamp(current_stat.st_mtime).isoformat()
-                        current_size = current_stat.st_size
-                    except OSError:
-                        current_mtime = ""
-                        current_size = 0
+    def _resolve_existing_or_skip(
+        self,
+        doc,
+        force: bool,
+        path_to_docid: Dict[str, str],
+        stats: Dict[str, Any],
+        tracking: Dict[str, Any],
+    ):
+        """Decide the fate of a candidate doc.
 
-                    if stored_mtime == current_mtime and stored_size == current_size:
-                        stats["skipped"] += 1
-                        continue
+        Returns ``_SKIP_DOC`` if the caller should skip (already indexed,
+        resume-committed, or unchanged); otherwise returns the existing
+        doc_id (may be None for a fresh doc). Evicts stale content when a
+        content change is detected.
+        """
+        if tracking["resume_doc_ids"] and doc.id in tracking["resume_doc_ids"]:
+            stats["skipped"] += 1
+            return _SKIP_DOC
 
-                    removed = self._remove_document_chunks(existing_doc_id)
-                    stats["chunks_removed"] += removed
-                    src = self._indexed_docs[existing_doc_id].get("source", "")
-                    if src:
-                        self._source_to_docid.pop(str(Path(src).resolve()), None)
-                    del self._indexed_docs[existing_doc_id]
-                    stats["updated"] += 1
-                elif not force and doc.id in self._indexed_docs:
-                    stats["skipped"] += 1
-                    continue
+        existing_doc_id = path_to_docid.get(str(doc.source))
+        if not force and existing_doc_id:
+            if self._unchanged_since_last_index(doc, existing_doc_id):
+                stats["skipped"] += 1
+                return _SKIP_DOC
+            self._evict_stale_doc(existing_doc_id, stats)
+        elif not force and doc.id in self._indexed_docs:
+            stats["skipped"] += 1
+            return _SKIP_DOC
+        return existing_doc_id
 
-                chunks_added, dedup_skipped = self._index_document(doc)
+    def _commit_indexed_doc(
+        self,
+        doc,
+        chunks_added: int,
+        dedup_skipped: int,
+        existing_doc_id: Optional[str],
+        force: bool,
+        stats: Dict[str, Any],
+        tracking: Dict[str, Any],
+    ) -> None:
+        """Post-index bookkeeping: stats bump + throughput sample + metadata write."""
+        if not (existing_doc_id and not force):
+            stats["indexed"] += 1
+        stats["chunks_added"] += chunks_added
+        stats["dedup_skipped"] += dedup_skipped
+        stats["categories"][doc.category] = (
+            stats["categories"].get(doc.category, 0) + 1
+        )
+        # Only bump chunks_processed on success — chunks_added is
+        # meaningful only when _index_document returned normally.
+        tracking["chunks_processed"] += chunks_added
+        self._register_indexed_doc(doc, chunks_added)
 
-                if not (existing_doc_id and not force):
-                    stats["indexed"] += 1
-                stats["chunks_added"] += chunks_added
-                stats["dedup_skipped"] += dedup_skipped
-                stats["categories"][doc.category] = stats["categories"].get(doc.category, 0) + 1
+    def _unchanged_since_last_index(self, doc, existing_doc_id: str) -> bool:
+        """True if the on-disk file matches the stored mtime + size."""
+        existing_meta = self._indexed_docs.get(existing_doc_id, {})
+        stored_mtime = existing_meta.get("file_mtime", "")
+        stored_size = existing_meta.get("file_size", 0)
+        try:
+            current_stat = doc.source.stat()
+            current_mtime = datetime.fromtimestamp(current_stat.st_mtime).isoformat()
+            current_size = current_stat.st_size
+        except OSError:
+            current_mtime = ""
+            current_size = 0
+        return stored_mtime == current_mtime and stored_size == current_size
 
-                # v4.8.0 Fase 4: track chunk-level progress + throughput.
-                # Kept out of the except branch on purpose — chunks_added is
-                # meaningful only when _index_document returned successfully.
-                chunks_processed += chunks_added
+    def _evict_stale_doc(self, existing_doc_id: str, stats: Dict[str, Any]) -> None:
+        """Remove chunks + metadata for a doc that needs reindexing. Bumps updated."""
+        removed = self._remove_document_chunks(existing_doc_id)
+        stats["chunks_removed"] += removed
+        src = self._indexed_docs[existing_doc_id].get("source", "")
+        if src:
+            self._source_to_docid.pop(str(Path(src).resolve()), None)
+        del self._indexed_docs[existing_doc_id]
+        stats["updated"] += 1
 
-                try:
-                    file_stat = doc.source.stat()
-                    file_mtime = datetime.fromtimestamp(file_stat.st_mtime).isoformat()
-                    file_size = file_stat.st_size
-                except OSError:
-                    file_mtime = datetime.now().isoformat()
-                    file_size = 0
+    def _register_indexed_doc(self, doc, chunks_added: int) -> None:
+        """Persist post-index metadata (mtime/size/chunk count) for a doc."""
+        try:
+            file_stat = doc.source.stat()
+            file_mtime = datetime.fromtimestamp(file_stat.st_mtime).isoformat()
+            file_size = file_stat.st_size
+        except OSError:
+            file_mtime = datetime.now().isoformat()
+            file_size = 0
 
-                self._indexed_docs[doc.id] = {
-                    "source": str(doc.source),
-                    "category": doc.category,
-                    "format": doc.format,
-                    "chunks": chunks_added,
-                    "keywords": doc.keywords,
-                    "indexed_at": datetime.now().isoformat(),
-                    "file_mtime": file_mtime,
-                    "file_size": file_size,
-                }
-                self._source_to_docid[str(doc.source.resolve())] = doc.id
+        self._indexed_docs[doc.id] = {
+            "source": str(doc.source),
+            "category": doc.category,
+            "format": doc.format,
+            "chunks": chunks_added,
+            "keywords": doc.keywords,
+            "indexed_at": datetime.now().isoformat(),
+            "file_mtime": file_mtime,
+            "file_size": file_size,
+        }
+        self._source_to_docid[str(doc.source.resolve())] = doc.id
 
-            except Exception as e:
-                stats["errors"] += 1
-                print(f"[ERROR] Failed to index {doc.source}: {e}")
+    def _update_progress_metrics(
+        self, idx: int, stats: Dict[str, Any], tracking: Dict[str, Any]
+    ) -> None:
+        """Compute throughput/ETA/refined total, publish to _reindex_progress."""
+        chunks_processed = tracking["chunks_processed"]
+        throughput_cps = self._sample_throughput(tracking, chunks_processed)
+        chunks_total_estimate = self._refine_chunks_total(
+            idx, chunks_processed, stats, tracking
+        )
+        eta_seconds = 0
+        if throughput_cps > 0 and chunks_total_estimate > chunks_processed:
+            eta_seconds = int(
+                (chunks_total_estimate - chunks_processed) / throughput_cps
+            )
+        self._reindex_progress.update(
+            {
+                "processed": idx + 1,
+                "indexed": stats["indexed"],
+                "skipped": stats["skipped"],
+                "errors": stats["errors"],
+                "chunks_processed": chunks_processed,
+                "chunks_total": chunks_total_estimate,
+                "throughput_cps": round(throughput_cps, 2),
+                "eta_seconds": eta_seconds,
+            }
+        )
 
-            # v4.8.0 Fase 4: compute throughput + ETA per iteration.
-            # Sliding window: 100 samples (deque maxlen) OR last 30s (pruned).
-            _now = time.monotonic()
-            _throughput_window.append((_now, chunks_processed))
-            while _throughput_window and (_now - _throughput_window[0][0]) > 30:
-                _throughput_window.popleft()
+    @staticmethod
+    def _sample_throughput(
+        tracking: Dict[str, Any], chunks_processed: int
+    ) -> float:
+        """Append current sample, prune >30s samples, return chunks/sec estimate.
 
-            throughput_cps = 0.0
-            if len(_throughput_window) >= 2:
-                oldest_ts, oldest_cnt = _throughput_window[0]
-                dt = _now - oldest_ts
-                if dt > 0:
-                    throughput_cps = (chunks_processed - oldest_cnt) / dt
+        Sliding window: 100 samples (deque maxlen) OR last 30s (pruned).
+        """
+        throughput_window: deque = tracking["throughput_window"]
+        now = time.monotonic()
+        throughput_window.append((now, chunks_processed))
+        while throughput_window and (now - throughput_window[0][0]) > 30:
+            throughput_window.popleft()
 
-            # Refine chunks_total: rolling average from docs processed so far,
-            # extrapolated across the full corpus. First iteration uses the
-            # warm-start value computed before the loop.
-            if idx + 1 > 0 and chunks_processed > 0:
-                _running_avg = chunks_processed / (idx + 1)
-                chunks_total_estimate = max(
-                    chunks_processed,
-                    int(_running_avg * stats["total_files"]),
-                )
+        if len(throughput_window) < 2:
+            return 0.0
+        oldest_ts, oldest_cnt = throughput_window[0]
+        dt = now - oldest_ts
+        if dt <= 0:
+            return 0.0
+        return (chunks_processed - oldest_cnt) / dt
 
-            eta_seconds = 0
-            if throughput_cps > 0 and chunks_total_estimate > chunks_processed:
-                eta_seconds = int(
-                    (chunks_total_estimate - chunks_processed) / throughput_cps
-                )
+    @staticmethod
+    def _refine_chunks_total(
+        idx: int,
+        chunks_processed: int,
+        stats: Dict[str, Any],
+        tracking: Dict[str, Any],
+    ) -> int:
+        """Refine chunks_total_estimate from rolling per-doc average. Stores back into tracking."""
+        chunks_total_estimate = tracking["chunks_total_estimate"]
+        if idx + 1 > 0 and chunks_processed > 0:
+            running_avg = chunks_processed / (idx + 1)
+            chunks_total_estimate = max(
+                chunks_processed,
+                int(running_avg * stats["total_files"]),
+            )
+            tracking["chunks_total_estimate"] = chunks_total_estimate
+        return chunks_total_estimate
 
-            self._reindex_progress.update(
-                {
-                    "processed": idx + 1,
-                    "indexed": stats["indexed"],
-                    "skipped": stats["skipped"],
-                    "errors": stats["errors"],
-                    "chunks_processed": chunks_processed,
-                    "chunks_total": chunks_total_estimate,
-                    "throughput_cps": round(throughput_cps, 2),
-                    "eta_seconds": eta_seconds,
-                }
+    def _maybe_persist_checkpoint(
+        self, idx: int, tracking: Dict[str, Any]
+    ) -> None:
+        """Write checkpoint every 500 docs OR 30s, whichever comes first.
+
+        500 covers fast runs (small/cached docs), 30s covers slow runs (huge
+        PDFs, network drive). Metadata is flushed alongside so a future
+        resume=True sees the same doc_ids in both places — otherwise resume
+        would skip docs missing from _indexed_docs and the collection drifts.
+        """
+        if not tracking["checkpoint_enabled"]:
+            return
+        due_by_count = (idx + 1) % 500 == 0
+        due_by_time = (time.monotonic() - tracking["last_checkpoint_ts"]) >= 30
+        if not (due_by_count or due_by_time):
+            return
+        try:
+            self._save_metadata()
+            self._write_checkpoint(
+                operation=tracking["op_mode"],
+                indexed_doc_ids=list(self._indexed_docs.keys()),
+                chunks_processed=tracking["chunks_processed"],
+                started_at=self._reindex_progress.get("started_at"),
+            )
+            tracking["last_checkpoint_ts"] = time.monotonic()
+        except OSError as e:
+            # Non-fatal — a lost checkpoint just gives less to resume from.
+            print(f"[WARN] Checkpoint write failed (non-fatal): {e}")
+
+    def _maybe_print_progress(
+        self, idx: int, stats: Dict[str, Any], progress_interval: int
+    ) -> None:
+        """Emit periodic progress line for corpora larger than 100 docs."""
+        if stats["total_files"] > 100 and (idx + 1) % progress_interval == 0:
+            pct = int((idx + 1) / stats["total_files"] * 100)
+            print(
+                f"[INDEX] Progress: {idx + 1}/{stats['total_files']} ({pct}%) "
+                f"— {stats['indexed']} new, {stats['skipped']} skipped"
             )
 
-            # v4.8.0 Fase 4: persist checkpoint every 500 docs OR 30s.
-            # Whichever comes first — 500 gives coverage for fast runs
-            # (small docs, mostly-cached), 30s gives coverage for slow
-            # runs (huge PDFs, network drive). I/O is a couple ms per
-            # write; dominance is the ChromaDB add() call it follows.
-            #
-            # Metadata is flushed alongside the checkpoint so that a
-            # future reindex(resume=True) sees the same doc_ids in both
-            # places — otherwise resume would skip docs that no longer
-            # exist in _indexed_docs and the collection would drift.
-            if _checkpoint_enabled and (
-                (idx + 1) % 500 == 0
-                or (time.monotonic() - _last_checkpoint_ts) >= 30
-            ):
-                try:
-                    self._save_metadata()
-                    self._write_checkpoint(
-                        operation=_op_mode,
-                        indexed_doc_ids=list(self._indexed_docs.keys()),
-                        chunks_processed=chunks_processed,
-                        started_at=self._reindex_progress.get("started_at"),
-                    )
-                    _last_checkpoint_ts = time.monotonic()
-                except OSError as e:
-                    # Non-fatal — losing a checkpoint write means the user
-                    # will just have less to resume from. The reindex itself
-                    # continues.
-                    print(f"[WARN] Checkpoint write failed (non-fatal): {e}")
-
-            if stats["total_files"] > 100 and (idx + 1) % _progress_interval == 0:
-                pct = int((idx + 1) / stats["total_files"] * 100)
-                print(
-                    f"[INDEX] Progress: {idx + 1}/{stats['total_files']} ({pct}%) "
-                    f"— {stats['indexed']} new, {stats['skipped']} skipped"
-                )
-
+    def _finalize_reindex(
+        self, stats: Dict[str, Any], tracking: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Flush metadata, clear checkpoint (if applicable), invalidate query cache."""
         self._save_metadata()
 
-        # v4.8.0 Fase 4: checkpoint is no longer needed after a successful
-        # run — clear it so the next reindex(resume=True) does not resume
-        # into a stale state.
-        if _checkpoint_enabled:
+        # Checkpoint is no longer needed after a successful run — clear it so
+        # the next reindex(resume=True) does not resume into a stale state.
+        if tracking["checkpoint_enabled"]:
             self._clear_checkpoint()
 
         if stats["indexed"] > 0 or stats["updated"] > 0 or stats["deleted"] > 0:
