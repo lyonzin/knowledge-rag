@@ -441,6 +441,59 @@ _DEFAULT_QUERY_EXPANSION_GROUPS: List[List[str]] = []
 
 
 # ============================================================================
+# EMBEDDING PROFILES (v4.8.0)
+# ============================================================================
+# Named shortcuts for common embedding model + dimensions + prefix combinations.
+# Setting ``models.embedding.profile: "<name>"`` in config.yaml applies these
+# defaults automatically. Use ``profile: "custom"`` (default) to opt out and
+# respect whatever ``models.embedding.model`` / ``dimensions`` /
+# ``query_prefix`` / ``passage_prefix`` are declared in YAML.
+#
+# WARNING: Changing profile (or the underlying model / prefix) requires a full
+# reindex — existing chunks were embedded with the previous configuration and
+# similarity scoring will be degraded otherwise.
+
+_EMBEDDING_PROFILES: Dict[str, Dict[str, object]] = {
+    "compact": {
+        "model": "BAAI/bge-small-en-v1.5",
+        "dimensions": 384,
+        "query_prefix": "",
+        "passage_prefix": "",
+    },
+    "quality": {
+        "model": "BAAI/bge-large-en-v1.5",
+        "dimensions": 1024,
+        "query_prefix": "",
+        "passage_prefix": "",
+    },
+    "multilingual": {
+        "model": "intfloat/multilingual-e5-large",
+        "dimensions": 1024,
+        "query_prefix": "query: ",
+        "passage_prefix": "passage: ",
+    },
+    # "custom" is a sentinel — resolver leaves models.embedding.* untouched.
+    "custom": {},
+}
+
+
+def _yaml_embedding_has(key: str) -> bool:
+    """Return True when ``models.embedding.<key>`` was explicitly declared in YAML.
+
+    Used by the profile resolver to decide whether a user-provided override
+    should win over a profile default (query_prefix / passage_prefix) or emit
+    a ``[WARN] profile takes precedence`` message (embedding.model).
+    """
+    models = _yaml.get("models", {})
+    if not isinstance(models, dict):
+        return False
+    emb = models.get("embedding", {})
+    if not isinstance(emb, dict):
+        return False
+    return key in emb
+
+
+# ============================================================================
 # CONFIG DATACLASS
 # ============================================================================
 
@@ -511,6 +564,33 @@ class Config:
             _get("models", "embedding", {}).get("gpu", False)
             if isinstance(_get("models", "embedding", {}), dict)
             else False
+        )
+    )
+
+    # Embedding profile (v4.8.0) — named shortcut for model+dim+prefix.
+    # See _EMBEDDING_PROFILES above. "custom" (default) opts out.
+    embedding_profile: str = field(
+        default_factory=lambda: (
+            _get("models", "embedding", {}).get("profile", "custom")
+            if isinstance(_get("models", "embedding", {}), dict)
+            else "custom"
+        )
+    )
+    # Prefix prepended to text before embedding. Required by some model
+    # families (e.g. intfloat/e5) which were trained on "query: " / "passage: "
+    # scoped inputs. Leave empty for BGE / GTE / MxBai families.
+    query_prefix: str = field(
+        default_factory=lambda: (
+            _get("models", "embedding", {}).get("query_prefix", "")
+            if isinstance(_get("models", "embedding", {}), dict)
+            else ""
+        )
+    )
+    passage_prefix: str = field(
+        default_factory=lambda: (
+            _get("models", "embedding", {}).get("passage_prefix", "")
+            if isinstance(_get("models", "embedding", {}), dict)
+            else ""
         )
     )
 
@@ -656,6 +736,41 @@ class Config:
             self.default_results = 5
         if not isinstance(self.max_results, int) or self.max_results < 1:
             self.max_results = 20
+        # ---- Embedding profile resolution (v4.8.0) ----
+        # Runs BEFORE embedding_dim validation so a valid profile can set a
+        # non-384 dim without triggering the fallback below.
+        if not isinstance(self.embedding_profile, str):
+            print(f"[WARN] embedding_profile={self.embedding_profile!r} invalid, using 'custom'")
+            self.embedding_profile = "custom"
+
+        if self.embedding_profile != "custom":
+            profile = _EMBEDDING_PROFILES.get(self.embedding_profile)
+            if not profile:
+                print(f"[WARN] Invalid embedding profile '{self.embedding_profile}'; falling back to 'custom'")
+                self.embedding_profile = "custom"
+            else:
+                if _yaml_embedding_has("model"):
+                    print(
+                        f"[WARN] Both models.embedding.model and profile="
+                        f"'{self.embedding_profile}' set; profile takes precedence"
+                    )
+                self.embedding_model = profile["model"]
+                self.embedding_dim = profile["dimensions"]
+                # Prefixes: profile fills only if user did NOT declare them
+                # explicitly (empty string "" IS a valid explicit override).
+                if not _yaml_embedding_has("query_prefix"):
+                    self.query_prefix = profile["query_prefix"]
+                if not _yaml_embedding_has("passage_prefix"):
+                    self.passage_prefix = profile["passage_prefix"]
+
+        # Prefix type validation (must run AFTER profile resolution)
+        if not isinstance(self.query_prefix, str):
+            print(f"[WARN] query_prefix={self.query_prefix!r} invalid, using ''")
+            self.query_prefix = ""
+        if not isinstance(self.passage_prefix, str):
+            print(f"[WARN] passage_prefix={self.passage_prefix!r} invalid, using ''")
+            self.passage_prefix = ""
+
         if not isinstance(self.embedding_dim, int) or self.embedding_dim < 1:
             self.embedding_dim = 384
         if not isinstance(self.reranker_enabled, bool):
