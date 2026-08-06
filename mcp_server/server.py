@@ -516,25 +516,35 @@ class FastEmbedEmbeddings:
         """Route model load per gpu_mode. Called under _load_lock by _load_model."""
         mode = self._gpu_mode
         if mode == "false":
-            self._load_with_providers(["CPUExecutionProvider"], label="CPU")
-            self._print_gpu_banner(status=None, mode="forced-cpu")
-            return
-        if mode == "auto":
-            self._setup_cuda_dll_paths()
-            gpu_status = self.verify_gpu_readiness()
-            if gpu_status.available:
-                try:
-                    self._load_with_providers(
-                        ["CUDAExecutionProvider", "CPUExecutionProvider"], label="GPU auto"
-                    )
-                    self._print_gpu_banner(status=gpu_status, mode="auto-cuda")
-                    return
-                except (ValueError, RuntimeError) as e:
-                    print(f"[WARN] GPU probe passed but load failed ({e}); loading on CPU...")
-            self._load_with_providers(["CPUExecutionProvider"], label="CPU fallback")
-            self._print_gpu_banner(status=gpu_status, mode="auto-cpu-fallback")
-            return
-        # mode == "true" — force CUDA
+            self._load_forced_cpu()
+        elif mode == "auto":
+            self._load_auto()
+        else:
+            self._load_forced_cuda()
+
+    def _load_forced_cpu(self) -> None:
+        """gpu_mode='false' path — CPU only, no CUDA probing."""
+        self._load_with_providers(["CPUExecutionProvider"], label="CPU")
+        self._print_gpu_banner(status=None, mode="forced-cpu")
+
+    def _load_auto(self) -> None:
+        """gpu_mode='auto' path — probe GPU, use it if ready else CPU fallback."""
+        self._setup_cuda_dll_paths()
+        gpu_status = self.verify_gpu_readiness()
+        if gpu_status.available:
+            try:
+                self._load_with_providers(
+                    ["CUDAExecutionProvider", "CPUExecutionProvider"], label="GPU auto"
+                )
+                self._print_gpu_banner(status=gpu_status, mode="auto-cuda")
+                return
+            except (ValueError, RuntimeError) as e:
+                print(f"[WARN] GPU probe passed but load failed ({e}); loading on CPU...")
+        self._load_with_providers(["CPUExecutionProvider"], label="CPU fallback")
+        self._print_gpu_banner(status=gpu_status, mode="auto-cpu-fallback")
+
+    def _load_forced_cuda(self) -> None:
+        """gpu_mode='true' path — require CUDA, CPU only as last-resort fallback."""
         self._setup_cuda_dll_paths()
         gpu_status = self.verify_gpu_readiness()
         if gpu_status.available:
