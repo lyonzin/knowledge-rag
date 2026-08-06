@@ -420,49 +420,61 @@ class FastEmbedEmbeddings:
     def _print_gpu_banner(status: Optional[GPUStatus], mode: str) -> None:
         """Print a concise GPU diagnostic banner at startup.
 
-        Called on EVERY startup path (v4.8.0+), including CPU-only and fallback,
-        so operators always see which mode ran and why.
+        Called on EVERY startup path (v4.8.0+), including CPU-only and
+        fallback, so operators always see which mode ran and why. Prints
+        to stderr (print() is redirected there during init).
 
-        Args:
-            status: probe result. None when gpu_mode="false" (no probe performed).
-            mode: one of "forced-cpu" | "forced-cuda" | "forced-cuda-fallback"
-                  | "auto-cuda" | "auto-cpu-fallback".
-
-        Prints to stderr (print() is redirected there during init).
+        ``status`` is None when gpu_mode="false" (no probe performed).
+        ``mode`` is one of forced-cpu | forced-cuda | forced-cuda-fallback
+        | auto-cuda | auto-cpu-fallback.
         """
         active = status is not None and status.available and mode in ("auto-cuda", "forced-cuda")
         print("")
         print("=" * 60)
         if active:
-            print("  GPU STATUS: ACTIVE")
-            print(f"  Provider:   {status.provider}")
-            if status.device_name:
-                print(f"  Device:     {status.device_name}")
-            if status.vram_mb > 0:
-                vram_display = f"{status.vram_mb / 1024:.1f} GB" if status.vram_mb >= 1024 else f"{status.vram_mb} MB"
-                print(f"  VRAM:       {vram_display}")
-            print(f"  Mode:       {mode}")
+            FastEmbedEmbeddings._print_gpu_active(status, mode)
         else:
-            print("  GPU STATUS: UNAVAILABLE — running on CPU")
-            if status is not None and status.fallback_reason:
-                print(f"  Reason:     {status.fallback_reason}")
-            if status is not None and status.missing_deps:
-                print("  Missing:")
-                for dep in status.missing_deps:
-                    print(f"    - {dep}")
-            print(f"  Mode:       {mode}")
-            if mode != "forced-cpu":
-                print("  Hint:       pip install onnxruntime-gpu --extra-index-url \\")
-                print(
-                    "              https://aiinfra.pkgs.visualstudio.com/PublicPackages"
-                    "/_packaging/onnxruntime-cuda-12/pypi/simple/"
-                )
-                print(
-                    "              plus nvidia-cudnn-cu12, nvidia-cublas-cu12, "
-                    "nvidia-cuda-runtime-cu12"
-                )
+            FastEmbedEmbeddings._print_gpu_unavailable(status, mode)
         print("=" * 60)
         print("")
+
+    @staticmethod
+    def _print_gpu_active(status: GPUStatus, mode: str) -> None:
+        """Emit the ACTIVE branch of the GPU banner (probe passed + provider used)."""
+        print("  GPU STATUS: ACTIVE")
+        print(f"  Provider:   {status.provider}")
+        if status.device_name:
+            print(f"  Device:     {status.device_name}")
+        if status.vram_mb > 0:
+            vram_display = (
+                f"{status.vram_mb / 1024:.1f} GB"
+                if status.vram_mb >= 1024
+                else f"{status.vram_mb} MB"
+            )
+            print(f"  VRAM:       {vram_display}")
+        print(f"  Mode:       {mode}")
+
+    @staticmethod
+    def _print_gpu_unavailable(status: Optional[GPUStatus], mode: str) -> None:
+        """Emit the UNAVAILABLE branch (forced CPU, probe failed, or load fallback)."""
+        print("  GPU STATUS: UNAVAILABLE — running on CPU")
+        if status is not None and status.fallback_reason:
+            print(f"  Reason:     {status.fallback_reason}")
+        if status is not None and status.missing_deps:
+            print("  Missing:")
+            for dep in status.missing_deps:
+                print(f"    - {dep}")
+        print(f"  Mode:       {mode}")
+        if mode != "forced-cpu":
+            print("  Hint:       pip install onnxruntime-gpu --extra-index-url \\")
+            print(
+                "              https://aiinfra.pkgs.visualstudio.com/PublicPackages"
+                "/_packaging/onnxruntime-cuda-12/pypi/simple/"
+            )
+            print(
+                "              plus nvidia-cudnn-cu12, nvidia-cublas-cu12, "
+                "nvidia-cuda-runtime-cu12"
+            )
 
     def __init__(self, model: str = None):
         self.model_name = model or config.embedding_model
