@@ -407,10 +407,6 @@ class TestStatusReporting:
         assert prog["chunks_processed"] == 777
         assert prog["resumed"] is True
 
-    @pytest.mark.xfail(
-        reason="Step 8 wires the new fields into get_reindex_status return dict.",
-        strict=True,
-    )
     def test_get_reindex_status_returns_new_fields_via_progress(self, tmp_path):
         """After a run populated the progress dict, poll returns full snapshot."""
         orch = _fresh_orchestrator(tmp_path)

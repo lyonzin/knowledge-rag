@@ -2595,7 +2595,26 @@ class KnowledgeOrchestrator:
         return stats
 
     def get_reindex_status(self) -> Dict[str, Any]:
-        """Get background reindex progress without computing full index stats."""
+        """Get background reindex progress without computing full index stats.
+
+        Returns a dict describing the current or last reindex operation.
+
+        When a reindex is in flight (``active=True``), the payload includes:
+
+        - ``operation``: one of ``incremental`` | ``smart_reindex`` | ``nuclear_rebuild``
+        - ``progress`` / ``percent``: doc-level completion
+        - ``indexed`` / ``skipped`` / ``errors``: doc-level counters
+        - ``started_at``: ISO timestamp when the background thread began
+        - **v4.8.0 Fase 4** — ``chunks_processed`` (chunks committed to
+          ChromaDB), ``chunks_total`` (rolling estimate, 0 during warmup),
+          ``throughput_cps`` (chunks/sec, sliding window of last 30s or
+          100 samples), ``eta_seconds`` (estimated seconds to completion),
+          ``checkpoint_saved_at`` (ISO timestamp of last checkpoint write),
+          ``resumed`` (bool — True when this run recovered from a checkpoint)
+
+        When idle (``active=False``) the payload includes ``last_result``
+        or ``last_error`` from the most recent completed run.
+        """
         progress = self._reindex_progress
         if progress.get("active"):
             total = max(1, progress.get("total_files", 1))
@@ -2609,6 +2628,13 @@ class KnowledgeOrchestrator:
                 "skipped": progress.get("skipped", 0),
                 "errors": progress.get("errors", 0),
                 "started_at": progress.get("started_at"),
+                # v4.8.0 Fase 4: granular progress + resume checkpoint fields
+                "chunks_processed": progress.get("chunks_processed", 0),
+                "chunks_total": progress.get("chunks_total", 0),
+                "throughput_cps": progress.get("throughput_cps", 0.0),
+                "eta_seconds": progress.get("eta_seconds", 0),
+                "checkpoint_saved_at": progress.get("checkpoint_saved_at"),
+                "resumed": progress.get("resumed", False),
             }
 
         result: Dict[str, Any] = {"active": False}
