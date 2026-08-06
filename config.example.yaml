@@ -165,10 +165,32 @@ models:
     query_prefix: ""
     passage_prefix: ""
 
-    # GPU acceleration for ONNX embeddings (5-10x faster indexing).
-    # Requires: pip install knowledge-rag[gpu]  (installs onnxruntime-gpu)
-    # Falls back to CPU automatically if CUDA is unavailable.
-    gpu: false
+    # GPU acceleration mode (v4.8.0+):
+    #   "auto"  → probe CUDA at startup; use if ready, fall back to CPU (default)
+    #   "true"  → force CUDA; if not ready, log WARN and fall back to CPU
+    #   "false" → never probe; runs on CPU with zero startup overhead
+    #
+    # Legacy bool `gpu: true/false` continues to work — it is normalized to the
+    # string form internally, so old configs keep behaving exactly the same.
+    #
+    # GPU dependency chain (all installed via pip in the same venv):
+    #   1. onnxruntime-gpu, CUDA 12 variant (CUDA 13 is NOT supported by FastEmbed):
+    #        pip install onnxruntime-gpu \
+    #          --extra-index-url \
+    #          https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/
+    #   2. NVIDIA runtime libs (pulled by pip, no system driver rewrite):
+    #        pip install nvidia-cudnn-cu12 nvidia-cublas-cu12 nvidia-cuda-runtime-cu12 \
+    #          nvidia-cufft-cu12 nvidia-curand-cu12 nvidia-cusolver-cu12 \
+    #          nvidia-cusparse-cu12 nvidia-nvjitlink-cu12 nvidia-cuda-nvrtc-cu12
+    #   3. Host: NVIDIA driver >= 525 (for CUDA 12). cuDNN 9 comes with nvidia-cudnn-cu12.
+    #
+    # Verify readiness manually without loading the embedding model:
+    #   python -c "from mcp_server.server import FastEmbedEmbeddings; \
+    #     import json; print(json.dumps(FastEmbedEmbeddings.verify_gpu_readiness().__dict__, \
+    #     default=str, indent=2))"
+    #
+    # Full setup guide + troubleshooting: docs/gpu-setup.md
+    gpu: "auto"
 
   # Reranker — re-scores search results for better accuracy.
   # Adds ~50-100ms per query but significantly improves result quality.
