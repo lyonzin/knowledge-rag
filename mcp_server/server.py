@@ -1706,26 +1706,26 @@ class KnowledgeOrchestrator:
     def _index_document(self, doc: Document) -> Tuple[int, int]:
         """Index a single document's chunks into ChromaDB and BM25 with dedup.
 
-        Large documents are split into batches of ``config.batch_size``
-        (default 500, YAML: ``documents.batch_size``, range [1, 5000]) to
-        prevent memory spikes when embedding thousands of chunks at once.
-        Falls back to the module constant ``_CHROMA_BATCH_SIZE`` when
-        ``config`` does not expose ``batch_size`` (test isolation).
-
-        When ``config.parallel_workers > 1`` (YAML:
-        ``documents.parallel_workers``, default 1), the per-batch
-        ``self.collection.add(...)`` calls run inside a
-        ``ThreadPoolExecutor``. The ONNX embedding session itself is
-        single-threaded (internal lock), so the win comes from SQLite
-        writes overlapping with the NEXT batch's inference — NOT from
-        parallel inference. Windows users should monitor stability at
-        ``workers > 4`` (see config.example.yaml note). Default 1
-        preserves current single-threaded behavior byte-for-byte on all
-        platforms.
+        Batching is controlled by ``config.batch_size`` (see
+        ``_add_chunks_batched``). When ``config.parallel_workers > 1``
+        the SQLite writes overlap with the NEXT batch's ONNX inference —
+        NOT parallel inference (embedding kernel is serial). Default 1
+        preserves single-threaded behavior byte-for-byte.
         """
         if not doc.chunks:
             return 0, 0
 
+        unique_ids, unique_docs, unique_metas, dedup_skipped = self._dedup_chunks(doc)
+
+        if unique_ids:
+            self._add_chunks_batched(unique_ids, unique_docs, unique_metas)
+            self.bm25_index.add_documents(unique_ids, unique_docs)
+
+        return len(unique_ids), dedup_skipped
+
+    @staticmethod
+    def _dedup_chunks(doc: Document):
+        """Deduplicate chunks by content SHA256 prefix; build parallel id/doc/meta lists."""
         unique_ids = []
         unique_docs = []
         unique_metas = []
@@ -1734,14 +1734,11 @@ class KnowledgeOrchestrator:
 
         for chunk in doc.chunks:
             content_hash = hashlib.sha256(chunk.content.encode("utf-8")).hexdigest()[:20]
-            chunk_id = f"{doc.id}_{chunk.index}"
-
             if content_hash in seen_hashes:
                 dedup_skipped += 1
                 continue
-
             seen_hashes.add(content_hash)
-            unique_ids.append(chunk_id)
+            unique_ids.append(f"{doc.id}_{chunk.index}")
             unique_docs.append(chunk.content)
             unique_metas.append(
                 {
@@ -1756,44 +1753,45 @@ class KnowledgeOrchestrator:
                     **chunk.metadata,
                 }
             )
+        return unique_ids, unique_docs, unique_metas, dedup_skipped
 
-        if unique_ids:
-            bs = getattr(config, "batch_size", self._CHROMA_BATCH_SIZE)
-            workers = getattr(config, "parallel_workers", 1)
+    def _add_chunks_batched(self, ids, docs, metas) -> None:
+        """Dispatch ChromaDB.add across batches (parallel path when workers > 1)."""
+        bs = getattr(config, "batch_size", self._CHROMA_BATCH_SIZE)
+        workers = getattr(config, "parallel_workers", 1)
 
-            if workers > 1 and len(unique_ids) > bs:
-                # Parallel path: ChromaDB SQLite writes overlap with the
-                # NEXT batch's ONNX inference (embedding kernel is serial
-                # inside ONNX). Only engage when we have >1 batch to run;
-                # a single-batch document has no parallelism to exploit.
-                from concurrent.futures import ThreadPoolExecutor
+        if workers > 1 and len(ids) > bs:
+            self._add_chunks_parallel(ids, docs, metas, bs, workers)
+        else:
+            # Single-threaded path (default) — byte-identical to prior behavior.
+            for i in range(0, len(ids), bs):
+                self.collection.add(
+                    ids=ids[i : i + bs],
+                    documents=docs[i : i + bs],
+                    metadatas=metas[i : i + bs],
+                )
 
-                with ThreadPoolExecutor(max_workers=workers) as pool:
-                    futures = [
-                        pool.submit(
-                            self.collection.add,
-                            ids=unique_ids[i : i + bs],
-                            documents=unique_docs[i : i + bs],
-                            metadatas=unique_metas[i : i + bs],
-                        )
-                        for i in range(0, len(unique_ids), bs)
-                    ]
-                    # .result() propagates the first exception; caller sees
-                    # it as an indexing failure (same shape as sequential).
-                    for f in futures:
-                        f.result()
-            else:
-                # Single-threaded path (default) — byte-identical to prior behavior.
-                for i in range(0, len(unique_ids), bs):
-                    self.collection.add(
-                        ids=unique_ids[i : i + bs],
-                        documents=unique_docs[i : i + bs],
-                        metadatas=unique_metas[i : i + bs],
-                    )
+    def _add_chunks_parallel(self, ids, docs, metas, bs: int, workers: int) -> None:
+        """Parallel batch add — SQLite writes overlap with NEXT batch's inference.
 
-            self.bm25_index.add_documents(unique_ids, unique_docs)
+        ONNX inference itself is serial inside the embedding kernel; the win
+        is I/O overlap. First exception from .result() surfaces to the caller
+        as an indexing failure (same shape as the sequential path).
+        """
+        from concurrent.futures import ThreadPoolExecutor
 
-        return len(unique_ids), dedup_skipped
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [
+                pool.submit(
+                    self.collection.add,
+                    ids=ids[i : i + bs],
+                    documents=docs[i : i + bs],
+                    metadatas=metas[i : i + bs],
+                )
+                for i in range(0, len(ids), bs)
+            ]
+            for f in futures:
+                f.result()
 
     def _remove_document_chunks(self, doc_id: str) -> int:
         """Remove all chunks belonging to a document from ChromaDB and BM25."""
