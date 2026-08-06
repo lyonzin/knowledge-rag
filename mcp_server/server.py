@@ -417,15 +417,23 @@ class FastEmbedEmbeddings:
         return status
 
     @staticmethod
-    def _print_gpu_banner(status: GPUStatus) -> None:
+    def _print_gpu_banner(status: Optional[GPUStatus], mode: str) -> None:
         """Print a concise GPU diagnostic banner at startup.
 
-        Only called when gpu_acceleration is enabled in config.
+        Called on EVERY startup path (v4.8.0+), including CPU-only and fallback,
+        so operators always see which mode ran and why.
+
+        Args:
+            status: probe result. None when gpu_mode="false" (no probe performed).
+            mode: one of "forced-cpu" | "forced-cuda" | "forced-cuda-fallback"
+                  | "auto-cuda" | "auto-cpu-fallback".
+
         Prints to stderr (print() is redirected there during init).
         """
+        active = status is not None and status.available and mode in ("auto-cuda", "forced-cuda")
         print("")
         print("=" * 60)
-        if status.available:
+        if active:
             print("  GPU STATUS: ACTIVE")
             print(f"  Provider:   {status.provider}")
             if status.device_name:
@@ -433,16 +441,26 @@ class FastEmbedEmbeddings:
             if status.vram_mb > 0:
                 vram_display = f"{status.vram_mb / 1024:.1f} GB" if status.vram_mb >= 1024 else f"{status.vram_mb} MB"
                 print(f"  VRAM:       {vram_display}")
+            print(f"  Mode:       {mode}")
         else:
-            print("  GPU STATUS: UNAVAILABLE — falling back to CPU")
-            if status.fallback_reason:
-                # Wrap long reason lines for readability
-                reason = status.fallback_reason
-                print(f"  Reason:     {reason}")
-            if status.missing_deps:
+            print("  GPU STATUS: UNAVAILABLE — running on CPU")
+            if status is not None and status.fallback_reason:
+                print(f"  Reason:     {status.fallback_reason}")
+            if status is not None and status.missing_deps:
                 print("  Missing:")
                 for dep in status.missing_deps:
                     print(f"    - {dep}")
+            print(f"  Mode:       {mode}")
+            if mode != "forced-cpu":
+                print("  Hint:       pip install onnxruntime-gpu --extra-index-url \\")
+                print(
+                    "              https://aiinfra.pkgs.visualstudio.com/PublicPackages"
+                    "/_packaging/onnxruntime-cuda-12/pypi/simple/"
+                )
+                print(
+                    "              plus nvidia-cudnn-cu12, nvidia-cublas-cu12, "
+                    "nvidia-cuda-runtime-cu12"
+                )
         print("=" * 60)
         print("")
 
@@ -451,6 +469,8 @@ class FastEmbedEmbeddings:
         self._dim = config.embedding_dim
         # Build kwargs once; defer the heavy TextEmbedding(**kwargs) call to first use.
         self._init_kwargs = {"model_name": self.model_name, "cache_dir": str(config.models_cache_dir)}
+        # v4.8.0+: tri-state mode drives the load routing. Legacy bool alias kept for BC.
+        self._gpu_mode = getattr(config, "gpu_mode", "auto")
         self._gpu = bool(config.gpu_acceleration)
         self._model: Optional[TextEmbedding] = None
         self._load_lock = threading.Lock()
@@ -461,15 +481,14 @@ class FastEmbedEmbeddings:
     def _load_model(self) -> None:
         """Load the ONNX model on demand. Idempotent and thread-safe.
 
-        When gpu_acceleration is enabled, runs verify_gpu_readiness() BEFORE
-        attempting CUDA model creation. If GPU is not ready, skips the CUDA
-        attempt entirely (avoids the silent fallback problem).
+        Routes via config.gpu_mode (v4.8.0+):
+          "false" — CPU-only, no probe (zero startup overhead).
+          "auto"  — probe verify_gpu_readiness(); CUDA if ready, CPU otherwise.
+          "true"  — force CUDA; fall back to CPU only if actual load fails.
 
         Raises:
-            EmbeddingModelLoadError: when the underlying ONNX runtime cannot
-                instantiate the model (missing files, hash mismatch, etc.). The
-                exception is sticky — subsequent calls raise the same error
-                without retrying so callers do not loop through HF downloads.
+            EmbeddingModelLoadError: sticky failure — subsequent calls re-raise
+                without retrying so callers don't loop through HF downloads.
         """
         if self._model is not None:
             return
@@ -484,43 +503,64 @@ class FastEmbedEmbeddings:
                 raise EmbeddingModelLoadError(
                     f"Embedding model previously failed to load: {self._load_failed}"
                 ) from self._load_failed
-            kwargs = dict(self._init_kwargs)
             try:
-                if self._gpu:
-                    # GPU readiness gate — verify BEFORE touching CUDA
-                    self._setup_cuda_dll_paths()
-                    gpu_status = self.verify_gpu_readiness()
-                    self._print_gpu_banner(gpu_status)
-
-                    if gpu_status.available:
-                        kwargs["providers"] = ["CUDAExecutionProvider", "CPUExecutionProvider"]
-                        print(f"[INFO] Loading embedding model: {self.model_name} ({self._dim}D) [GPU accelerated]...")
-                        try:
-                            self._model = TextEmbedding(**kwargs)
-                            print("[INFO] Embedding model loaded successfully [GPU]")
-                        except (ValueError, RuntimeError) as e:
-                            print(f"[WARN] GPU init failed ({e}), falling back to CPU...")
-                            kwargs["providers"] = ["CPUExecutionProvider"]
-                            self._model = TextEmbedding(**kwargs)
-                            print("[INFO] Embedding model loaded successfully [CPU fallback]")
-                    else:
-                        # GPU configured but not ready — go straight to CPU
-                        print("[WARN] gpu: true in config but GPU is not available. Loading on CPU.")
-                        kwargs["providers"] = ["CPUExecutionProvider"]
-                        print(f"[INFO] Loading embedding model: {self.model_name} ({self._dim}D) [CPU]...")
-                        self._model = TextEmbedding(**kwargs)
-                        print("[INFO] Embedding model loaded successfully [CPU]")
-                else:
-                    kwargs["providers"] = ["CPUExecutionProvider"]
-                    print(f"[INFO] Loading embedding model: {self.model_name} ({self._dim}D)...")
-                    self._model = TextEmbedding(**kwargs)
-                    print("[INFO] Embedding model loaded successfully")
+                self._route_load()
             except Exception as exc:
                 # ONNXRuntimeError, FileNotFoundError, etc. — record and re-raise loud
                 self._load_failed = exc
                 self._model = None
                 print(f"[ERROR] Embedding model load FAILED: {exc}", file=sys.stderr)
                 raise EmbeddingModelLoadError(f"Failed to load embedding model: {exc}") from exc
+
+    def _route_load(self) -> None:
+        """Route model load per gpu_mode. Called under _load_lock by _load_model."""
+        mode = self._gpu_mode
+        if mode == "false":
+            self._load_with_providers(["CPUExecutionProvider"], label="CPU")
+            self._print_gpu_banner(status=None, mode="forced-cpu")
+            return
+        if mode == "auto":
+            self._setup_cuda_dll_paths()
+            gpu_status = self.verify_gpu_readiness()
+            if gpu_status.available:
+                try:
+                    self._load_with_providers(
+                        ["CUDAExecutionProvider", "CPUExecutionProvider"], label="GPU auto"
+                    )
+                    self._print_gpu_banner(status=gpu_status, mode="auto-cuda")
+                    return
+                except (ValueError, RuntimeError) as e:
+                    print(f"[WARN] GPU probe passed but load failed ({e}); loading on CPU...")
+            self._load_with_providers(["CPUExecutionProvider"], label="CPU fallback")
+            self._print_gpu_banner(status=gpu_status, mode="auto-cpu-fallback")
+            return
+        # mode == "true" — force CUDA
+        self._setup_cuda_dll_paths()
+        gpu_status = self.verify_gpu_readiness()
+        if gpu_status.available:
+            try:
+                self._load_with_providers(
+                    ["CUDAExecutionProvider", "CPUExecutionProvider"], label="GPU forced"
+                )
+                self._print_gpu_banner(status=gpu_status, mode="forced-cuda")
+                return
+            except (ValueError, RuntimeError) as e:
+                print(f"[WARN] gpu: true but CUDA load failed ({e}); loading on CPU...")
+        else:
+            print(
+                f"[WARN] gpu: true but GPU not ready ({gpu_status.fallback_reason}); "
+                "loading on CPU"
+            )
+        self._load_with_providers(["CPUExecutionProvider"], label="CPU fallback")
+        self._print_gpu_banner(status=gpu_status, mode="forced-cuda-fallback")
+
+    def _load_with_providers(self, providers: List[str], label: str) -> None:
+        """Instantiate TextEmbedding with the given ONNX providers list."""
+        kwargs = dict(self._init_kwargs)
+        kwargs["providers"] = providers
+        print(f"[INFO] Loading embedding model: {self.model_name} ({self._dim}D) [{label}]...")
+        self._model = TextEmbedding(**kwargs)
+        print(f"[INFO] Embedding model loaded successfully [{label}]")
 
     @staticmethod
     def _apply_prefix(texts: List[str], prefix: str) -> List[str]:
