@@ -682,7 +682,24 @@ class Config:
 
     # Search settings
     default_results: int = field(default_factory=lambda: _get("search", "default_results", 5))
-    max_results: int = field(default_factory=lambda: _get("search", "max_results", 20))
+    # v4.8.0 Fase 3: default raised 20 → 100 to eliminate asymmetric candidate
+    # pool in hybrid retrieval. Previously `_do_semantic()` clamped candidates
+    # to `min(max_results * 3, 20) = 20` while BM25 pulled up to
+    # `max_results * 20 = 400` — semantic silently starved on hybrid mode.
+    # Callers passing `max_results` explicitly are unaffected.
+    max_results: int = field(default_factory=lambda: _get("search", "max_results", 100))
+
+    # Indexing (v4.8.0 Fase 3)
+    # `batch_size` controls how many chunks are added per ChromaDB batch call
+    # in `_index_document`. Higher = fewer SQLite round-trips = faster indexing
+    # at the cost of RAM (batch_size * embedding_dim * 4 bytes for float32).
+    # Default 500 preserves prior hardcoded behavior byte-for-byte.
+    batch_size: int = field(default_factory=lambda: _get("documents", "batch_size", 500))
+    # `parallel_workers` opts into a ThreadPoolExecutor around ChromaDB batch
+    # adds. Gain comes from SQLite writes overlapping with the NEXT batch's
+    # ONNX inference (embedding itself is serialized by ONNX session lock).
+    # Default 1 = single-threaded = safe on all platforms.
+    parallel_workers: int = field(default_factory=lambda: _get("documents", "parallel_workers", 1))
 
     # Server (new in v4.0.0)
     transport: str = field(default_factory=lambda: _get("server", "transport", "stdio"))
@@ -744,7 +761,32 @@ class Config:
         if not isinstance(self.default_results, int) or self.default_results < 1:
             self.default_results = 5
         if not isinstance(self.max_results, int) or self.max_results < 1:
-            self.max_results = 20
+            self.max_results = 100
+
+        # ---- Indexing config (v4.8.0 Fase 3) ----
+        # batch_size: chunks per ChromaDB batch add. Range [1, 5000].
+        if not isinstance(self.batch_size, int) or self.batch_size < 1:
+            print(f"[WARN] batch_size={self.batch_size!r} invalid, clamping to 1")
+            self.batch_size = 1
+        elif self.batch_size > 5000:
+            print(f"[WARN] batch_size={self.batch_size} exceeds 5000, clamping to 5000")
+            self.batch_size = 5000
+
+        # parallel_workers: opt-in threading around ChromaDB batch adds. Range [1, 16].
+        if not isinstance(self.parallel_workers, int) or self.parallel_workers < 1:
+            print(f"[WARN] parallel_workers={self.parallel_workers!r} invalid, clamping to 1")
+            self.parallel_workers = 1
+        elif self.parallel_workers > 16:
+            print(f"[WARN] parallel_workers={self.parallel_workers} exceeds 16, clamping to 16")
+            self.parallel_workers = 16
+        elif self.parallel_workers > 4:
+            import platform
+
+            if platform.system() == "Windows":
+                print(
+                    f"[WARN] parallel_workers={self.parallel_workers} on Windows may hit "
+                    f"ONNX threading issues or SQLite lock contention; monitor stability"
+                )
         # ---- Embedding profile resolution (v4.8.0) ----
         # Runs BEFORE embedding_dim validation so a valid profile can set a
         # non-384 dim without triggering the fallback below.
