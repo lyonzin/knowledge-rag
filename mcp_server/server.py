@@ -1261,7 +1261,11 @@ class KnowledgeOrchestrator:
 
     _index_lock = threading.Lock()
 
-    def index_all(self, force: bool = False) -> Dict[str, Any]:
+    def index_all(
+        self,
+        force: bool = False,
+        resume_state: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """
         Index documents with incremental change detection.
 
@@ -1269,6 +1273,12 @@ class KnowledgeOrchestrator:
         Only re-indexes files that are new or modified.  Serialized via
         _index_lock so concurrent calls (watcher + MCP tool) don't corrupt
         ChromaDB's SQLite database.
+
+        When ``resume_state`` is provided (v4.8.0 Fase 4), docs whose id
+        is in ``resume_state['doc_ids']`` are skipped and the chunk
+        counter starts at ``resume_state['chunks_processed']`` — used by
+        reindex_documents(resume=True) to pick up where the previous
+        interrupted run left off.
         """
         if not self._index_lock.acquire(blocking=False):
             return {
@@ -1285,11 +1295,15 @@ class KnowledgeOrchestrator:
                 "skipped_reason": "reindex_already_running",
             }
         try:
-            return self._index_all_impl(force)
+            return self._index_all_impl(force, resume_state=resume_state)
         finally:
             self._index_lock.release()
 
-    def _index_all_impl(self, force: bool = False) -> Dict[str, Any]:
+    def _index_all_impl(
+        self,
+        force: bool = False,
+        resume_state: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """Inner implementation of index_all (caller holds _index_lock)."""
         stats = {
             "total_files": 0,
@@ -1343,7 +1357,14 @@ class KnowledgeOrchestrator:
 
         # v4.8.0 Fase 4: chunk-level progress + throughput sliding window
         # (deque bounded to 100 samples; older-than-30s pruned each iteration).
-        chunks_processed = 0
+        # When resuming, chunks_processed inherits from the checkpoint so the
+        # status counter continues instead of restarting from zero.
+        _resume_doc_ids: set = (
+            set(resume_state.get("doc_ids", [])) if resume_state else set()
+        )
+        chunks_processed = (
+            int(resume_state.get("chunks_processed", 0)) if resume_state else 0
+        )
         _throughput_window: deque = deque(maxlen=100)
         # Warm-start chunks_total estimate from previously indexed docs so the
         # first status poll has a meaningful number instead of 0 forever.
@@ -1359,6 +1380,12 @@ class KnowledgeOrchestrator:
 
         for idx, doc in enumerate(documents):
             try:
+                # v4.8.0 Fase 4: resume skip — doc was already committed
+                # in the previous interrupted run.
+                if _resume_doc_ids and doc.id in _resume_doc_ids:
+                    stats["skipped"] += 1
+                    continue
+
                 source_str = str(doc.source)
                 existing_doc_id = path_to_docid.get(source_str)
 
@@ -1475,11 +1502,17 @@ class KnowledgeOrchestrator:
             # (small docs, mostly-cached), 30s gives coverage for slow
             # runs (huge PDFs, network drive). I/O is a couple ms per
             # write; dominance is the ChromaDB add() call it follows.
+            #
+            # Metadata is flushed alongside the checkpoint so that a
+            # future reindex(resume=True) sees the same doc_ids in both
+            # places — otherwise resume would skip docs that no longer
+            # exist in _indexed_docs and the collection would drift.
             if _checkpoint_enabled and (
                 (idx + 1) % 500 == 0
                 or (time.monotonic() - _last_checkpoint_ts) >= 30
             ):
                 try:
+                    self._save_metadata()
                     self._write_checkpoint(
                         operation=_op_mode,
                         indexed_doc_ids=list(self._indexed_docs.keys()),
@@ -1624,8 +1657,18 @@ class KnowledgeOrchestrator:
 
         return 0
 
-    def start_reindex_background(self, mode: str) -> Dict[str, Any]:
-        """Start reindex in a background thread. Returns immediately."""
+    def start_reindex_background(
+        self,
+        mode: str,
+        resume_state: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Start reindex in a background thread. Returns immediately.
+
+        When ``resume_state`` is provided (v4.8.0 Fase 4), it is forwarded
+        to smart_reindex — the background thread skips the doc_ids from
+        the previous run's checkpoint and continues chunk counting from
+        where it stopped.
+        """
         if self._reindex_progress.get("active"):
             return {"status": "already_running", "progress": dict(self._reindex_progress)}
 
@@ -1639,16 +1682,21 @@ class KnowledgeOrchestrator:
             "errors": 0,
             "started_at": datetime.now().isoformat(),
             # v4.8.0 Fase 4: granular progress + resume checkpoint
-            "chunks_processed": 0,
+            "chunks_processed": (
+                int(resume_state.get("chunks_processed", 0))
+                if resume_state
+                else 0
+            ),
             "chunks_total": 0,
             "throughput_cps": 0.0,
             "eta_seconds": 0,
             "checkpoint_saved_at": None,
+            "resumed": bool(resume_state),
         }
 
         target = {
             "incremental": lambda: self.index_all(force=False),
-            "smart_reindex": self.reindex_all,
+            "smart_reindex": lambda: self.reindex_all(resume_state=resume_state),
             "nuclear_rebuild": self.nuclear_rebuild,
         }[mode]
 
@@ -1667,14 +1715,29 @@ class KnowledgeOrchestrator:
         finally:
             self._reindex_progress["active"] = False
 
-    def reindex_all(self) -> Dict[str, Any]:
-        """Smart reindex: incremental detection + BM25 rebuild + orphan cleanup."""
+    def reindex_all(
+        self,
+        resume_state: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Smart reindex: incremental detection + BM25 rebuild + orphan cleanup.
+
+        When ``resume_state`` is provided (v4.8.0 Fase 4), docs listed in
+        it are skipped so the interrupted previous run picks up where it
+        stopped.
+        """
         import shutil
 
-        print("[REINDEX] Starting smart incremental reindex...")
+        if resume_state:
+            print(
+                f"[REINDEX] Resuming smart reindex from checkpoint "
+                f"({len(resume_state.get('doc_ids', []))} docs already "
+                f"processed, {resume_state.get('chunks_processed', 0)} chunks)"
+            )
+        else:
+            print("[REINDEX] Starting smart incremental reindex...")
         start_time = time.time()
 
-        stats = self.index_all(force=False)
+        stats = self.index_all(force=False, resume_state=resume_state)
 
         print("[REINDEX] Rebuilding BM25 index...")
         self.bm25_index.clear()
@@ -2854,7 +2917,11 @@ def get_document(filepath: str) -> str:
 @mcp.tool()
 @rate_limited
 @instrument("reindex_documents")
-def reindex_documents(force: bool = False, full_rebuild: bool = False) -> str:
+def reindex_documents(
+    force: bool = False,
+    full_rebuild: bool = False,
+    resume: bool = False,
+) -> str:
     """
     Index or reindex all documents in the knowledge base.
 
@@ -2865,6 +2932,12 @@ def reindex_documents(force: bool = False, full_rebuild: bool = False) -> str:
             Use after manually editing files on disk outside of add_document().
         full_rebuild: If True, nuclear rebuild — deletes all vectors and re-embeds everything
             from scratch. Use only if the embedding model changed or the index is corrupted.
+        resume: If True (v4.8.0 Fase 4), pick up an interrupted smart reindex from
+            data/reindex_checkpoint.json. Docs already committed in the previous run are
+            skipped; chunk counter continues from the checkpoint. Only valid when
+            full_rebuild=False (nuclear rebuild has no checkpoint semantic — the whole
+            collection is thrown away). Silently starts a fresh reindex if no checkpoint
+            exists or the checkpoint is invalid (missing/corrupt/config drift).
 
     Returns:
         JSON string with operation status. Poll get_reindex_status() for reindex.active,
@@ -2872,10 +2945,27 @@ def reindex_documents(force: bool = False, full_rebuild: bool = False) -> str:
 
     Usage: Normal workflow does not require this — add_document(), update_document(), and
     add_from_url() all auto-index on call. Use force=True only after direct filesystem edits.
-    Use full_rebuild=True only for model upgrades or index corruption. No arguments runs a
-    fast incremental pass.
+    Use full_rebuild=True only for model upgrades or index corruption. Use resume=True after
+    a crashed or killed reindex to avoid restarting from zero. No arguments runs a fast
+    incremental pass.
     """
     orchestrator = get_orchestrator()
+
+    # v4.8.0 Fase 4: reject the nonsensical combination up front. Nuclear
+    # rebuild wipes the collection first — resuming into it would leave a
+    # partial set with no coherent state.
+    if resume and full_rebuild:
+        return json.dumps(
+            {
+                "status": "error",
+                "error": (
+                    "resume=True is only valid for smart reindex; "
+                    "use full_rebuild=False"
+                ),
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
 
     if full_rebuild:
         mode = "nuclear_rebuild"
@@ -2884,7 +2974,26 @@ def reindex_documents(force: bool = False, full_rebuild: bool = False) -> str:
     else:
         mode = "incremental"
 
-    result = orchestrator.start_reindex_background(mode)
+    # v4.8.0 Fase 4: load checkpoint if resume was requested.
+    resume_state: Optional[Dict[str, Any]] = None
+    if resume:
+        # Force smart_reindex mode when resume is requested — an interrupted
+        # smart run must be resumed with smart, not with an unrelated
+        # incremental pass that would ignore the checkpoint entirely.
+        mode = "smart_reindex"
+        cp = orchestrator._load_checkpoint()
+        if cp is None:
+            print(
+                "[INFO] resume=True but no valid checkpoint — "
+                "starting fresh smart reindex"
+            )
+        else:
+            resume_state = {
+                "doc_ids": cp.get("indexed_doc_ids", []),
+                "chunks_processed": cp.get("chunks_processed", 0),
+            }
+
+    result = orchestrator.start_reindex_background(mode, resume_state=resume_state)
 
     if result["status"] == "already_running":
         progress = result["progress"]
