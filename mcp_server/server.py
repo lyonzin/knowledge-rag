@@ -1822,7 +1822,24 @@ class KnowledgeOrchestrator:
         if self._reindex_progress.get("active"):
             return {"status": "already_running", "progress": dict(self._reindex_progress)}
 
-        self._reindex_progress = {
+        self._reindex_progress = self._fresh_reindex_progress(mode, resume_state)
+
+        target = {
+            "incremental": lambda: self.index_all(force=False),
+            "smart_reindex": lambda: self.reindex_all(resume_state=resume_state),
+            "nuclear_rebuild": self.nuclear_rebuild,
+        }[mode]
+
+        thread = threading.Thread(target=self._run_reindex, args=(target,), daemon=True)
+        thread.start()
+        return {"status": "started", "operation": mode}
+
+    @staticmethod
+    def _fresh_reindex_progress(
+        mode: str, resume_state: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Build the initial _reindex_progress dict for a new background run."""
+        return {
             "active": True,
             "operation": mode,
             "total_files": 0,
@@ -1843,16 +1860,6 @@ class KnowledgeOrchestrator:
             "checkpoint_saved_at": None,
             "resumed": bool(resume_state),
         }
-
-        target = {
-            "incremental": lambda: self.index_all(force=False),
-            "smart_reindex": lambda: self.reindex_all(resume_state=resume_state),
-            "nuclear_rebuild": self.nuclear_rebuild,
-        }[mode]
-
-        thread = threading.Thread(target=self._run_reindex, args=(target,), daemon=True)
-        thread.start()
-        return {"status": "started", "operation": mode}
 
     def _run_reindex(self, target: Any) -> None:
         """Background thread runner for reindex operations."""
@@ -3120,46 +3127,42 @@ class KnowledgeOrchestrator:
     def get_reindex_status(self) -> Dict[str, Any]:
         """Get background reindex progress without computing full index stats.
 
-        Returns a dict describing the current or last reindex operation.
-
-        When a reindex is in flight (``active=True``), the payload includes:
-
-        - ``operation``: one of ``incremental`` | ``smart_reindex`` | ``nuclear_rebuild``
-        - ``progress`` / ``percent``: doc-level completion
-        - ``indexed`` / ``skipped`` / ``errors``: doc-level counters
-        - ``started_at``: ISO timestamp when the background thread began
-        - **v4.8.0 Fase 4** — ``chunks_processed`` (chunks committed to
-          ChromaDB), ``chunks_total`` (rolling estimate, 0 during warmup),
-          ``throughput_cps`` (chunks/sec, sliding window of last 30s or
-          100 samples), ``eta_seconds`` (estimated seconds to completion),
-          ``checkpoint_saved_at`` (ISO timestamp of last checkpoint write),
-          ``resumed`` (bool — True when this run recovered from a checkpoint)
-
-        When idle (``active=False``) the payload includes ``last_result``
-        or ``last_error`` from the most recent completed run.
+        Active runs return doc-level counters + v4.8.0 Fase 4 granular fields
+        (chunks_processed, chunks_total, throughput_cps, eta_seconds,
+        checkpoint_saved_at, resumed). Idle returns ``active=False`` plus
+        ``last_result`` or ``last_error`` from the most recent completed run.
         """
         progress = self._reindex_progress
         if progress.get("active"):
-            total = max(1, progress.get("total_files", 1))
-            processed = progress.get("processed", 0)
-            return {
-                "active": True,
-                "operation": progress.get("operation"),
-                "progress": f"{processed}/{progress.get('total_files', 0)}",
-                "percent": round(processed / total * 100),
-                "indexed": progress.get("indexed", 0),
-                "skipped": progress.get("skipped", 0),
-                "errors": progress.get("errors", 0),
-                "started_at": progress.get("started_at"),
-                # v4.8.0 Fase 4: granular progress + resume checkpoint fields
-                "chunks_processed": progress.get("chunks_processed", 0),
-                "chunks_total": progress.get("chunks_total", 0),
-                "throughput_cps": progress.get("throughput_cps", 0.0),
-                "eta_seconds": progress.get("eta_seconds", 0),
-                "checkpoint_saved_at": progress.get("checkpoint_saved_at"),
-                "resumed": progress.get("resumed", False),
-            }
+            return self._active_reindex_status(progress)
+        return self._idle_reindex_status(progress)
 
+    @staticmethod
+    def _active_reindex_status(progress: Dict[str, Any]) -> Dict[str, Any]:
+        """Payload shape for an in-flight background reindex."""
+        total = max(1, progress.get("total_files", 1))
+        processed = progress.get("processed", 0)
+        return {
+            "active": True,
+            "operation": progress.get("operation"),
+            "progress": f"{processed}/{progress.get('total_files', 0)}",
+            "percent": round(processed / total * 100),
+            "indexed": progress.get("indexed", 0),
+            "skipped": progress.get("skipped", 0),
+            "errors": progress.get("errors", 0),
+            "started_at": progress.get("started_at"),
+            # v4.8.0 Fase 4: granular progress + resume checkpoint fields
+            "chunks_processed": progress.get("chunks_processed", 0),
+            "chunks_total": progress.get("chunks_total", 0),
+            "throughput_cps": progress.get("throughput_cps", 0.0),
+            "eta_seconds": progress.get("eta_seconds", 0),
+            "checkpoint_saved_at": progress.get("checkpoint_saved_at"),
+            "resumed": progress.get("resumed", False),
+        }
+
+    @staticmethod
+    def _idle_reindex_status(progress: Dict[str, Any]) -> Dict[str, Any]:
+        """Payload shape for idle state — surfaces last_result or last_error if present."""
         result: Dict[str, Any] = {"active": False}
         if "result" in progress:
             result["last_result"] = progress["result"]
