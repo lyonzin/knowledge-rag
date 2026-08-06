@@ -108,6 +108,34 @@ documents:
     chunk_size: 1000
     chunk_overlap: 200
 
+  # ─────────────────────────────────────────────────────────────────────
+  # Indexing performance tuning (v4.8.0+)
+  # ─────────────────────────────────────────────────────────────────────
+  #
+  # batch_size — Number of chunks per ChromaDB batch add() call. Higher
+  # values mean fewer SQLite round-trips and faster indexing, at the
+  # cost of RAM (roughly batch_size * embedding_dim * 4 bytes for
+  # float32 vectors sitting in memory while the batch flushes).
+  # Default 500 preserves prior hardcoded behavior byte-for-byte.
+  # Valid range: 1 to 5000 (values outside are clamped with a WARN).
+  batch_size: 500
+
+  # parallel_workers — Opt-in threading around ChromaDB batch adds.
+  # Default 1 = single-threaded = safe on all platforms.
+  #
+  # When set > 1, per-batch ``collection.add(...)`` calls run inside a
+  # ThreadPoolExecutor. ONNX embedding itself is serialized (internal
+  # session lock), so the win comes from SQLite writes overlapping with
+  # the NEXT batch's inference — NOT from parallel inference. Expect
+  # modest gains (10-30%) on multi-batch documents, zero gain on
+  # single-batch docs (the pool is skipped for those).
+  #
+  # WARNING: parallel_workers > 4 on Windows may hit ONNX threading
+  # issues or SQLite lock contention — monitor stability. Recommended
+  # cap: 4 on Windows, 8 on Linux/macOS.
+  # Valid range: 1 to 16 (values outside are clamped with a WARN).
+  parallel_workers: 1
+
 
 # ============================================================================
 # MODELS
@@ -213,7 +241,16 @@ search:
   default_results: 5
 
   # Hard maximum — even if a client requests more, cap at this number.
-  max_results: 20
+  # Also bounds the candidate pool size in the semantic branch of the
+  # hybrid retriever (``_do_semantic`` asks ChromaDB for
+  # ``min(max_results * 3, config.max_results)`` candidates).
+  #
+  # v4.8.0 Fase 3 raised the default from 20 to 100. Prior to that fix,
+  # the ``min(...)`` capped semantic candidates at 20 while BM25 pulled
+  # up to ``max_results * 20 = 400`` — semantic silently starved on
+  # hybrid mode. Callers passing ``max_results`` explicitly in the MCP
+  # tool call are unaffected; only the default changed.
+  max_results: 100
 
   # ChromaDB collection name. Change this to maintain separate
   # knowledge bases in the same data directory.
