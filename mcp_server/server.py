@@ -1129,7 +1129,11 @@ class KnowledgeOrchestrator:
         # Migration: deferred — checked in main() after full init
         self._needs_rebuild = False
 
-        # Background reindex progress (polled via get_index_stats)
+        # Background reindex progress (polled via get_index_stats).
+        # v4.8.0 Fase 4 fields (chunks_processed/chunks_total/throughput_cps/
+        # eta_seconds/checkpoint_saved_at) are populated on demand by the
+        # background thread; absent when no reindex has ever run in this
+        # process. Consumers must treat them as optional.
         self._reindex_progress: Dict[str, Any] = {"active": False}
 
     def _safe_get_collection(self):
@@ -1539,6 +1543,12 @@ class KnowledgeOrchestrator:
             "skipped": 0,
             "errors": 0,
             "started_at": datetime.now().isoformat(),
+            # v4.8.0 Fase 4: granular progress + resume checkpoint
+            "chunks_processed": 0,
+            "chunks_total": 0,
+            "throughput_cps": 0.0,
+            "eta_seconds": 0,
+            "checkpoint_saved_at": None,
         }
 
         target = {
