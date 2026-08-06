@@ -54,11 +54,19 @@ When a new minor version ships, the previous minor gets one final security patch
 
 **Please do not open a public GitHub issue for security concerns.**
 
-Use one of these private channels:
+**Please report via GitHub Security Advisories (private, native to GitHub):**
 
-1. **GitHub Security Advisory** (preferred):
-   https://github.com/lyonzin/knowledge-rag/security/advisories/new
-2. **Email**: lyonzin@users.noreply.github.com
+**→ https://github.com/lyonzin/knowledge-rag/security/advisories/new**
+
+The link above works for any GitHub user — no collaborator status required.
+Reports arrive as GitHub notifications on the maintainer's account and are
+handled inside the repo's `Security` tab. No external email is required and
+none is used.
+
+If you cannot use the GitHub Security Advisory form (rare), open a public
+issue with the label `security-triage` **describing only that you have a
+security concern and how to reach you privately** — do not disclose details
+publicly. The maintainer will contact you to move the report off-issue.
 
 When you report, include:
 
