@@ -74,7 +74,7 @@ MCP_TOOL_SIGNATURES = {
     "add_from_url": ["url", "category", "title"],
     "update_document": ["filepath", "content"],
     "remove_document": ["filepath", "delete_file"],
-    "reindex_documents": ["force", "full_rebuild"],
+    "reindex_documents": ["force", "full_rebuild", "resume"],
     "list_categories": [],
     "list_documents": ["category"],
     "get_index_stats": [],
