@@ -559,13 +559,22 @@ class Config:
             else 384
         )
     )
-    gpu_acceleration: bool = field(
+    # GPU acceleration mode (v4.8.0+): "auto" (default) | "true" | "false".
+    # Legacy YAML `gpu: true/false` (bool) is normalized to string in __post_init__.
+    #   "auto"  — probe CUDA at startup; use if ready, fall back to CPU otherwise
+    #   "true"  — force CUDA attempt; fall back to CPU only if load actually fails
+    #   "false" — never probe; runs on CPU with zero startup overhead
+    gpu_mode: str = field(
         default_factory=lambda: (
-            _get("models", "embedding", {}).get("gpu", False)
+            _get("models", "embedding", {}).get("gpu", "auto")
             if isinstance(_get("models", "embedding", {}), dict)
-            else False
+            else "auto"
         )
     )
+    # Legacy alias — derived in __post_init__. True when CUDA MAY be attempted
+    # (gpu_mode is "true" or "auto"). Kept for backwards compatibility with
+    # callers that check `config.gpu_acceleration` as a bool.
+    gpu_acceleration: bool = False
 
     # Embedding profile (v4.8.0) — named shortcut for model+dim+prefix.
     # See _EMBEDDING_PROFILES above. "custom" (default) opts out.
@@ -778,6 +787,27 @@ class Config:
             self.reranker_enabled = True
         if not isinstance(self.reranker_top_k_multiplier, int) or self.reranker_top_k_multiplier < 1:
             self.reranker_top_k_multiplier = 3
+
+        # GPU mode normalization (v4.8.0+): bool → str, str → validated string.
+        # Accepts legacy YAML `gpu: true/false` (bool) and new `gpu: "auto"|"true"|"false"`.
+        raw_gpu = self.gpu_mode
+        if isinstance(raw_gpu, bool):
+            self.gpu_mode = "true" if raw_gpu else "false"
+        elif isinstance(raw_gpu, str):
+            normalized = raw_gpu.strip().lower()
+            if normalized in ("auto", "true", "false"):
+                self.gpu_mode = normalized
+            else:
+                print(f"[WARN] Invalid gpu value {raw_gpu!r}; falling back to 'auto'")
+                self.gpu_mode = "auto"
+        else:
+            print(
+                f"[WARN] Invalid gpu value {raw_gpu!r} (type {type(raw_gpu).__name__}); "
+                f"falling back to 'auto'"
+            )
+            self.gpu_mode = "auto"
+        # Derive legacy alias: True when CUDA may be attempted (mode "true" or "auto").
+        self.gpu_acceleration = self.gpu_mode in ("true", "auto")
 
         # Server transport validation
         if self.transport not in ("stdio", "sse", "streamable-http"):
