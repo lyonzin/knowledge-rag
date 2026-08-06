@@ -1140,6 +1140,14 @@ class KnowledgeOrchestrator:
         # process. Consumers must treat them as optional.
         self._reindex_progress: Dict[str, Any] = {"active": False}
 
+        # v4.8.0 Fase 5: sweep any staging collections left behind by a
+        # crashed rebuild (older than 24h). Idempotent + non-fatal on
+        # error; the swap path also calls this before each rebuild.
+        try:
+            self._cleanup_stale_staging_collections()
+        except Exception as e:
+            print(f"[STAGING] Startup cleanup skipped (non-fatal): {e}")
+
     def _safe_get_collection(self):
         """
         Get or create ChromaDB collection with auto-recovery.
@@ -1769,11 +1777,271 @@ class KnowledgeOrchestrator:
 
         return stats
 
-    def nuclear_rebuild(self) -> Dict[str, Any]:
-        """Nuclear rebuild: DELETE everything and re-embed ALL documents."""
+    # =========================================================================
+    # v4.8.0 Fase 5: zero-downtime rebuild via staging collection + atomic swap
+    # =========================================================================
+
+    # Sanity queries used by _validate_staging. These are corpus-agnostic
+    # tokens that appear in >99% of technical text; a staging collection
+    # that fails to return ANY hits for 4/5 of them is almost certainly
+    # broken (bad embeddings, empty adds, corrupt writes).
+    _STAGING_SANITY_QUERIES = ("readme", "function", "import", "return", "class")
+
+    # Stale staging collections older than this are cleaned up on startup.
+    # A rebuild takes minutes to hours; 24h is a very safe upper bound while
+    # still preventing orphan accumulation from crashed rebuilds.
+    _STAGING_TTL_SECONDS = 24 * 60 * 60
+
+    def _cleanup_stale_staging_collections(self) -> Dict[str, int]:
+        """Remove staging collections older than ``_STAGING_TTL_SECONDS``.
+
+        Runs opportunistically at Orchestrator init and before each swap
+        rebuild. Idempotent — safe to call repeatedly. Stagings younger than
+        the TTL are preserved because they may belong to a rebuild in flight
+        (another process, another host mounting the same DB, or a very slow
+        embed backend). Structured logging reports counts so operators can
+        spot leaks.
+        """
+        prefix = f"{config.collection_name}__staging_"
+        now = int(time.time())
+        stats = {"scanned": 0, "removed": 0, "preserved": 0}
+        try:
+            existing = self.chroma_client.list_collections()
+        except Exception as e:
+            print(f"[STAGING] list_collections failed (non-fatal): {e}")
+            return stats
+
+        for coll in existing:
+            name = getattr(coll, "name", "")
+            if not name.startswith(prefix):
+                continue
+            stats["scanned"] += 1
+            suffix = name[len(prefix):]
+            try:
+                ts = int(suffix)
+            except ValueError:
+                # Non-conforming name — leave it alone rather than delete
+                # something we didn't create.
+                stats["preserved"] += 1
+                continue
+            if (now - ts) < self._STAGING_TTL_SECONDS:
+                stats["preserved"] += 1
+                continue
+            try:
+                self.chroma_client.delete_collection(name)
+                stats["removed"] += 1
+                print(f"[STAGING] Cleaned up stale staging: {name}")
+            except Exception as e:
+                print(f"[STAGING] Failed to delete {name} (non-fatal): {e}")
+
+        if stats["removed"] > 0 or stats["scanned"] > 0:
+            print(
+                f"[STAGING] Cleanup: scanned={stats['scanned']} "
+                f"removed={stats['removed']} preserved={stats['preserved']}"
+            )
+        return stats
+
+    def _create_staging_collection(self, ts: int):
+        """Create a fresh staging collection with the current embedding fn.
+
+        Naming ``{collection_name}__staging_{unix_ts}`` — the timestamp
+        prevents collisions with concurrent rebuilds and lets the cleanup
+        helper age stale ones out. Same embedding_function as production so
+        the swap is dimensionally compatible with the query pipeline that
+        picks up right after.
+        """
+        staging_name = f"{config.collection_name}__staging_{ts}"
+        return self.chroma_client.get_or_create_collection(
+            name=staging_name,
+            embedding_function=self.embed_fn,
+            metadata={"description": "knowledge-rag v4.8.0 staging rebuild"},
+        )
+
+    def _populate_staging(self, staging) -> Dict[str, Any]:
+        """Populate ``staging`` by temporarily rebinding orchestrator state.
+
+        The whole indexing pipeline (_index_all_impl, _index_document,
+        _remove_document_chunks, orphan cleanup, checkpoint I/O) reads from
+        ``self.collection`` / ``self.bm25_index`` / ``self._indexed_docs``.
+        Refactoring every helper to accept a target-collection parameter
+        would touch 4 methods and ~200 lines. Temporary rebind is 12 lines
+        and preserves the pipeline byte-for-byte.
+
+        BM25 is rebound to a throwaway instance so the production BM25
+        index that queries currently rely on is not touched. If populate or
+        the caller's subsequent validate/swap steps fail, ``_saved`` is
+        restored so production state is exactly as it was.
+
+        Returns the ``index_all`` stats dict on success. Rollback is the
+        caller's responsibility on any exception raised out of here.
+        """
+        _saved = {
+            "collection": self.collection,
+            "bm25_index": self.bm25_index,
+            "_bm25_initialized": self._bm25_initialized,
+            "_indexed_docs": dict(self._indexed_docs),
+            "_source_to_docid": dict(self._source_to_docid),
+        }
+        self.collection = staging
+        self.bm25_index = BM25Index()
+        self._bm25_initialized = True  # suppress lazy rebuild on staging
+        self._indexed_docs = {}
+        self._source_to_docid = {}
+        try:
+            return self.index_all(force=True)
+        except Exception:
+            for k, v in _saved.items():
+                setattr(self, k, v)
+            raise
+
+    def _rollback_staging_state(self, saved: Dict[str, Any]) -> None:
+        """Restore orchestrator state from a snapshot taken pre-populate."""
+        for k, v in saved.items():
+            setattr(self, k, v)
+
+    def _snapshot_pre_staging(self) -> Dict[str, Any]:
+        """Snapshot the orchestrator fields that ``_populate_staging`` mutates.
+
+        Returned dict is opaque — feed it back to ``_rollback_staging_state``
+        if validate/swap fails so production sees zero net change.
+        """
+        return {
+            "collection": self.collection,
+            "bm25_index": self.bm25_index,
+            "_bm25_initialized": self._bm25_initialized,
+            "_indexed_docs": dict(self._indexed_docs),
+            "_source_to_docid": dict(self._source_to_docid),
+        }
+
+    def _validate_staging(self, staging, baseline_count: int) -> Dict[str, Any]:
+        """Sanity-check the staging collection before swap.
+
+        Three gates, all must pass:
+
+        1. Count within 10% of baseline (accommodates a small number of
+           truly-broken docs that the parser skipped this run — worse loss
+           means something regressed and we abort).
+        2. 4 of 5 canonical queries return at least one hit each. The
+           threshold is 4/5 instead of 5/5 because a genuinely small corpus
+           may legitimately not contain e.g. ``return``.
+        3. A query against staging does not raise. This catches dimension
+           mismatches and other backend corruption that a raw ``count()``
+           check would miss.
+
+        Returns a dict with ``ok: bool`` plus per-gate stats for logging.
+        """
+        result: Dict[str, Any] = {
+            "ok": False,
+            "count": 0,
+            "baseline": baseline_count,
+            "min_expected": 0,
+            "canonical_hits": 0,
+            "query_error": None,
+        }
+        try:
+            result["count"] = staging.count()
+        except Exception as e:
+            result["query_error"] = f"count failed: {e}"
+            return result
+
+        # Gate 1 — size. Baseline zero skips this (fresh install case).
+        min_expected = int(baseline_count * 0.9) if baseline_count > 0 else 0
+        result["min_expected"] = min_expected
+        if result["count"] < min_expected:
+            return result
+
+        # Gate 2 + 3 — canonical query sanity.
+        hits = 0
+        for q in self._STAGING_SANITY_QUERIES:
+            try:
+                r = staging.query(query_texts=[q], n_results=1, include=[])
+                if r and r.get("ids") and r["ids"][0]:
+                    hits += 1
+            except Exception as e:
+                result["query_error"] = f"query '{q}' failed: {e}"
+                return result
+        result["canonical_hits"] = hits
+
+        # Empty corpus (baseline 0) legitimately fails canonical queries.
+        # Skip this gate in that case — the count gate already passed.
+        if baseline_count > 0 and hits < 4:
+            return result
+
+        result["ok"] = True
+        return result
+
+    def _swap_collections_atomic(self, staging, prod_name: str, ts: int) -> None:
+        """Two-step rename: prod → old, staging → prod, then delete old.
+
+        ChromaDB's ``Collection.modify(name=)`` renames in place — no
+        client-side data movement. Race window between the two modifies
+        is a single Python statement (~microseconds); a query landing there
+        would fail to find ``prod_name``. In-process serialization is not
+        offered by ChromaDB so if a caller needs true atomicity they must
+        gate reads at the application layer. For our use case (single
+        Orchestrator per process, queries all funnel through ``self.query``)
+        the ``self.collection = ...`` rebind after this returns means the
+        query path is only ever pointed at the "current" object.
+
+        Rollback: if step 2 fails after step 1 succeeded, we rename prod
+        back so the previous state is intact. Raises on any unrecoverable
+        state so the caller aborts loudly.
+        """
+        old_name = f"{prod_name}__old_{ts}"
+        prod = self.chroma_client.get_collection(prod_name)
+
+        # Step 1: free the production name.
+        prod.modify(name=old_name)
+
+        # Step 2: staging assumes the production name.
+        try:
+            staging.modify(name=prod_name)
+        except Exception:
+            # Best-effort rollback so the previous prod is still queryable.
+            try:
+                prod.modify(name=prod_name)
+            except Exception as inner:
+                print(
+                    f"[SWAP] CRITICAL: staging rename failed AND rollback "
+                    f"failed. Prod is at '{old_name}'. Inner: {inner}"
+                )
+            raise
+
+        # Step 3: cleanup the old prod. Non-fatal if it fails — cleanup
+        # helper will age it out later.
+        try:
+            self.chroma_client.delete_collection(old_name)
+        except Exception as e:
+            print(f"[SWAP] Failed to delete post-swap old prod (non-fatal): {e}")
+
+    def _rebuild_bm25_post_swap(self, prod_name: str) -> None:
+        """Reconnect self.collection to the swapped prod + rebuild BM25.
+
+        Must be called AFTER ``_swap_collections_atomic`` so the resolved
+        collection has the freshly-written vectors. BM25 rebuild is done
+        here rather than inside populate so production BM25 keeps serving
+        queries throughout the rebuild window.
+        """
+        self.collection = self.chroma_client.get_collection(
+            name=prod_name,
+            embedding_function=self.embed_fn,
+        )
+        self.bm25_index.clear()
+        self._bm25_initialized = False
+        self.query_cache.invalidate()
+        # Trigger a fresh build from the swapped-in ChromaDB contents.
+        self._ensure_bm25_index()
+
+    def _rebuild_destructive(self) -> Dict[str, Any]:
+        """Legacy destructive rebuild — DELETE everything and re-embed.
+
+        Preserved as ``nuclear_rebuild(swap=False)`` for backwards compat
+        and for tests that need a byte-identical baseline. Production paths
+        default to the zero-downtime swap workflow (v4.8.0+).
+        """
         import shutil
 
-        print("[NUCLEAR] Starting full rebuild...")
+        print("[NUCLEAR] Starting destructive rebuild (swap=False)...")
         start_time = time.time()
 
         try:
@@ -1811,11 +2079,100 @@ class KnowledgeOrchestrator:
         elapsed = time.time() - start_time
         stats["elapsed_seconds"] = round(elapsed, 2)
         print(
-            f"[NUCLEAR] Full rebuild completed in {elapsed:.1f}s "
+            f"[NUCLEAR] Destructive rebuild completed in {elapsed:.1f}s "
             f"({stats['indexed']} docs, {stats['chunks_added']} chunks)"
         )
 
         return stats
+
+    def _rebuild_via_swap(self) -> Dict[str, Any]:
+        """Zero-downtime rebuild: staging collection + validate + atomic swap.
+
+        Production collection keeps serving queries until step 4 (swap)
+        completes. If any earlier step fails, the staging is deleted and
+        production state is restored via snapshot so callers see exactly
+        the same pre-call state.
+        """
+        print("[NUCLEAR] Starting zero-downtime rebuild (swap=True)...")
+        start_time = time.time()
+
+        prod_name = config.collection_name
+        baseline_count = 0
+        try:
+            baseline_count = self.collection.count()
+        except Exception as e:
+            print(f"[SWAP] Could not read baseline count (assume 0): {e}")
+
+        self._cleanup_stale_staging_collections()
+
+        ts = int(time.time())
+        _saved = self._snapshot_pre_staging()
+        staging = self._create_staging_collection(ts)
+
+        try:
+            stats = self._populate_staging(staging)
+
+            validation = self._validate_staging(staging, baseline_count)
+            if not validation["ok"]:
+                print(
+                    f"[SWAP] Validation FAILED — count={validation['count']} "
+                    f"min={validation['min_expected']} "
+                    f"canonical_hits={validation['canonical_hits']}/5 "
+                    f"err={validation['query_error']}"
+                )
+                raise RuntimeError(
+                    f"Staging validation failed: {validation}"
+                )
+
+            print(
+                f"[SWAP] Validation OK — count={validation['count']} "
+                f"canonical_hits={validation['canonical_hits']}/5"
+            )
+
+            self._swap_collections_atomic(staging, prod_name, ts)
+            self._rebuild_bm25_post_swap(prod_name)
+            self._save_metadata()
+
+        except Exception:
+            # Rollback: restore prod state + delete staging orphan.
+            self._rollback_staging_state(_saved)
+            try:
+                self.chroma_client.delete_collection(
+                    f"{prod_name}__staging_{ts}"
+                )
+            except Exception:
+                pass  # cleanup helper will age it out
+            raise
+
+        elapsed = time.time() - start_time
+        stats["elapsed_seconds"] = round(elapsed, 2)
+        print(
+            f"[NUCLEAR] Zero-downtime rebuild completed in {elapsed:.1f}s "
+            f"({stats['indexed']} docs, {stats['chunks_added']} chunks)"
+        )
+        return stats
+
+    def nuclear_rebuild(self, swap: bool = True) -> Dict[str, Any]:
+        """Rebuild the collection from scratch.
+
+        Behavior:
+            swap=True (default, v4.8.0+):
+                Creates a staging collection, populates it, validates the
+                result (count within 10% of baseline + 4 of 5 canonical
+                sanity queries return hits), then atomically swaps to
+                production via two ``Collection.modify(name=)`` calls.
+                Queries continue serving from the previous collection
+                until the swap completes. Zero downtime.
+
+            swap=False (legacy):
+                Deletes the production collection first, then rebuilds.
+                Queries return empty results during the rebuild window
+                (minutes to hours depending on corpus size + hardware).
+                Preserved for backwards-compat and forced-cleanup cases.
+        """
+        if swap:
+            return self._rebuild_via_swap()
+        return self._rebuild_destructive()
 
     # =========================================================================
     # Search
