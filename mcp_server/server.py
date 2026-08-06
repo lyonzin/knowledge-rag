@@ -1979,19 +1979,13 @@ class KnowledgeOrchestrator:
     def _swap_collections_atomic(self, staging, prod_name: str, ts: int) -> None:
         """Two-step rename: prod → old, staging → prod, then delete old.
 
-        ChromaDB's ``Collection.modify(name=)`` renames in place — no
-        client-side data movement. Race window between the two modifies
-        is a single Python statement (~microseconds); a query landing there
-        would fail to find ``prod_name``. In-process serialization is not
-        offered by ChromaDB so if a caller needs true atomicity they must
-        gate reads at the application layer. For our use case (single
-        Orchestrator per process, queries all funnel through ``self.query``)
-        the ``self.collection = ...`` rebind after this returns means the
-        query path is only ever pointed at the "current" object.
+        ChromaDB's ``Collection.modify(name=)`` renames in place — no data
+        movement. Race window between the two modifies is one Python
+        statement (~microseconds); queries funnel through ``self.query``
+        which reads the rebound ``self.collection`` after this returns.
 
-        Rollback: if step 2 fails after step 1 succeeded, we rename prod
-        back so the previous state is intact. Raises on any unrecoverable
-        state so the caller aborts loudly.
+        Rollback contract lives in ``_promote_staging_or_rollback``. This
+        raises on any unrecoverable state so the caller aborts loudly.
         """
         old_name = f"{prod_name}__old_{ts}"
         prod = self.chroma_client.get_collection(prod_name)
@@ -1999,11 +1993,26 @@ class KnowledgeOrchestrator:
         # Step 1: free the production name.
         prod.modify(name=old_name)
 
-        # Step 2: staging assumes the production name.
+        # Step 2: staging assumes the production name (with rollback).
+        self._promote_staging_or_rollback(staging, prod, prod_name, old_name)
+
+        # Step 3: cleanup the old prod. Non-fatal — cleanup helper ages it out.
+        try:
+            self.chroma_client.delete_collection(old_name)
+        except Exception as e:
+            print(f"[SWAP] Failed to delete post-swap old prod (non-fatal): {e}")
+
+    def _promote_staging_or_rollback(
+        self, staging, prod, prod_name: str, old_name: str
+    ) -> None:
+        """Rename staging to production; on failure, restore previous prod name.
+
+        If both the rename AND the rollback fail, prod is left at ``old_name``
+        and the caller aborts loudly (raise) so operators can recover manually.
+        """
         try:
             staging.modify(name=prod_name)
         except Exception:
-            # Best-effort rollback so the previous prod is still queryable.
             try:
                 prod.modify(name=prod_name)
             except Exception as inner:
@@ -2012,13 +2021,6 @@ class KnowledgeOrchestrator:
                     f"failed. Prod is at '{old_name}'. Inner: {inner}"
                 )
             raise
-
-        # Step 3: cleanup the old prod. Non-fatal if it fails — cleanup
-        # helper will age it out later.
-        try:
-            self.chroma_client.delete_collection(old_name)
-        except Exception as e:
-            print(f"[SWAP] Failed to delete post-swap old prod (non-fatal): {e}")
 
     def _rebuild_bm25_post_swap(self, prod_name: str) -> None:
         """Reconnect self.collection to the swapped prod + rebuild BM25.
