@@ -1914,19 +1914,11 @@ class KnowledgeOrchestrator:
         }
 
     def _validate_staging(self, staging, baseline_count: int) -> Dict[str, Any]:
-        """Sanity-check the staging collection before swap.
+        """Sanity-check the staging collection before swap via three gates.
 
-        Three gates, all must pass:
-
-        1. Count within 10% of baseline (accommodates a small number of
-           truly-broken docs that the parser skipped this run — worse loss
-           means something regressed and we abort).
-        2. 4 of 5 canonical queries return at least one hit each. The
-           threshold is 4/5 instead of 5/5 because a genuinely small corpus
-           may legitimately not contain e.g. ``return``.
-        3. A query against staging does not raise. This catches dimension
-           mismatches and other backend corruption that a raw ``count()``
-           check would miss.
+        Gate 1 (count): within 10% of baseline — see ``_validate_staging_count``.
+        Gates 2+3 (queries): canonical hits + backend integrity — see
+        ``_validate_staging_canonical_queries``.
 
         Returns a dict with ``ok: bool`` plus per-gate stats for logging.
         """
@@ -1938,19 +1930,37 @@ class KnowledgeOrchestrator:
             "canonical_hits": 0,
             "query_error": None,
         }
+        if not self._validate_staging_count(staging, baseline_count, result):
+            return result
+        if not self._validate_staging_canonical_queries(staging, baseline_count, result):
+            return result
+
+        result["ok"] = True
+        return result
+
+    def _validate_staging_count(
+        self, staging, baseline_count: int, result: Dict[str, Any]
+    ) -> bool:
+        """Gate 1 — count within 10% of baseline. Baseline 0 skips size check."""
         try:
             result["count"] = staging.count()
         except Exception as e:
             result["query_error"] = f"count failed: {e}"
-            return result
+            return False
 
-        # Gate 1 — size. Baseline zero skips this (fresh install case).
         min_expected = int(baseline_count * 0.9) if baseline_count > 0 else 0
         result["min_expected"] = min_expected
-        if result["count"] < min_expected:
-            return result
+        return result["count"] >= min_expected
 
-        # Gate 2 + 3 — canonical query sanity.
+    def _validate_staging_canonical_queries(
+        self, staging, baseline_count: int, result: Dict[str, Any]
+    ) -> bool:
+        """Gates 2 + 3 — canonical query sanity + backend integrity.
+
+        Runs each canonical query; any raise fails gate 3 (backend corruption).
+        Empty corpus (baseline 0) legitimately fails canonical queries and is
+        allowed to pass since gate 1 already covered the size dimension.
+        """
         hits = 0
         for q in self._STAGING_SANITY_QUERIES:
             try:
@@ -1959,16 +1969,12 @@ class KnowledgeOrchestrator:
                     hits += 1
             except Exception as e:
                 result["query_error"] = f"query '{q}' failed: {e}"
-                return result
+                return False
         result["canonical_hits"] = hits
 
-        # Empty corpus (baseline 0) legitimately fails canonical queries.
-        # Skip this gate in that case — the count gate already passed.
         if baseline_count > 0 and hits < 4:
-            return result
-
-        result["ok"] = True
-        return result
+            return False
+        return True
 
     def _swap_collections_atomic(self, staging, prod_name: str, ts: int) -> None:
         """Two-step rename: prod → old, staging → prod, then delete old.
