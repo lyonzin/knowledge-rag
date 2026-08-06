@@ -522,62 +522,107 @@ class FastEmbedEmbeddings:
                 print(f"[ERROR] Embedding model load FAILED: {exc}", file=sys.stderr)
                 raise EmbeddingModelLoadError(f"Failed to load embedding model: {exc}") from exc
 
-    def __call__(self, input: List[str]) -> List[List[float]]:
-        """
-        Generate embeddings for a list of texts.
+    @staticmethod
+    def _apply_prefix(texts: List[str], prefix: str) -> List[str]:
+        """Prepend ``prefix`` to each string in ``texts``.
 
-        ChromaDB embedding_function interface: __call__(input: List[str]) -> List[List[float]]
-        FastEmbed.embed() returns a generator, so we consume it into a list.
+        Returns the input list unchanged when ``prefix`` is falsy (empty
+        string). This is deliberate: the default profile ``compact`` ships
+        no prefix, so most callers should never allocate a new list here.
+        """
+        if not prefix:
+            return texts
+        return [f"{prefix}{t}" for t in texts]
+
+    def _embed(self, texts: List[str]) -> List[List[float]]:
+        """Core embedding pipeline — load, run model, validate output.
+
+        No prefix application; callers must prepend the right prefix
+        (``query_prefix`` for queries, ``passage_prefix`` for passages)
+        before invoking this.
 
         Raises:
             EmbeddingModelLoadError: when the model could not be loaded.
-            EmbeddingError: when embedding generation fails after a successful load.
+            EmbeddingError: when embedding generation fails or returns
+                the wrong shape.
 
         Behavior note (changed in v3.8.1):
-            Previously this method swallowed any exception and returned vectors
-            of zeros (``[[0.0]*dim for _ in input]``). That silently corrupted
-            the index — ChromaDB stored zero vectors as document embeddings,
-            ``count()`` returned the right number of chunks, smart-reindex
-            would skip them as "already indexed", and queries returned garbage
-            similarity scores. Failures are now LOUD: the caller (ChromaDB
-            ``add()``, MCP search tool, etc.) sees the real error and can
-            surface it to the user.
+            Previously the caller (``__call__``) swallowed any exception and
+            returned vectors of zeros (``[[0.0]*dim for _ in input]``). That
+            silently corrupted the index — ChromaDB stored zero vectors as
+            document embeddings, ``count()`` returned the right number of
+            chunks, smart-reindex would skip them as "already indexed", and
+            queries returned garbage similarity scores. Failures are now LOUD
+            so the caller can surface the real error to the user.
         """
-        if not input:
+        if not texts:
             return []
 
         self._load_model()  # may raise EmbeddingModelLoadError
         try:
-            embeddings = list(self._model.embed(input))
+            embeddings = list(self._model.embed(texts))
         except Exception as exc:
             print(f"[ERROR] Embedding generation FAILED: {exc}", file=sys.stderr)
             raise EmbeddingError(f"Embedding generation failed: {exc}") from exc
 
         # Sanity check: model returned the right number of vectors with the right dim
-        if len(embeddings) != len(input):
-            raise EmbeddingError(f"Embedding count mismatch: expected {len(input)}, got {len(embeddings)}")
+        if len(embeddings) != len(texts):
+            raise EmbeddingError(f"Embedding count mismatch: expected {len(texts)}, got {len(embeddings)}")
         result = [emb.tolist() for emb in embeddings]
         if result and len(result[0]) != self._dim:
             raise EmbeddingError(f"Embedding dim mismatch: expected {self._dim}, got {len(result[0])}")
         return result
+
+    def __call__(self, input: List[str]) -> List[List[float]]:
+        """
+        Generate embeddings for a list of texts (ChromaDB embedding_function).
+
+        ChromaDB embedding_function interface: ``__call__(input: List[str]) -> List[List[float]]``.
+        FastEmbed.embed() returns a generator, so ``_embed`` consumes it.
+
+        Prefix scope (v4.8.0+):
+            This method is treated as a **passage** path and applies
+            ``config.passage_prefix``. ChromaDB itself uses ``embedding_function``
+            for both ``add()`` and ``query()``, but in this codebase the query
+            path (via ``orchestrator.query()`` → ``_do_semantic``) calls
+            :meth:`embed_query` directly and bypasses ``__call__``. That leaves
+            ``__call__`` running exclusively in the ingestion path, so passage
+            prefix is the correct default.
+
+        Raises:
+            EmbeddingModelLoadError: when the model could not be loaded.
+            EmbeddingError: when embedding generation fails after a successful load.
+        """
+        if not input:
+            return []
+        return self._embed(self._apply_prefix(input, config.passage_prefix))
 
     def name(self) -> str:
         """Return embedding function name (required by ChromaDB v1.4.0+)"""
         return f"fastembed-{self.model_name}"
 
     def embed_documents(self, documents: List[str]) -> List[List[float]]:
-        """Embed a list of documents (alias for __call__)"""
+        """Embed a list of passages (alias for ``__call__``).
+
+        Passage prefix is applied via ``__call__`` — do NOT reapply here or
+        the prefix will double up (once for the alias, once for ``__call__``).
+        """
         return self(documents)
 
     def embed_query(self, input=None, **kwargs) -> List[List[float]]:
-        """Embed query text(s) - returns list of embeddings"""
+        """Embed query text(s) — applies ``config.query_prefix`` before embedding.
+
+        Bypasses ``__call__`` (which applies ``passage_prefix``) so query and
+        passage scopes never collide. Returns a list of embeddings — one per
+        input text.
+        """
         if isinstance(input, list):
             texts = input
         elif input is not None:
             texts = [input]
         else:
             texts = [kwargs.get("query", "")]
-        return self(texts)
+        return self._embed(self._apply_prefix(texts, config.query_prefix))
 
 
 # =============================================================================
