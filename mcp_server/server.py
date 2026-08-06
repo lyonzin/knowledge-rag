@@ -3463,87 +3463,50 @@ def get_document(filepath: str) -> str:
     return json.dumps({"status": "success", "document": doc}, indent=2, ensure_ascii=False)
 
 
-@mcp.tool()
-@rate_limited
-@instrument("reindex_documents")
-def reindex_documents(
-    force: bool = False,
-    full_rebuild: bool = False,
-    resume: bool = False,
-) -> str:
+def _reindex_error_response(message: str) -> str:
+    """JSON error envelope for reindex_documents pre-flight validation."""
+    return json.dumps(
+        {"status": "error", "error": message},
+        indent=2,
+        ensure_ascii=False,
+    )
+
+
+def _resolve_reindex_mode(force: bool, full_rebuild: bool, resume: bool) -> str:
+    """Pick the reindex mode. Resume forces smart_reindex regardless of force flag.
+
+    Rationale: an interrupted smart run must be resumed with smart — an
+    incremental pass would ignore the checkpoint entirely.
     """
-    Index or reindex all documents in the knowledge base.
-
-    Runs in background — returns immediately. Use get_reindex_status() to monitor progress.
-
-    Args:
-        force: If True, smart reindex (detects changed files + rebuilds BM25 index).
-            Use after manually editing files on disk outside of add_document().
-        full_rebuild: If True, nuclear rebuild — deletes all vectors and re-embeds everything
-            from scratch. Use only if the embedding model changed or the index is corrupted.
-        resume: If True (v4.8.0 Fase 4), pick up an interrupted smart reindex from
-            data/reindex_checkpoint.json. Docs already committed in the previous run are
-            skipped; chunk counter continues from the checkpoint. Only valid when
-            full_rebuild=False (nuclear rebuild has no checkpoint semantic — the whole
-            collection is thrown away). Silently starts a fresh reindex if no checkpoint
-            exists or the checkpoint is invalid (missing/corrupt/config drift).
-
-    Returns:
-        JSON string with operation status. Poll get_reindex_status() for reindex.active,
-        reindex.progress, and reindex.percent until reindex.active becomes false.
-
-    Usage: Normal workflow does not require this — add_document(), update_document(), and
-    add_from_url() all auto-index on call. Use force=True only after direct filesystem edits.
-    Use full_rebuild=True only for model upgrades or index corruption. Use resume=True after
-    a crashed or killed reindex to avoid restarting from zero. No arguments runs a fast
-    incremental pass.
-    """
-    orchestrator = get_orchestrator()
-
-    # v4.8.0 Fase 4: reject the nonsensical combination up front. Nuclear
-    # rebuild wipes the collection first — resuming into it would leave a
-    # partial set with no coherent state.
-    if resume and full_rebuild:
-        return json.dumps(
-            {
-                "status": "error",
-                "error": (
-                    "resume=True is only valid for smart reindex; "
-                    "use full_rebuild=False"
-                ),
-            },
-            indent=2,
-            ensure_ascii=False,
-        )
-
-    if full_rebuild:
-        mode = "nuclear_rebuild"
-    elif force:
-        mode = "smart_reindex"
-    else:
-        mode = "incremental"
-
-    # v4.8.0 Fase 4: load checkpoint if resume was requested.
-    resume_state: Optional[Dict[str, Any]] = None
     if resume:
-        # Force smart_reindex mode when resume is requested — an interrupted
-        # smart run must be resumed with smart, not with an unrelated
-        # incremental pass that would ignore the checkpoint entirely.
-        mode = "smart_reindex"
-        cp = orchestrator._load_checkpoint()
-        if cp is None:
-            print(
-                "[INFO] resume=True but no valid checkpoint — "
-                "starting fresh smart reindex"
-            )
-        else:
-            resume_state = {
-                "doc_ids": cp.get("indexed_doc_ids", []),
-                "chunks_processed": cp.get("chunks_processed", 0),
-            }
+        return "smart_reindex"
+    if full_rebuild:
+        return "nuclear_rebuild"
+    if force:
+        return "smart_reindex"
+    return "incremental"
 
-    result = orchestrator.start_reindex_background(mode, resume_state=resume_state)
 
+def _load_reindex_resume_state(orchestrator) -> Optional[Dict[str, Any]]:
+    """v4.8.0 Fase 4 — hydrate resume_state from the on-disk checkpoint.
+
+    Returns None (silent fresh reindex) if no valid checkpoint exists —
+    corrupt/missing checkpoints must not block a legitimate run.
+    """
+    cp = orchestrator._load_checkpoint()
+    if cp is None:
+        print(
+            "[INFO] resume=True but no valid checkpoint — starting fresh smart reindex"
+        )
+        return None
+    return {
+        "doc_ids": cp.get("indexed_doc_ids", []),
+        "chunks_processed": cp.get("chunks_processed", 0),
+    }
+
+
+def _format_reindex_response(mode: str, result: Dict[str, Any]) -> str:
+    """Serialize the orchestrator result — already-running vs started envelopes."""
     if result["status"] == "already_running":
         progress = result["progress"]
         return json.dumps(
@@ -3556,7 +3519,6 @@ def reindex_documents(
             indent=2,
             ensure_ascii=False,
         )
-
     return json.dumps(
         {
             "status": "started",
@@ -3566,6 +3528,41 @@ def reindex_documents(
         indent=2,
         ensure_ascii=False,
     )
+
+
+@mcp.tool()
+@rate_limited
+@instrument("reindex_documents")
+def reindex_documents(
+    force: bool = False,
+    full_rebuild: bool = False,
+    resume: bool = False,
+) -> str:
+    """Index or reindex all documents in the knowledge base (runs in background).
+
+    ``force`` — smart reindex (detect changed files + rebuild BM25). Use after
+    filesystem edits outside add_document/update_document.
+    ``full_rebuild`` — nuclear rebuild (delete + re-embed). Use only after
+    embedding-model change or index corruption. Mutually exclusive with resume.
+    ``resume`` — pick up an interrupted smart reindex from
+    ``data/reindex_checkpoint.json``. Falls back to a fresh smart run silently
+    if the checkpoint is missing/corrupt/drifted (v4.8.0 Fase 4).
+
+    Returns a JSON envelope. Poll ``get_reindex_status()`` until
+    ``reindex.active`` becomes false. Add/update/URL tools already auto-index —
+    use these flags only for the recovery/rebuild scenarios above.
+    """
+    orchestrator = get_orchestrator()
+
+    if resume and full_rebuild:
+        return _reindex_error_response(
+            "resume=True is only valid for smart reindex; use full_rebuild=False"
+        )
+
+    mode = _resolve_reindex_mode(force, full_rebuild, resume)
+    resume_state = _load_reindex_resume_state(orchestrator) if resume else None
+    result = orchestrator.start_reindex_background(mode, resume_state=resume_state)
+    return _format_reindex_response(mode, result)
 
 
 @mcp.tool()
