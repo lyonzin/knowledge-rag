@@ -33,7 +33,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -1330,6 +1330,22 @@ class KnowledgeOrchestrator:
 
         _progress_interval = max(1, stats["total_files"] // 10)
 
+        # v4.8.0 Fase 4: chunk-level progress + throughput sliding window
+        # (deque bounded to 100 samples; older-than-30s pruned each iteration).
+        chunks_processed = 0
+        _throughput_window: deque = deque(maxlen=100)
+        # Warm-start chunks_total estimate from previously indexed docs so the
+        # first status poll has a meaningful number instead of 0 forever.
+        # Refined per-doc below using the running average.
+        if self._indexed_docs:
+            _avg_chunks = sum(
+                info.get("chunks", 0) for info in self._indexed_docs.values()
+            ) / max(len(self._indexed_docs), 1)
+            chunks_total_estimate = int(_avg_chunks * stats["total_files"])
+        else:
+            chunks_total_estimate = 0
+        self._reindex_progress["chunks_total"] = chunks_total_estimate
+
         for idx, doc in enumerate(documents):
             try:
                 source_str = str(doc.source)
@@ -1371,6 +1387,11 @@ class KnowledgeOrchestrator:
                 stats["dedup_skipped"] += dedup_skipped
                 stats["categories"][doc.category] = stats["categories"].get(doc.category, 0) + 1
 
+                # v4.8.0 Fase 4: track chunk-level progress + throughput.
+                # Kept out of the except branch on purpose — chunks_added is
+                # meaningful only when _index_document returned successfully.
+                chunks_processed += chunks_added
+
                 try:
                     file_stat = doc.source.stat()
                     file_mtime = datetime.fromtimestamp(file_stat.st_mtime).isoformat()
@@ -1395,12 +1416,46 @@ class KnowledgeOrchestrator:
                 stats["errors"] += 1
                 print(f"[ERROR] Failed to index {doc.source}: {e}")
 
+            # v4.8.0 Fase 4: compute throughput + ETA per iteration.
+            # Sliding window: 100 samples (deque maxlen) OR last 30s (pruned).
+            _now = time.monotonic()
+            _throughput_window.append((_now, chunks_processed))
+            while _throughput_window and (_now - _throughput_window[0][0]) > 30:
+                _throughput_window.popleft()
+
+            throughput_cps = 0.0
+            if len(_throughput_window) >= 2:
+                oldest_ts, oldest_cnt = _throughput_window[0]
+                dt = _now - oldest_ts
+                if dt > 0:
+                    throughput_cps = (chunks_processed - oldest_cnt) / dt
+
+            # Refine chunks_total: rolling average from docs processed so far,
+            # extrapolated across the full corpus. First iteration uses the
+            # warm-start value computed before the loop.
+            if idx + 1 > 0 and chunks_processed > 0:
+                _running_avg = chunks_processed / (idx + 1)
+                chunks_total_estimate = max(
+                    chunks_processed,
+                    int(_running_avg * stats["total_files"]),
+                )
+
+            eta_seconds = 0
+            if throughput_cps > 0 and chunks_total_estimate > chunks_processed:
+                eta_seconds = int(
+                    (chunks_total_estimate - chunks_processed) / throughput_cps
+                )
+
             self._reindex_progress.update(
                 {
                     "processed": idx + 1,
                     "indexed": stats["indexed"],
                     "skipped": stats["skipped"],
                     "errors": stats["errors"],
+                    "chunks_processed": chunks_processed,
+                    "chunks_total": chunks_total_estimate,
+                    "throughput_cps": round(throughput_cps, 2),
+                    "eta_seconds": eta_seconds,
                 }
             )
 
