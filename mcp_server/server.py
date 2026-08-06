@@ -1427,6 +1427,17 @@ class KnowledgeOrchestrator:
         prevent memory spikes when embedding thousands of chunks at once.
         Falls back to the module constant ``_CHROMA_BATCH_SIZE`` when
         ``config`` does not expose ``batch_size`` (test isolation).
+
+        When ``config.parallel_workers > 1`` (YAML:
+        ``documents.parallel_workers``, default 1), the per-batch
+        ``self.collection.add(...)`` calls run inside a
+        ``ThreadPoolExecutor``. The ONNX embedding session itself is
+        single-threaded (internal lock), so the win comes from SQLite
+        writes overlapping with the NEXT batch's inference — NOT from
+        parallel inference. Windows users should monitor stability at
+        ``workers > 4`` (see config.example.yaml note). Default 1
+        preserves current single-threaded behavior byte-for-byte on all
+        platforms.
         """
         if not doc.chunks:
             return 0, 0
@@ -1464,12 +1475,38 @@ class KnowledgeOrchestrator:
 
         if unique_ids:
             bs = getattr(config, "batch_size", self._CHROMA_BATCH_SIZE)
-            for i in range(0, len(unique_ids), bs):
-                self.collection.add(
-                    ids=unique_ids[i : i + bs],
-                    documents=unique_docs[i : i + bs],
-                    metadatas=unique_metas[i : i + bs],
-                )
+            workers = getattr(config, "parallel_workers", 1)
+
+            if workers > 1 and len(unique_ids) > bs:
+                # Parallel path: ChromaDB SQLite writes overlap with the
+                # NEXT batch's ONNX inference (embedding kernel is serial
+                # inside ONNX). Only engage when we have >1 batch to run;
+                # a single-batch document has no parallelism to exploit.
+                from concurrent.futures import ThreadPoolExecutor
+
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    futures = [
+                        pool.submit(
+                            self.collection.add,
+                            ids=unique_ids[i : i + bs],
+                            documents=unique_docs[i : i + bs],
+                            metadatas=unique_metas[i : i + bs],
+                        )
+                        for i in range(0, len(unique_ids), bs)
+                    ]
+                    # .result() propagates the first exception; caller sees
+                    # it as an indexing failure (same shape as sequential).
+                    for f in futures:
+                        f.result()
+            else:
+                # Single-threaded path (default) — byte-identical to prior behavior.
+                for i in range(0, len(unique_ids), bs):
+                    self.collection.add(
+                        ids=unique_ids[i : i + bs],
+                        documents=unique_docs[i : i + bs],
+                        metadatas=unique_metas[i : i + bs],
+                    )
+
             self.bm25_index.add_documents(unique_ids, unique_docs)
 
         return len(unique_ids), dedup_skipped
