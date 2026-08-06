@@ -1414,13 +1414,19 @@ class KnowledgeOrchestrator:
 
         return stats
 
+    # v4.8.0 Fase 3: kept as fallback constant for tests that instantiate
+    # Orchestrator without a full Config (e.g. `object.__new__` mocks in
+    # tests/test_search.py). Production reads `config.batch_size` first.
     _CHROMA_BATCH_SIZE = 500
 
     def _index_document(self, doc: Document) -> Tuple[int, int]:
         """Index a single document's chunks into ChromaDB and BM25 with dedup.
 
-        Large documents are split into batches of _CHROMA_BATCH_SIZE to
+        Large documents are split into batches of ``config.batch_size``
+        (default 500, YAML: ``documents.batch_size``, range [1, 5000]) to
         prevent memory spikes when embedding thousands of chunks at once.
+        Falls back to the module constant ``_CHROMA_BATCH_SIZE`` when
+        ``config`` does not expose ``batch_size`` (test isolation).
         """
         if not doc.chunks:
             return 0, 0
@@ -1457,7 +1463,7 @@ class KnowledgeOrchestrator:
             )
 
         if unique_ids:
-            bs = self._CHROMA_BATCH_SIZE
+            bs = getattr(config, "batch_size", self._CHROMA_BATCH_SIZE)
             for i in range(0, len(unique_ids), bs):
                 self.collection.add(
                     ids=unique_ids[i : i + bs],
