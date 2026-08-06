@@ -85,6 +85,46 @@ mcp> get_reindex_status()
 }
 ```
 
+## Zero-downtime Rebuild (v4.8.0 Fase 5+)
+
+`nuclear_rebuild(swap=True)` (the new default) uses a staging collection to eliminate the RAG downtime window that the destructive rebuild (`swap=False`) creates.
+
+**Workflow:**
+
+1. **Cleanup** — sweep staging collections older than 24h (crash-orphaned by a previous rebuild).
+2. **Snapshot** — save `self.collection`, `self.bm25_index`, `self._bm25_initialized`, `self._indexed_docs`, `self._source_to_docid` so populate/validate/swap failures can rollback to exact pre-call state.
+3. **Create staging** — `{collection_name}__staging_{unix_ts}` (timestamp avoids collisions with concurrent or previously-crashed rebuilds; same embedding function as prod so the swap is dimensionally compatible).
+4. **Populate** — temporary orchestrator rebind: `self.collection` points at staging, `self.bm25_index` is a throwaway `BM25Index()` so production BM25 keeps serving queries throughout the rebuild window. Full `index_all(force=True)` path runs against staging with byte-identical logic (no code fork).
+5. **Validate** (three gates, all must pass):
+   - `staging.count() >= baseline_count * 0.9` (10% loss threshold accommodates a small number of parser-skipped docs; larger loss indicates regression → abort).
+   - 4 of 5 canonical queries (`readme`, `function`, `import`, `return`, `class`) return at least one hit each. Threshold is 4/5 (not 5/5) so a genuinely small corpus that legitimately lacks e.g. `return` still passes.
+   - No query() call raises (catches embedding dim mismatches and other backend corruption that a raw count check would miss).
+6. **Atomic swap** — two-step `Collection.modify(name=...)`:
+   - Step 1: prod → `{prod}__old_{ts}` (frees the production name).
+   - Step 2: staging → `{prod}` (staging assumes the production name).
+   - Step 3: delete `__old_{ts}` (non-fatal — cleanup helper ages it out later if it fails).
+   - Race window between step 1 and step 2 is a single Python statement (~microseconds); if step 2 raises, rollback renames prod back so the previous state is still queryable.
+7. **Post-swap BM25 rebuild** — reconnect `self.collection` to the new prod, clear + rebuild BM25 from the swapped-in ChromaDB contents, invalidate query cache.
+
+**Failure modes:**
+
+| Failure                  | Effect on production                                             |
+| ------------------------ | ---------------------------------------------------------------- |
+| Validate fails           | Staging kept for inspection; snapshot restored; prod untouched   |
+| Swap step 1 fails        | Nothing renamed; snapshot restored; prod untouched               |
+| Swap step 2 fails        | Rollback of step 1; snapshot restored; prod queryable at old name if inner rollback fails |
+| Python crash mid-populate | Staging orphaned; next Orchestrator boot cleans it (24h TTL)     |
+
+**Storage impact:**
+
+- **During rebuild:** ~2x storage temporarily (both prod and staging on disk).
+- **After swap:** back to 1x (`__old_{ts}` deleted at end of swap).
+- **Stale cleanup:** 24h TTL — a staging orphan sits at most one day before automatic reclaim.
+
+**Backwards compat:**
+
+`nuclear_rebuild(swap=False)` preserves the legacy destructive behavior byte-for-byte (delete prod collection first, wipe SQLite files, rebuild from scratch, ~4min–40h window of empty queries). Preserved for tests, forced-cleanup edge cases, and situations where the 2x storage overhead of staging is unacceptable.
+
 ## Escalation Rules of Thumb
 
 - Reindex started, hours later still `active: false`? Check `last_error` in status. If Python was killed, the collection may be half-populated — run `reindex_documents(resume=True)` if the operation was smart, or `reindex_documents(force=True, full_rebuild=True)` if it was nuclear.
