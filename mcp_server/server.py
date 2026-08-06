@@ -649,14 +649,14 @@ class CrossEncoderReranker:
 
 def _metadata_path_score(query: str, metadata: Dict[str, Any]) -> float:
     """Return a small generic score boost when query terms match path metadata."""
-    query_terms = re.findall(r"[a-z0-9][-a-z0-9]*[a-z0-9]|[a-z0-9]", query.lower())
+    query_terms = re.findall(r"[^\W_]+(?:-[^\W_]+)*", query.lower())
     if not query_terms:
         return 0.0
 
     source = str(metadata.get("source", ""))
     filename = str(metadata.get("filename", ""))
     path_text = f"{source} {filename}".lower()
-    path_tokens = set(re.findall(r"[a-z0-9][-a-z0-9]*[a-z0-9]|[a-z0-9]", path_text))
+    path_tokens = set(re.findall(r"[^\W_]+(?:-[^\W_]+)*", path_text))
     if not path_tokens:
         return 0.0
 
@@ -717,7 +717,7 @@ class BM25Index:
         without helping recall for typical use cases.
         """
         text_lower = text.lower()
-        composite_tokens = re.findall(r"[a-z0-9][-a-z0-9]*[a-z0-9]|[a-z0-9]", text_lower)
+        composite_tokens = re.findall(r"[^\W_]+(?:-[^\W_]+)*", text_lower)
         tokens: List[str] = []
         for tok in composite_tokens:
             tokens.append(tok)
