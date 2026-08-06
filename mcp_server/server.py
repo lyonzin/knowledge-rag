@@ -1797,10 +1797,8 @@ class KnowledgeOrchestrator:
 
         Runs opportunistically at Orchestrator init and before each swap
         rebuild. Idempotent — safe to call repeatedly. Stagings younger than
-        the TTL are preserved because they may belong to a rebuild in flight
-        (another process, another host mounting the same DB, or a very slow
-        embed backend). Structured logging reports counts so operators can
-        spot leaks.
+        the TTL are preserved because they may belong to a rebuild in flight.
+        Structured logging reports counts so operators can spot leaks.
         """
         prefix = f"{config.collection_name}__staging_"
         now = int(time.time())
@@ -1812,27 +1810,7 @@ class KnowledgeOrchestrator:
             return stats
 
         for coll in existing:
-            name = getattr(coll, "name", "")
-            if not name.startswith(prefix):
-                continue
-            stats["scanned"] += 1
-            suffix = name[len(prefix):]
-            try:
-                ts = int(suffix)
-            except ValueError:
-                # Non-conforming name — leave it alone rather than delete
-                # something we didn't create.
-                stats["preserved"] += 1
-                continue
-            if (now - ts) < self._STAGING_TTL_SECONDS:
-                stats["preserved"] += 1
-                continue
-            try:
-                self.chroma_client.delete_collection(name)
-                stats["removed"] += 1
-                print(f"[STAGING] Cleaned up stale staging: {name}")
-            except Exception as e:
-                print(f"[STAGING] Failed to delete {name} (non-fatal): {e}")
+            self._process_staging_candidate(coll, prefix, now, stats)
 
         if stats["removed"] > 0 or stats["scanned"] > 0:
             print(
@@ -1840,6 +1818,35 @@ class KnowledgeOrchestrator:
                 f"removed={stats['removed']} preserved={stats['preserved']}"
             )
         return stats
+
+    def _process_staging_candidate(
+        self, coll, prefix: str, now: int, stats: Dict[str, int]
+    ) -> None:
+        """Classify one candidate and delete if past TTL. Mutates ``stats``.
+
+        Non-matching names are silent skips. Names with the prefix but a
+        non-integer timestamp are preserved — we don't delete anything we
+        didn't create. TTL breach triggers a best-effort delete.
+        """
+        name = getattr(coll, "name", "")
+        if not name.startswith(prefix):
+            return
+        stats["scanned"] += 1
+        suffix = name[len(prefix):]
+        try:
+            ts = int(suffix)
+        except ValueError:
+            stats["preserved"] += 1
+            return
+        if (now - ts) < self._STAGING_TTL_SECONDS:
+            stats["preserved"] += 1
+            return
+        try:
+            self.chroma_client.delete_collection(name)
+            stats["removed"] += 1
+            print(f"[STAGING] Cleaned up stale staging: {name}")
+        except Exception as e:
+            print(f"[STAGING] Failed to delete {name} (non-fatal): {e}")
 
     def _create_staging_collection(self, ts: int):
         """Create a fresh staging collection with the current embedding fn.
