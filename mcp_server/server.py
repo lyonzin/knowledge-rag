@@ -1123,6 +1123,10 @@ class KnowledgeOrchestrator:
         self._metadata_file = config.data_dir / "index_metadata.json"
         self._indexed_docs: Dict[str, Dict] = self._load_metadata()
 
+        # v4.8.0 Fase 4: resume checkpoint file (written every 500 docs or 30s
+        # during smart_reindex; opt-in loaded via reindex_documents(resume=True)).
+        self._checkpoint_file = config.data_dir / "reindex_checkpoint.json"
+
         # Reverse lookup: resolved source path → doc_id (for O(1) adjacent chunk expansion)
         self._source_to_docid: Dict[str, str] = self._build_source_lookup()
 
@@ -2529,6 +2533,109 @@ class KnowledgeOrchestrator:
         self._metadata_file.parent.mkdir(parents=True, exist_ok=True)
         snapshot = dict(self._indexed_docs)
         self._metadata_file.write_text(json.dumps(snapshot, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    # =========================================================================
+    # v4.8.0 Fase 4: reindex checkpoint (resume support)
+    # =========================================================================
+
+    CHECKPOINT_VERSION = 1
+
+    def _compute_config_signature(self) -> str:
+        """SHA256 of embedding + chunking config.
+
+        Any drift invalidates the checkpoint — resuming with a different
+        embedding model or chunk size would produce a mixed collection
+        (partial old + partial new), which is worse than a full restart.
+        """
+        payload = (
+            f"{config.embedding_model}|{config.embedding_dim}|"
+            f"{config.chunk_size}|{config.chunk_overlap}"
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _write_checkpoint(
+        self,
+        operation: str,
+        indexed_doc_ids: List[str],
+        chunks_processed: int,
+        started_at: Optional[str] = None,
+    ) -> None:
+        """Atomically persist reindex progress to reindex_checkpoint.json.
+
+        Writes to a sibling `.tmp` then os.replace() — guarantees the
+        consumer sees either the old file or the new one, never a
+        partially-written file (Windows-safe: os.replace is atomic on
+        NTFS in-directory).
+        """
+        self._checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": self.CHECKPOINT_VERSION,
+            "started_at": started_at or datetime.now().isoformat(),
+            "checkpoint_at": datetime.now().isoformat(),
+            "operation": operation,
+            "indexed_doc_ids": list(indexed_doc_ids),
+            "chunks_processed": chunks_processed,
+            "config_signature": self._compute_config_signature(),
+        }
+        tmp_path = self._checkpoint_file.with_suffix(
+            self._checkpoint_file.suffix + ".tmp"
+        )
+        tmp_path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        os.replace(tmp_path, self._checkpoint_file)
+        # Reflect in progress dict for status polling.
+        self._reindex_progress["checkpoint_saved_at"] = payload["checkpoint_at"]
+
+    def _load_checkpoint(self) -> Optional[Dict[str, Any]]:
+        """Load and validate a checkpoint from disk.
+
+        Returns None (with a WARN) when the file is missing, corrupt,
+        from a future schema version, or when the config signature
+        differs from the current config — any of those means the
+        checkpoint cannot be trusted and the caller should restart from
+        scratch.
+        """
+        if not self._checkpoint_file.exists():
+            return None
+
+        try:
+            data = json.loads(self._checkpoint_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"[WARN] Corrupt checkpoint file, ignoring: {e}")
+            return None
+
+        if not isinstance(data, dict):
+            print("[WARN] Checkpoint payload is not a dict, ignoring")
+            return None
+
+        version = data.get("version")
+        if version != self.CHECKPOINT_VERSION:
+            print(
+                f"[WARN] Checkpoint version {version} != current "
+                f"{self.CHECKPOINT_VERSION}, ignoring"
+            )
+            return None
+
+        stored_sig = data.get("config_signature")
+        current_sig = self._compute_config_signature()
+        if stored_sig != current_sig:
+            print(
+                "[WARN] Checkpoint config_signature mismatch "
+                "(embedding model or chunking changed) — starting fresh"
+            )
+            return None
+
+        return data
+
+    def _clear_checkpoint(self) -> None:
+        """Remove the checkpoint file (call after successful reindex)."""
+        try:
+            if self._checkpoint_file.exists():
+                self._checkpoint_file.unlink()
+        except OSError as e:
+            print(f"[WARN] Failed to remove checkpoint file: {e}")
 
     def _build_source_lookup(self) -> Dict[str, str]:
         """Build reverse lookup from resolved source path to doc_id."""
