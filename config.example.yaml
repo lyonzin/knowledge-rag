@@ -119,19 +119,52 @@ models:
   # Embedding model — converts text into vectors for semantic search.
   # Runs locally via ONNX (no API key needed, no data leaves your machine).
   #
-  # Options (from fastest to most accurate):
-  #   "BAAI/bge-small-en-v1.5"    → 384 dims, ~33MB, fast    (default)
-  #   "BAAI/bge-base-en-v1.5"     → 768 dims, ~130MB, balanced
-  #   "BAAI/bge-large-en-v1.5"    → 1024 dims, ~335MB, most accurate
+  # Two ways to configure (v4.8.0+):
   #
-  # Multilingual alternatives:
-  #   "BAAI/bge-small-zh-v1.5"         → Chinese
-  #   "intfloat/multilingual-e5-small"  → 100+ languages
+  # ---- Option A: named profile (recommended) ----
+  # ``profile`` is a shorthand that fills model + dimensions + prefixes
+  # from a single named preset. Available profiles:
   #
-  # WARNING: Changing this after indexing requires a full reindex.
+  #   compact       — BAAI/bge-small-en-v1.5 (384D, ~33MB, English-only, fastest — default)
+  #   quality       — BAAI/bge-large-en-v1.5 (1024D, ~335MB, English-only, ~2x slower)
+  #   multilingual  — intfloat/multilingual-e5-large (1024D, 100+ languages
+  #                   incl. PT-BR / Spanish / Cyrillic / Arabic / CJK; ships
+  #                   the required "query: " / "passage: " prefixes)
+  #   custom        — opt out: respect the explicit model/dimensions/prefix
+  #                   fields below (default when ``profile`` is omitted)
+  #
+  # When ``profile`` is anything other than "custom", the resolver IGNORES
+  # any explicit ``model`` declared below and emits a
+  # ``[WARN] profile takes precedence`` log on startup.
+  #
+  # ---- Option B: explicit model (custom profile) ----
+  # Legacy shape — set ``profile: "custom"`` (or omit ``profile``) and
+  # declare the model + dimensions directly. Additional community models:
+  #   "BAAI/bge-base-en-v1.5"          → 768 dims, ~130MB, balanced
+  #   "BAAI/bge-small-zh-v1.5"         → 384 dims, Chinese-only
+  #   "intfloat/multilingual-e5-small" → 384 dims, 100+ languages (smaller e5)
+  #
+  # WARNING: changing profile / model / dimensions / prefix after indexing
+  # REQUIRES a full reindex (``reindex_documents(force=True)``). Existing
+  # chunks were embedded with the previous configuration and their vectors
+  # are not comparable to the new ones.
   embedding:
+    # Uncomment to switch to a named profile (see Option A above).
+    # profile: "multilingual"
+
+    # Explicit model / dimensions — respected only when profile is
+    # "custom" (default). Ignored with a WARN under any other profile.
     model: "BAAI/bge-small-en-v1.5"
     dimensions: 384
+
+    # Query / passage prefixes — prepended to text BEFORE embedding.
+    # Required by some model families (intfloat/e5, thenlper/gte, ...);
+    # leave empty for bge / mxbai. When a profile ships prefixes, this
+    # override wins ONLY if the key is present here (empty string "" IS
+    # an explicit override).
+    query_prefix: ""
+    passage_prefix: ""
+
     # GPU acceleration for ONNX embeddings (5-10x faster indexing).
     # Requires: pip install knowledge-rag[gpu]  (installs onnxruntime-gpu)
     # Falls back to CPU automatically if CUDA is unavailable.
