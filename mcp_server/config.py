@@ -746,7 +746,19 @@ class Config:
 
     def __post_init__(self):
         """Validate config values and ensure directories exist."""
-        # Bounds validation
+        self._validate_chunking()
+        self._validate_indexing()
+        self._resolve_embedding_profile()
+        self._validate_embedding_types()
+        self._normalize_gpu_mode()
+        self._validate_server_transport()
+        self._validate_supported_formats()
+        self._validate_lists_and_maps()
+        self._warn_missing_documents_dir()
+        self._ensure_directories()
+
+    def _validate_chunking(self) -> None:
+        """Bound-check chunk_size / chunk_overlap / default_results / max_results."""
         if not isinstance(self.chunk_size, int) or self.chunk_size < 100:
             print(f"[WARN] chunk_size={self.chunk_size} invalid, using 1000")
             self.chunk_size = 1000
@@ -755,7 +767,8 @@ class Config:
             self.chunk_overlap = 200
         if self.chunk_overlap >= self.chunk_size:
             print(
-                f"[WARN] chunk_overlap ({self.chunk_overlap}) >= chunk_size ({self.chunk_size}), using {self.chunk_size // 5}"
+                f"[WARN] chunk_overlap ({self.chunk_overlap}) >= "
+                f"chunk_size ({self.chunk_size}), using {self.chunk_size // 5}"
             )
             self.chunk_overlap = self.chunk_size // 5
         if not isinstance(self.default_results, int) or self.default_results < 1:
@@ -763,8 +776,8 @@ class Config:
         if not isinstance(self.max_results, int) or self.max_results < 1:
             self.max_results = 100
 
-        # ---- Indexing config (v4.8.0 Fase 3) ----
-        # batch_size: chunks per ChromaDB batch add. Range [1, 5000].
+    def _validate_indexing(self) -> None:
+        """v4.8.0 Fase 3 — clamp batch_size [1,5000] and parallel_workers [1,16]."""
         if not isinstance(self.batch_size, int) or self.batch_size < 1:
             print(f"[WARN] batch_size={self.batch_size!r} invalid, clamping to 1")
             self.batch_size = 1
@@ -772,12 +785,15 @@ class Config:
             print(f"[WARN] batch_size={self.batch_size} exceeds 5000, clamping to 5000")
             self.batch_size = 5000
 
-        # parallel_workers: opt-in threading around ChromaDB batch adds. Range [1, 16].
         if not isinstance(self.parallel_workers, int) or self.parallel_workers < 1:
-            print(f"[WARN] parallel_workers={self.parallel_workers!r} invalid, clamping to 1")
+            print(
+                f"[WARN] parallel_workers={self.parallel_workers!r} invalid, clamping to 1"
+            )
             self.parallel_workers = 1
         elif self.parallel_workers > 16:
-            print(f"[WARN] parallel_workers={self.parallel_workers} exceeds 16, clamping to 16")
+            print(
+                f"[WARN] parallel_workers={self.parallel_workers} exceeds 16, clamping to 16"
+            )
             self.parallel_workers = 16
         elif self.parallel_workers > 4:
             import platform
@@ -787,34 +803,50 @@ class Config:
                     f"[WARN] parallel_workers={self.parallel_workers} on Windows may hit "
                     f"ONNX threading issues or SQLite lock contention; monitor stability"
                 )
-        # ---- Embedding profile resolution (v4.8.0) ----
-        # Runs BEFORE embedding_dim validation so a valid profile can set a
-        # non-384 dim without triggering the fallback below.
+
+    def _resolve_embedding_profile(self) -> None:
+        """v4.8.0 — resolve profile into model/dim/prefixes (runs BEFORE dim validation).
+
+        A valid profile may set a non-384 dim without triggering the fallback
+        in ``_validate_embedding_types``.
+        """
         if not isinstance(self.embedding_profile, str):
-            print(f"[WARN] embedding_profile={self.embedding_profile!r} invalid, using 'custom'")
+            print(
+                f"[WARN] embedding_profile={self.embedding_profile!r} invalid, using 'custom'"
+            )
             self.embedding_profile = "custom"
 
-        if self.embedding_profile != "custom":
-            profile = _EMBEDDING_PROFILES.get(self.embedding_profile)
-            if not profile:
-                print(f"[WARN] Invalid embedding profile '{self.embedding_profile}'; falling back to 'custom'")
-                self.embedding_profile = "custom"
-            else:
-                if _yaml_embedding_has("model"):
-                    print(
-                        f"[WARN] Both models.embedding.model and profile="
-                        f"'{self.embedding_profile}' set; profile takes precedence"
-                    )
-                self.embedding_model = profile["model"]
-                self.embedding_dim = profile["dimensions"]
-                # Prefixes: profile fills only if user did NOT declare them
-                # explicitly (empty string "" IS a valid explicit override).
-                if not _yaml_embedding_has("query_prefix"):
-                    self.query_prefix = profile["query_prefix"]
-                if not _yaml_embedding_has("passage_prefix"):
-                    self.passage_prefix = profile["passage_prefix"]
+        if self.embedding_profile == "custom":
+            return
 
-        # Prefix type validation (must run AFTER profile resolution)
+        profile = _EMBEDDING_PROFILES.get(self.embedding_profile)
+        if not profile:
+            print(
+                f"[WARN] Invalid embedding profile '{self.embedding_profile}'; "
+                f"falling back to 'custom'"
+            )
+            self.embedding_profile = "custom"
+            return
+
+        self._apply_embedding_profile(profile)
+
+    def _apply_embedding_profile(self, profile: dict) -> None:
+        """Copy profile model/dim into config; prefixes only if user did not declare them."""
+        if _yaml_embedding_has("model"):
+            print(
+                f"[WARN] Both models.embedding.model and profile="
+                f"'{self.embedding_profile}' set; profile takes precedence"
+            )
+        self.embedding_model = profile["model"]
+        self.embedding_dim = profile["dimensions"]
+        # Empty string is a valid explicit user override, hence _yaml_*_has.
+        if not _yaml_embedding_has("query_prefix"):
+            self.query_prefix = profile["query_prefix"]
+        if not _yaml_embedding_has("passage_prefix"):
+            self.passage_prefix = profile["passage_prefix"]
+
+    def _validate_embedding_types(self) -> None:
+        """Type-check prefixes + embedding_dim + reranker settings (runs AFTER profile)."""
         if not isinstance(self.query_prefix, str):
             print(f"[WARN] query_prefix={self.query_prefix!r} invalid, using ''")
             self.query_prefix = ""
@@ -825,13 +857,23 @@ class Config:
         if not isinstance(self.embedding_dim, int) or self.embedding_dim < 1:
             self.embedding_dim = 384
         if not isinstance(self.reranker_enabled, bool):
-            print(f"[WARN] reranker_enabled={self.reranker_enabled!r} invalid, using True")
+            print(
+                f"[WARN] reranker_enabled={self.reranker_enabled!r} invalid, using True"
+            )
             self.reranker_enabled = True
-        if not isinstance(self.reranker_top_k_multiplier, int) or self.reranker_top_k_multiplier < 1:
+        if (
+            not isinstance(self.reranker_top_k_multiplier, int)
+            or self.reranker_top_k_multiplier < 1
+        ):
             self.reranker_top_k_multiplier = 3
 
-        # GPU mode normalization (v4.8.0+): bool → str, str → validated string.
-        # Accepts legacy YAML `gpu: true/false` (bool) and new `gpu: "auto"|"true"|"false"`.
+    def _normalize_gpu_mode(self) -> None:
+        """v4.8.0+ — bool → str, str → validated one of {'auto','true','false'}.
+
+        Accepts legacy YAML ``gpu: true/false`` (bool) and new
+        ``gpu: "auto"|"true"|"false"``. Also derives ``gpu_acceleration``
+        legacy alias: True when CUDA may be attempted.
+        """
         raw_gpu = self.gpu_mode
         if isinstance(raw_gpu, bool):
             self.gpu_mode = "true" if raw_gpu else "false"
@@ -848,58 +890,57 @@ class Config:
                 f"falling back to 'auto'"
             )
             self.gpu_mode = "auto"
-        # Derive legacy alias: True when CUDA may be attempted (mode "true" or "auto").
         self.gpu_acceleration = self.gpu_mode in ("true", "auto")
 
-        # Server transport validation
+    def _validate_server_transport(self) -> None:
+        """Bound-check transport / server_port / metrics_port / rate limits."""
         if self.transport not in ("stdio", "sse", "streamable-http"):
             print(f"[WARN] server.transport={self.transport!r} invalid, using 'stdio'")
             self.transport = "stdio"
         if not isinstance(self.server_port, int) or not (1 <= self.server_port <= 65535):
             self.server_port = 8179
-        if not isinstance(self.metrics_port, int) or not (1 <= self.metrics_port <= 65535):
+        if not isinstance(self.metrics_port, int) or not (
+            1 <= self.metrics_port <= 65535
+        ):
             self.metrics_port = 9179
         if not isinstance(self.rate_limit_rpm, int) or self.rate_limit_rpm < 1:
             self.rate_limit_rpm = 60
         if not isinstance(self.rate_limit_burst, int) or self.rate_limit_burst < 0:
             self.rate_limit_burst = 10
 
-        if not isinstance(self.supported_formats, list) or not self.supported_formats:
-            print("[WARN] supported_formats is empty or invalid, using defaults")
-            self.supported_formats = [
-                ".md",
-                ".txt",
-                ".pdf",
-                ".py",
-                ".c",
-                ".h",
-                ".cpp",
-                ".js",
-                ".jsx",
-                ".ts",
-                ".tsx",
-                ".json",
-                ".xml",
-                ".docx",
-                ".xlsx",
-                ".pptx",
-                ".csv",
-                ".ipynb",
-            ]
+    def _validate_supported_formats(self) -> None:
+        """Ensure supported_formats is a non-empty list; fall back to canonical defaults."""
+        if isinstance(self.supported_formats, list) and self.supported_formats:
+            return
+        print("[WARN] supported_formats is empty or invalid, using defaults")
+        self.supported_formats = [
+            ".md", ".txt", ".pdf", ".py", ".c", ".h", ".cpp",
+            ".js", ".jsx", ".ts", ".tsx", ".json", ".xml",
+            ".docx", ".xlsx", ".pptx", ".csv", ".ipynb",
+        ]
 
-        # Validate exclude_patterns is a list of strings
+    def _validate_lists_and_maps(self) -> None:
+        """Type-check exclude_patterns + keyword_routes + query_expansions in order."""
+        self._validate_exclude_and_routes()
+        self._validate_query_expansions()
+
+    def _validate_exclude_and_routes(self) -> None:
+        """Ensure exclude_patterns is a str-only list and keyword_routes values are lists."""
         if not isinstance(self.exclude_patterns, list):
             print(f"[WARN] exclude_patterns={self.exclude_patterns!r} invalid, using []")
             self.exclude_patterns = []
         else:
-            self.exclude_patterns = [p for p in self.exclude_patterns if isinstance(p, str)]
+            self.exclude_patterns = [
+                p for p in self.exclude_patterns if isinstance(p, str)
+            ]
 
-        # Validate keyword_routes values are lists (not strings)
         for cat, keywords in list(self.keyword_routes.items()):
             if not isinstance(keywords, list):
                 print(f"[WARN] keyword_routes.{cat} is not a list, removing")
                 del self.keyword_routes[cat]
 
+    def _validate_query_expansions(self) -> None:
+        """Type-check + merge query_expansions with query_expansion_groups."""
         if not isinstance(self.query_expansions, dict):
             print("[WARN] query_expansions is invalid, using defaults")
             self.query_expansions = dict(_DEFAULT_QUERY_EXPANSIONS)
@@ -913,9 +954,12 @@ class Config:
             print("[WARN] query_expansion_groups is invalid, ignoring")
             self.query_expansion_groups = []
 
-        self.query_expansions = _merge_query_expansion_sources(self.query_expansions, self.query_expansion_groups)
+        self.query_expansions = _merge_query_expansion_sources(
+            self.query_expansions, self.query_expansion_groups
+        )
 
-        # Warn when documents_dir was explicitly set but does not exist
+    def _warn_missing_documents_dir(self) -> None:
+        """Emit a hint if documents_dir was set explicitly and does not exist."""
         raw_docs = _get("paths", "documents_dir", None)
         if raw_docs is not None and not self.documents_dir.exists():
             print(
@@ -924,7 +968,8 @@ class Config:
                 f"Verify the path in config.yaml if reindex returns 0 files."
             )
 
-        # Ensure directories exist
+    def _ensure_directories(self) -> None:
+        """Create data/chroma/documents/models directories if missing."""
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.chroma_dir.mkdir(parents=True, exist_ok=True)
         self.documents_dir.mkdir(parents=True, exist_ok=True)
