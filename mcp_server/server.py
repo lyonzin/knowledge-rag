@@ -2103,20 +2103,14 @@ class KnowledgeOrchestrator:
     def _rebuild_via_swap(self) -> Dict[str, Any]:
         """Zero-downtime rebuild: staging collection + validate + atomic swap.
 
-        Production collection keeps serving queries until step 4 (swap)
-        completes. If any earlier step fails, the staging is deleted and
-        production state is restored via snapshot so callers see exactly
-        the same pre-call state.
+        Production collection keeps serving queries until swap completes.
+        If any earlier step fails, staging is deleted and production state
+        is restored via snapshot so callers see exactly the pre-call state.
         """
         print("[NUCLEAR] Starting zero-downtime rebuild (swap=True)...")
         start_time = time.time()
-
         prod_name = config.collection_name
-        baseline_count = 0
-        try:
-            baseline_count = self.collection.count()
-        except Exception as e:
-            print(f"[SWAP] Could not read baseline count (assume 0): {e}")
+        baseline_count = self._read_baseline_count()
 
         self._cleanup_stale_staging_collections()
 
@@ -2126,39 +2120,20 @@ class KnowledgeOrchestrator:
 
         try:
             stats = self._populate_staging(staging)
-
-            validation = self._validate_staging(staging, baseline_count)
-            if not validation["ok"]:
-                print(
-                    f"[SWAP] Validation FAILED — count={validation['count']} "
-                    f"min={validation['min_expected']} "
-                    f"canonical_hits={validation['canonical_hits']}/5 "
-                    f"err={validation['query_error']}"
-                )
-                raise RuntimeError(
-                    f"Staging validation failed: {validation}"
-                )
-
-            print(
-                f"[SWAP] Validation OK — count={validation['count']} "
-                f"canonical_hits={validation['canonical_hits']}/5"
-            )
-
+            self._enforce_staging_validation(staging, baseline_count)
             self._swap_collections_atomic(staging, prod_name, ts)
             self._rebuild_bm25_post_swap(prod_name)
             self._save_metadata()
-
         except Exception:
-            # Rollback: restore prod state + delete staging orphan.
-            self._rollback_staging_state(_saved)
-            try:
-                self.chroma_client.delete_collection(
-                    f"{prod_name}__staging_{ts}"
-                )
-            except Exception:
-                pass  # cleanup helper will age it out
+            self._rollback_and_cleanup_staging(prod_name, ts, _saved)
             raise
 
+        return self._finalize_swap_stats(stats, start_time)
+
+    def _finalize_swap_stats(
+        self, stats: Dict[str, Any], start_time: float
+    ) -> Dict[str, Any]:
+        """Stamp elapsed_seconds and emit the completion banner."""
         elapsed = time.time() - start_time
         stats["elapsed_seconds"] = round(elapsed, 2)
         print(
@@ -2166,6 +2141,40 @@ class KnowledgeOrchestrator:
             f"({stats['indexed']} docs, {stats['chunks_added']} chunks)"
         )
         return stats
+
+    def _read_baseline_count(self) -> int:
+        """Best-effort baseline read for the size gate. Zero on read failure."""
+        try:
+            return self.collection.count()
+        except Exception as e:
+            print(f"[SWAP] Could not read baseline count (assume 0): {e}")
+            return 0
+
+    def _enforce_staging_validation(self, staging, baseline_count: int) -> None:
+        """Run gates + log the outcome. Raises RuntimeError on failure."""
+        validation = self._validate_staging(staging, baseline_count)
+        if not validation["ok"]:
+            print(
+                f"[SWAP] Validation FAILED — count={validation['count']} "
+                f"min={validation['min_expected']} "
+                f"canonical_hits={validation['canonical_hits']}/5 "
+                f"err={validation['query_error']}"
+            )
+            raise RuntimeError(f"Staging validation failed: {validation}")
+        print(
+            f"[SWAP] Validation OK — count={validation['count']} "
+            f"canonical_hits={validation['canonical_hits']}/5"
+        )
+
+    def _rollback_and_cleanup_staging(
+        self, prod_name: str, ts: int, saved
+    ) -> None:
+        """Restore pre-staging prod state + delete the staging orphan."""
+        self._rollback_staging_state(saved)
+        try:
+            self.chroma_client.delete_collection(f"{prod_name}__staging_{ts}")
+        except Exception:
+            pass  # cleanup helper will age it out
 
     def nuclear_rebuild(self, swap: bool = True) -> Dict[str, Any]:
         """Rebuild the collection from scratch.
