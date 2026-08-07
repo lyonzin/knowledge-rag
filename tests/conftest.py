@@ -330,8 +330,7 @@ def fts5_tmp_index(tmp_path):
     with index._fts5_lock:  # noqa: SLF001 — test helper for direct seeding
         for chunk_id, content, filename, category in seeds:
             index._conn.execute(  # noqa: SLF001
-                "INSERT INTO fts5_documents (chunk_id, content, filename, category) "
-                "VALUES (?, ?, ?, ?)",
+                "INSERT INTO fts5_documents (chunk_id, content, filename, category) VALUES (?, ?, ?, ?)",
                 (chunk_id, content, filename, category),
             )
         index._conn.commit()  # noqa: SLF001

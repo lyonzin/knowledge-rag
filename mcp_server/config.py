@@ -658,12 +658,8 @@ class Config:
     # dispatch inside KnowledgeOrchestrator; Fase 1 only exposes the fields.
     # Defaults chosen per ADR-002 (regex router heuristics) and ADR-003
     # (rerank OFF by default in fast-path).
-    fts5_enabled: bool = field(
-        default_factory=lambda: _get_nested("search", "lexical_fast_path", "enabled", False)
-    )
-    fts5_min_hits: int = field(
-        default_factory=lambda: _get_nested("search", "lexical_fast_path", "min_hits", 3)
-    )
+    fts5_enabled: bool = field(default_factory=lambda: _get_nested("search", "lexical_fast_path", "enabled", False))
+    fts5_min_hits: int = field(default_factory=lambda: _get_nested("search", "lexical_fast_path", "min_hits", 3))
     fts5_rerank_enabled: bool = field(
         default_factory=lambda: _get_nested("search", "lexical_fast_path", "rerank_enabled", False)
     )
@@ -1033,19 +1029,14 @@ class Config:
                 _re.compile(pattern)
             except _re.error as exc:
                 raise _re.error(
-                    f"config.yaml: search.lexical_fast_path.patterns[{idx}] "
-                    f"({pattern!r}) is not a valid regex: {exc}"
+                    f"config.yaml: search.lexical_fast_path.patterns[{idx}] ({pattern!r}) is not a valid regex: {exc}"
                 )
             if pattern in (r".+", r".*", r"^.+$", r"^.*$"):
                 print(
-                    f"[WARN] fts5_patterns[{idx}]={pattern!r} is overly broad "
-                    f"and will classify most queries as lexical"
+                    f"[WARN] fts5_patterns[{idx}]={pattern!r} is overly broad and will classify most queries as lexical"
                 )
         if not self.fts5_patterns:
-            print(
-                "[WARN] fts5_patterns is empty — the FTS5 router will never "
-                "classify a query as lexical"
-            )
+            print("[WARN] fts5_patterns is empty — the FTS5 router will never classify a query as lexical")
         elif len(self.fts5_patterns) > 20:
             print(
                 f"[WARN] fts5_patterns has {len(self.fts5_patterns)} entries; "
