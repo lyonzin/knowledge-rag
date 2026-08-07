@@ -287,14 +287,10 @@ CLIENTS: list[Client] = [
         "cline",
         "Cline (VS Code extension)",
         lambda: (
-            vscode_user_dir()
-            / "globalStorage"
-            / "saoudrizwan.claude-dev"
-            / "settings"
-            / "cline_mcp_settings.json"
-        )
-        if vscode_user_dir()
-        else None,
+            (vscode_user_dir() / "globalStorage" / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json")
+            if vscode_user_dir()
+            else None
+        ),
         "mcpServers",
         _spec_mcp_servers,
         "cline.bot",
@@ -336,9 +332,7 @@ def _read_json(path: Path) -> dict[str, Any] | None:
 def _write_json_atomic(path: Path, data: dict[str, Any]) -> None:
     """Write JSON without BOM, atomically (write to tmp then replace)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        "w", encoding="utf-8", delete=False, dir=path.parent, suffix=".tmp"
-    ) as f:
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=path.parent, suffix=".tmp") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
         f.write("\n")
         tmp_name = f.name
@@ -457,11 +451,15 @@ def find_python() -> Path:
             continue
 
         if ver in SUPPORTED_PY:
-            resolved = subprocess.check_output(
-                cmd + ["-c", "import sys; print(sys.executable)"],
-                stderr=subprocess.STDOUT,
-                timeout=10,
-            ).decode().strip()
+            resolved = (
+                subprocess.check_output(
+                    cmd + ["-c", "import sys; print(sys.executable)"],
+                    stderr=subprocess.STDOUT,
+                    timeout=10,
+                )
+                .decode()
+                .strip()
+            )
             ok(f"Python {ver} found: {resolved}")
             return Path(resolved)
 
@@ -630,11 +628,7 @@ def register_all_clients(
 
         # A client "counts as installed" if its config file OR parent dir exists,
         # OR if --for named it explicitly (user opt-in overrides detection).
-        detected = (
-            config_path.exists()
-            or config_path.parent.exists()
-            or (only is not None and client.key in only)
-        )
+        detected = config_path.exists() or config_path.parent.exists() or (only is not None and client.key in only)
         if not detected:
             skip(f"{client.display} — not detected ({client.detect_hint})")
             continue

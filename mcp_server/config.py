@@ -786,14 +786,10 @@ class Config:
             self.batch_size = 5000
 
         if not isinstance(self.parallel_workers, int) or self.parallel_workers < 1:
-            print(
-                f"[WARN] parallel_workers={self.parallel_workers!r} invalid, clamping to 1"
-            )
+            print(f"[WARN] parallel_workers={self.parallel_workers!r} invalid, clamping to 1")
             self.parallel_workers = 1
         elif self.parallel_workers > 16:
-            print(
-                f"[WARN] parallel_workers={self.parallel_workers} exceeds 16, clamping to 16"
-            )
+            print(f"[WARN] parallel_workers={self.parallel_workers} exceeds 16, clamping to 16")
             self.parallel_workers = 16
         elif self.parallel_workers > 4:
             import platform
@@ -811,9 +807,7 @@ class Config:
         in ``_validate_embedding_types``.
         """
         if not isinstance(self.embedding_profile, str):
-            print(
-                f"[WARN] embedding_profile={self.embedding_profile!r} invalid, using 'custom'"
-            )
+            print(f"[WARN] embedding_profile={self.embedding_profile!r} invalid, using 'custom'")
             self.embedding_profile = "custom"
 
         if self.embedding_profile == "custom":
@@ -821,10 +815,7 @@ class Config:
 
         profile = _EMBEDDING_PROFILES.get(self.embedding_profile)
         if not profile:
-            print(
-                f"[WARN] Invalid embedding profile '{self.embedding_profile}'; "
-                f"falling back to 'custom'"
-            )
+            print(f"[WARN] Invalid embedding profile '{self.embedding_profile}'; falling back to 'custom'")
             self.embedding_profile = "custom"
             return
 
@@ -857,14 +848,9 @@ class Config:
         if not isinstance(self.embedding_dim, int) or self.embedding_dim < 1:
             self.embedding_dim = 384
         if not isinstance(self.reranker_enabled, bool):
-            print(
-                f"[WARN] reranker_enabled={self.reranker_enabled!r} invalid, using True"
-            )
+            print(f"[WARN] reranker_enabled={self.reranker_enabled!r} invalid, using True")
             self.reranker_enabled = True
-        if (
-            not isinstance(self.reranker_top_k_multiplier, int)
-            or self.reranker_top_k_multiplier < 1
-        ):
+        if not isinstance(self.reranker_top_k_multiplier, int) or self.reranker_top_k_multiplier < 1:
             self.reranker_top_k_multiplier = 3
 
     def _normalize_gpu_mode(self) -> None:
@@ -885,10 +871,7 @@ class Config:
                 print(f"[WARN] Invalid gpu value {raw_gpu!r}; falling back to 'auto'")
                 self.gpu_mode = "auto"
         else:
-            print(
-                f"[WARN] Invalid gpu value {raw_gpu!r} (type {type(raw_gpu).__name__}); "
-                f"falling back to 'auto'"
-            )
+            print(f"[WARN] Invalid gpu value {raw_gpu!r} (type {type(raw_gpu).__name__}); falling back to 'auto'")
             self.gpu_mode = "auto"
         self.gpu_acceleration = self.gpu_mode in ("true", "auto")
 
@@ -899,9 +882,7 @@ class Config:
             self.transport = "stdio"
         if not isinstance(self.server_port, int) or not (1 <= self.server_port <= 65535):
             self.server_port = 8179
-        if not isinstance(self.metrics_port, int) or not (
-            1 <= self.metrics_port <= 65535
-        ):
+        if not isinstance(self.metrics_port, int) or not (1 <= self.metrics_port <= 65535):
             self.metrics_port = 9179
         if not isinstance(self.rate_limit_rpm, int) or self.rate_limit_rpm < 1:
             self.rate_limit_rpm = 60
@@ -914,9 +895,24 @@ class Config:
             return
         print("[WARN] supported_formats is empty or invalid, using defaults")
         self.supported_formats = [
-            ".md", ".txt", ".pdf", ".py", ".c", ".h", ".cpp",
-            ".js", ".jsx", ".ts", ".tsx", ".json", ".xml",
-            ".docx", ".xlsx", ".pptx", ".csv", ".ipynb",
+            ".md",
+            ".txt",
+            ".pdf",
+            ".py",
+            ".c",
+            ".h",
+            ".cpp",
+            ".js",
+            ".jsx",
+            ".ts",
+            ".tsx",
+            ".json",
+            ".xml",
+            ".docx",
+            ".xlsx",
+            ".pptx",
+            ".csv",
+            ".ipynb",
         ]
 
     def _validate_lists_and_maps(self) -> None:
@@ -930,9 +926,7 @@ class Config:
             print(f"[WARN] exclude_patterns={self.exclude_patterns!r} invalid, using []")
             self.exclude_patterns = []
         else:
-            self.exclude_patterns = [
-                p for p in self.exclude_patterns if isinstance(p, str)
-            ]
+            self.exclude_patterns = [p for p in self.exclude_patterns if isinstance(p, str)]
 
         for cat, keywords in list(self.keyword_routes.items()):
             if not isinstance(keywords, list):
@@ -954,9 +948,7 @@ class Config:
             print("[WARN] query_expansion_groups is invalid, ignoring")
             self.query_expansion_groups = []
 
-        self.query_expansions = _merge_query_expansion_sources(
-            self.query_expansions, self.query_expansion_groups
-        )
+        self.query_expansions = _merge_query_expansion_sources(self.query_expansions, self.query_expansion_groups)
 
     def _warn_missing_documents_dir(self) -> None:
         """Emit a hint if documents_dir was set explicitly and does not exist."""

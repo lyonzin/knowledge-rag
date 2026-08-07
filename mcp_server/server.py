@@ -446,11 +446,7 @@ class FastEmbedEmbeddings:
         if status.device_name:
             print(f"  Device:     {status.device_name}")
         if status.vram_mb > 0:
-            vram_display = (
-                f"{status.vram_mb / 1024:.1f} GB"
-                if status.vram_mb >= 1024
-                else f"{status.vram_mb} MB"
-            )
+            vram_display = f"{status.vram_mb / 1024:.1f} GB" if status.vram_mb >= 1024 else f"{status.vram_mb} MB"
             print(f"  VRAM:       {vram_display}")
         print(f"  Mode:       {mode}")
 
@@ -471,10 +467,7 @@ class FastEmbedEmbeddings:
                 "              https://aiinfra.pkgs.visualstudio.com/PublicPackages"
                 "/_packaging/onnxruntime-cuda-12/pypi/simple/"
             )
-            print(
-                "              plus nvidia-cudnn-cu12, nvidia-cublas-cu12, "
-                "nvidia-cuda-runtime-cu12"
-            )
+            print("              plus nvidia-cudnn-cu12, nvidia-cublas-cu12, nvidia-cuda-runtime-cu12")
 
     def __init__(self, model: str = None):
         self.model_name = model or config.embedding_model
@@ -545,9 +538,7 @@ class FastEmbedEmbeddings:
         gpu_status = self.verify_gpu_readiness()
         if gpu_status.available:
             try:
-                self._load_with_providers(
-                    ["CUDAExecutionProvider", "CPUExecutionProvider"], label="GPU auto"
-                )
+                self._load_with_providers(["CUDAExecutionProvider", "CPUExecutionProvider"], label="GPU auto")
                 self._print_gpu_banner(status=gpu_status, mode="auto-cuda")
                 return
             except (ValueError, RuntimeError) as e:
@@ -561,18 +552,13 @@ class FastEmbedEmbeddings:
         gpu_status = self.verify_gpu_readiness()
         if gpu_status.available:
             try:
-                self._load_with_providers(
-                    ["CUDAExecutionProvider", "CPUExecutionProvider"], label="GPU forced"
-                )
+                self._load_with_providers(["CUDAExecutionProvider", "CPUExecutionProvider"], label="GPU forced")
                 self._print_gpu_banner(status=gpu_status, mode="forced-cuda")
                 return
             except (ValueError, RuntimeError) as e:
                 print(f"[WARN] gpu: true but CUDA load failed ({e}); loading on CPU...")
         else:
-            print(
-                f"[WARN] gpu: true but GPU not ready ({gpu_status.fallback_reason}); "
-                "loading on CPU"
-            )
+            print(f"[WARN] gpu: true but GPU not ready ({gpu_status.fallback_reason}); loading on CPU")
         self._load_with_providers(["CPUExecutionProvider"], label="CPU fallback")
         self._print_gpu_banner(status=gpu_status, mode="forced-cuda-fallback")
 
@@ -1349,9 +1335,7 @@ class KnowledgeOrchestrator:
         _progress_interval = max(1, stats["total_files"] // 10)
 
         for idx, doc in enumerate(documents):
-            self._process_one_document(
-                idx, doc, force, path_to_docid, stats, tracking
-            )
+            self._process_one_document(idx, doc, force, path_to_docid, stats, tracking)
             self._update_progress_metrics(idx, stats, tracking)
             self._maybe_persist_checkpoint(idx, tracking)
             self._maybe_print_progress(idx, stats, _progress_interval)
@@ -1412,17 +1396,11 @@ class KnowledgeOrchestrator:
                 self._source_to_docid.pop(str(Path(src).resolve()), None)
             del self._indexed_docs[doc_id]
 
-    def _init_reindex_tracking(
-        self, resume_state: Optional[Dict[str, Any]], stats: Dict[str, Any]
-    ) -> Dict[str, Any]:
+    def _init_reindex_tracking(self, resume_state: Optional[Dict[str, Any]], stats: Dict[str, Any]) -> Dict[str, Any]:
         """Build the mutable per-run tracking dict (checkpoint + throughput + resume)."""
         op_mode = self._reindex_progress.get("operation")
-        resume_ids: set = (
-            set(resume_state.get("doc_ids", [])) if resume_state else set()
-        )
-        chunks_processed = (
-            int(resume_state.get("chunks_processed", 0)) if resume_state else 0
-        )
+        resume_ids: set = set(resume_state.get("doc_ids", [])) if resume_state else set()
+        chunks_processed = int(resume_state.get("chunks_processed", 0)) if resume_state else 0
         chunks_total_estimate = self._seed_chunks_total_estimate(stats)
 
         return {
@@ -1438,9 +1416,9 @@ class KnowledgeOrchestrator:
     def _seed_chunks_total_estimate(self, stats: Dict[str, Any]) -> int:
         """Warm-start estimate so the first status poll is meaningful. Refined per-doc later."""
         if self._indexed_docs:
-            avg_chunks = sum(
-                info.get("chunks", 0) for info in self._indexed_docs.values()
-            ) / max(len(self._indexed_docs), 1)
+            avg_chunks = sum(info.get("chunks", 0) for info in self._indexed_docs.values()) / max(
+                len(self._indexed_docs), 1
+            )
             chunks_total_estimate = int(avg_chunks * stats["total_files"])
         else:
             chunks_total_estimate = 0
@@ -1462,16 +1440,12 @@ class KnowledgeOrchestrator:
         caught and logged; the caller keeps iterating.
         """
         try:
-            existing_doc_id = self._resolve_existing_or_skip(
-                doc, force, path_to_docid, stats, tracking
-            )
+            existing_doc_id = self._resolve_existing_or_skip(doc, force, path_to_docid, stats, tracking)
             if existing_doc_id is _SKIP_DOC:
                 return
 
             chunks_added, dedup_skipped = self._index_document(doc)
-            self._commit_indexed_doc(
-                doc, chunks_added, dedup_skipped, existing_doc_id, force, stats, tracking
-            )
+            self._commit_indexed_doc(doc, chunks_added, dedup_skipped, existing_doc_id, force, stats, tracking)
         except Exception as e:
             stats["errors"] += 1
             print(f"[ERROR] Failed to index {doc.source}: {e}")
@@ -1521,9 +1495,7 @@ class KnowledgeOrchestrator:
             stats["indexed"] += 1
         stats["chunks_added"] += chunks_added
         stats["dedup_skipped"] += dedup_skipped
-        stats["categories"][doc.category] = (
-            stats["categories"].get(doc.category, 0) + 1
-        )
+        stats["categories"][doc.category] = stats["categories"].get(doc.category, 0) + 1
         # Only bump chunks_processed on success — chunks_added is
         # meaningful only when _index_document returned normally.
         tracking["chunks_processed"] += chunks_added
@@ -1575,20 +1547,14 @@ class KnowledgeOrchestrator:
         }
         self._source_to_docid[str(doc.source.resolve())] = doc.id
 
-    def _update_progress_metrics(
-        self, idx: int, stats: Dict[str, Any], tracking: Dict[str, Any]
-    ) -> None:
+    def _update_progress_metrics(self, idx: int, stats: Dict[str, Any], tracking: Dict[str, Any]) -> None:
         """Compute throughput/ETA/refined total, publish to _reindex_progress."""
         chunks_processed = tracking["chunks_processed"]
         throughput_cps = self._sample_throughput(tracking, chunks_processed)
-        chunks_total_estimate = self._refine_chunks_total(
-            idx, chunks_processed, stats, tracking
-        )
+        chunks_total_estimate = self._refine_chunks_total(idx, chunks_processed, stats, tracking)
         eta_seconds = 0
         if throughput_cps > 0 and chunks_total_estimate > chunks_processed:
-            eta_seconds = int(
-                (chunks_total_estimate - chunks_processed) / throughput_cps
-            )
+            eta_seconds = int((chunks_total_estimate - chunks_processed) / throughput_cps)
         self._reindex_progress.update(
             {
                 "processed": idx + 1,
@@ -1603,9 +1569,7 @@ class KnowledgeOrchestrator:
         )
 
     @staticmethod
-    def _sample_throughput(
-        tracking: Dict[str, Any], chunks_processed: int
-    ) -> float:
+    def _sample_throughput(tracking: Dict[str, Any], chunks_processed: int) -> float:
         """Append current sample, prune >30s samples, return chunks/sec estimate.
 
         Sliding window: 100 samples (deque maxlen) OR last 30s (pruned).
@@ -1642,9 +1606,7 @@ class KnowledgeOrchestrator:
             tracking["chunks_total_estimate"] = chunks_total_estimate
         return chunks_total_estimate
 
-    def _maybe_persist_checkpoint(
-        self, idx: int, tracking: Dict[str, Any]
-    ) -> None:
+    def _maybe_persist_checkpoint(self, idx: int, tracking: Dict[str, Any]) -> None:
         """Write checkpoint every 500 docs OR 30s, whichever comes first.
 
         500 covers fast runs (small/cached docs), 30s covers slow runs (huge
@@ -1671,9 +1633,7 @@ class KnowledgeOrchestrator:
             # Non-fatal — a lost checkpoint just gives less to resume from.
             print(f"[WARN] Checkpoint write failed (non-fatal): {e}")
 
-    def _maybe_print_progress(
-        self, idx: int, stats: Dict[str, Any], progress_interval: int
-    ) -> None:
+    def _maybe_print_progress(self, idx: int, stats: Dict[str, Any], progress_interval: int) -> None:
         """Emit periodic progress line for corpora larger than 100 docs."""
         if stats["total_files"] > 100 and (idx + 1) % progress_interval == 0:
             pct = int((idx + 1) / stats["total_files"] * 100)
@@ -1682,9 +1642,7 @@ class KnowledgeOrchestrator:
                 f"— {stats['indexed']} new, {stats['skipped']} skipped"
             )
 
-    def _finalize_reindex(
-        self, stats: Dict[str, Any], tracking: Dict[str, Any]
-    ) -> Dict[str, Any]:
+    def _finalize_reindex(self, stats: Dict[str, Any], tracking: Dict[str, Any]) -> Dict[str, Any]:
         """Flush metadata, clear checkpoint (if applicable), invalidate query cache."""
         self._save_metadata()
 
@@ -1835,9 +1793,7 @@ class KnowledgeOrchestrator:
         return {"status": "started", "operation": mode}
 
     @staticmethod
-    def _fresh_reindex_progress(
-        mode: str, resume_state: Optional[Dict[str, Any]]
-    ) -> Dict[str, Any]:
+    def _fresh_reindex_progress(mode: str, resume_state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         """Build the initial _reindex_progress dict for a new background run."""
         return {
             "active": True,
@@ -1849,11 +1805,7 @@ class KnowledgeOrchestrator:
             "errors": 0,
             "started_at": datetime.now().isoformat(),
             # v4.8.0 Fase 4: granular progress + resume checkpoint
-            "chunks_processed": (
-                int(resume_state.get("chunks_processed", 0))
-                if resume_state
-                else 0
-            ),
+            "chunks_processed": (int(resume_state.get("chunks_processed", 0)) if resume_state else 0),
             "chunks_total": 0,
             "throughput_cps": 0.0,
             "eta_seconds": 0,
@@ -1968,9 +1920,7 @@ class KnowledgeOrchestrator:
             )
         return stats
 
-    def _process_staging_candidate(
-        self, coll, prefix: str, now: int, stats: Dict[str, int]
-    ) -> None:
+    def _process_staging_candidate(self, coll, prefix: str, now: int, stats: Dict[str, int]) -> None:
         """Classify one candidate and delete if past TTL. Mutates ``stats``.
 
         Non-matching names are silent skips. Names with the prefix but a
@@ -1981,7 +1931,7 @@ class KnowledgeOrchestrator:
         if not name.startswith(prefix):
             return
         stats["scanned"] += 1
-        suffix = name[len(prefix):]
+        suffix = name[len(prefix) :]
         try:
             ts = int(suffix)
         except ValueError:
@@ -2094,9 +2044,7 @@ class KnowledgeOrchestrator:
         result["ok"] = True
         return result
 
-    def _validate_staging_count(
-        self, staging, baseline_count: int, result: Dict[str, Any]
-    ) -> bool:
+    def _validate_staging_count(self, staging, baseline_count: int, result: Dict[str, Any]) -> bool:
         """Gate 1 — count within 10% of baseline. Baseline 0 skips size check."""
         try:
             result["count"] = staging.count()
@@ -2108,9 +2056,7 @@ class KnowledgeOrchestrator:
         result["min_expected"] = min_expected
         return result["count"] >= min_expected
 
-    def _validate_staging_canonical_queries(
-        self, staging, baseline_count: int, result: Dict[str, Any]
-    ) -> bool:
+    def _validate_staging_canonical_queries(self, staging, baseline_count: int, result: Dict[str, Any]) -> bool:
         """Gates 2 + 3 — canonical query sanity + backend integrity.
 
         Runs each canonical query; any raise fails gate 3 (backend corruption).
@@ -2158,9 +2104,7 @@ class KnowledgeOrchestrator:
         except Exception as e:
             print(f"[SWAP] Failed to delete post-swap old prod (non-fatal): {e}")
 
-    def _promote_staging_or_rollback(
-        self, staging, prod, prod_name: str, old_name: str
-    ) -> None:
+    def _promote_staging_or_rollback(self, staging, prod, prod_name: str, old_name: str) -> None:
         """Rename staging to production; on failure, restore previous prod name.
 
         If both the rename AND the rollback fail, prod is left at ``old_name``
@@ -2279,9 +2223,7 @@ class KnowledgeOrchestrator:
 
         return self._finalize_swap_stats(stats, start_time)
 
-    def _finalize_swap_stats(
-        self, stats: Dict[str, Any], start_time: float
-    ) -> Dict[str, Any]:
+    def _finalize_swap_stats(self, stats: Dict[str, Any], start_time: float) -> Dict[str, Any]:
         """Stamp elapsed_seconds and emit the completion banner."""
         elapsed = time.time() - start_time
         stats["elapsed_seconds"] = round(elapsed, 2)
@@ -2310,14 +2252,9 @@ class KnowledgeOrchestrator:
                 f"err={validation['query_error']}"
             )
             raise RuntimeError(f"Staging validation failed: {validation}")
-        print(
-            f"[SWAP] Validation OK — count={validation['count']} "
-            f"canonical_hits={validation['canonical_hits']}/5"
-        )
+        print(f"[SWAP] Validation OK — count={validation['count']} canonical_hits={validation['canonical_hits']}/5")
 
-    def _rollback_and_cleanup_staging(
-        self, prod_name: str, ts: int, saved
-    ) -> None:
+    def _rollback_and_cleanup_staging(self, prod_name: str, ts: int, saved) -> None:
         """Restore pre-staging prod state + delete the staging orphan."""
         self._rollback_staging_state(saved)
         try:
@@ -3198,10 +3135,7 @@ class KnowledgeOrchestrator:
         embedding model or chunk size would produce a mixed collection
         (partial old + partial new), which is worse than a full restart.
         """
-        payload = (
-            f"{config.embedding_model}|{config.embedding_dim}|"
-            f"{config.chunk_size}|{config.chunk_overlap}"
-        )
+        payload = f"{config.embedding_model}|{config.embedding_dim}|{config.chunk_size}|{config.chunk_overlap}"
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def _write_checkpoint(
@@ -3228,9 +3162,7 @@ class KnowledgeOrchestrator:
             "chunks_processed": chunks_processed,
             "config_signature": self._compute_config_signature(),
         }
-        tmp_path = self._checkpoint_file.with_suffix(
-            self._checkpoint_file.suffix + ".tmp"
-        )
+        tmp_path = self._checkpoint_file.with_suffix(self._checkpoint_file.suffix + ".tmp")
         tmp_path.write_text(
             json.dumps(payload, indent=2, ensure_ascii=False),
             encoding="utf-8",
@@ -3263,19 +3195,13 @@ class KnowledgeOrchestrator:
 
         version = data.get("version")
         if version != self.CHECKPOINT_VERSION:
-            print(
-                f"[WARN] Checkpoint version {version} != current "
-                f"{self.CHECKPOINT_VERSION}, ignoring"
-            )
+            print(f"[WARN] Checkpoint version {version} != current {self.CHECKPOINT_VERSION}, ignoring")
             return None
 
         stored_sig = data.get("config_signature")
         current_sig = self._compute_config_signature()
         if stored_sig != current_sig:
-            print(
-                "[WARN] Checkpoint config_signature mismatch "
-                "(embedding model or chunking changed) — starting fresh"
-            )
+            print("[WARN] Checkpoint config_signature mismatch (embedding model or chunking changed) — starting fresh")
             return None
 
         return data
@@ -3498,9 +3424,7 @@ def _load_reindex_resume_state(orchestrator) -> Optional[Dict[str, Any]]:
     """
     cp = orchestrator._load_checkpoint()
     if cp is None:
-        print(
-            "[INFO] resume=True but no valid checkpoint — starting fresh smart reindex"
-        )
+        print("[INFO] resume=True but no valid checkpoint — starting fresh smart reindex")
         return None
     return {
         "doc_ids": cp.get("indexed_doc_ids", []),
@@ -3558,9 +3482,7 @@ def reindex_documents(
     orchestrator = get_orchestrator()
 
     if resume and full_rebuild:
-        return _reindex_error_response(
-            "resume=True is only valid for smart reindex; use full_rebuild=False"
-        )
+        return _reindex_error_response("resume=True is only valid for smart reindex; use full_rebuild=False")
 
     mode = _resolve_reindex_mode(force, full_rebuild, resume)
     resume_state = _load_reindex_resume_state(orchestrator) if resume else None

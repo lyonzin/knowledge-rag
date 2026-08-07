@@ -26,11 +26,8 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from mcp_server import server
 from mcp_server.server import KnowledgeOrchestrator
-
 
 # =============================================================================
 # HELPERS
@@ -282,6 +279,7 @@ class TestCheckpointLoad:
 class TestResumeKwarg:
     def test_signature_includes_resume(self):
         import inspect
+
         sig = inspect.signature(server.reindex_documents)
         assert "resume" in sig.parameters
         # Default must be False so existing callers are unaffected.
@@ -441,6 +439,7 @@ class TestStatusReporting:
         # Test the invariant directly by simulating the update path from the
         # loop with a single sample. Two samples would flip it non-zero.
         from collections import deque
+
         window: deque = deque(maxlen=100)
         now = time.monotonic()
         window.append((now, 10))

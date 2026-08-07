@@ -25,7 +25,6 @@ from mcp_server.config import Config
 from mcp_server.ingestion import Chunk, Document
 from mcp_server.server import KnowledgeOrchestrator
 
-
 # =============================================================================
 # CONFIG — batch_size
 # =============================================================================

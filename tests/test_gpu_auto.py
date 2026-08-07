@@ -12,7 +12,6 @@ from unittest.mock import MagicMock, patch
 from mcp_server.config import Config
 from mcp_server.server import FastEmbedEmbeddings, GPUStatus
 
-
 # ============================================================================
 # Config normalization — gpu_mode accepts legacy bool AND new string values
 # ============================================================================
@@ -116,9 +115,7 @@ class TestLoadModelRouting:
 
     @patch("mcp_server.server.FastEmbedEmbeddings.verify_gpu_readiness")
     @patch("mcp_server.server.TextEmbedding")
-    def test_gpu_mode_auto_falls_back_to_cpu_when_probe_fails(
-        self, mock_te, mock_verify, capsys
-    ):
+    def test_gpu_mode_auto_falls_back_to_cpu_when_probe_fails(self, mock_te, mock_verify, capsys):
         # Arrange — probe reports GPU unavailable
         mock_verify.return_value = GPUStatus(
             available=False,
@@ -142,9 +139,7 @@ class TestLoadModelRouting:
 
     @patch("mcp_server.server.FastEmbedEmbeddings.verify_gpu_readiness")
     @patch("mcp_server.server.TextEmbedding")
-    def test_gpu_mode_true_forces_cuda_and_falls_back_when_probe_fails(
-        self, mock_te, mock_verify, capsys
-    ):
+    def test_gpu_mode_true_forces_cuda_and_falls_back_when_probe_fails(self, mock_te, mock_verify, capsys):
         # Arrange — forced CUDA but GPU is not ready
         mock_verify.return_value = GPUStatus(
             available=False,
@@ -166,9 +161,7 @@ class TestLoadModelRouting:
 
     @patch("mcp_server.server.FastEmbedEmbeddings.verify_gpu_readiness")
     @patch("mcp_server.server.TextEmbedding")
-    def test_gpu_mode_true_falls_back_when_cuda_load_raises(
-        self, mock_te, mock_verify, capsys
-    ):
+    def test_gpu_mode_true_falls_back_when_cuda_load_raises(self, mock_te, mock_verify, capsys):
         # Arrange — probe passes but TextEmbedding raises on CUDA providers,
         # then succeeds on CPU providers (call_args_list keeps both calls)
         mock_verify.return_value = GPUStatus(

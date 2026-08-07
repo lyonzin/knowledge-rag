@@ -23,16 +23,14 @@ Marked ``bench_reindex`` so users can select via ``-k bench_reindex``.
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from typing import List
 from unittest.mock import MagicMock
 
 import pytest
 
-from pathlib import Path
-
 from mcp_server.ingestion import Chunk, Document
 from mcp_server.server import KnowledgeOrchestrator
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

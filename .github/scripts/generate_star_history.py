@@ -13,11 +13,12 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-import requests
 import matplotlib
+import requests
+
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
 
 REPO = os.environ.get("STAR_HISTORY_REPO", "lyonzin/knowledge-rag")
 TOKEN = os.environ.get("GH_TOKEN")
@@ -27,12 +28,14 @@ if not TOKEN:
     sys.exit("ERROR: GH_TOKEN env var is required")
 
 session = requests.Session()
-session.headers.update({
-    "Authorization": f"Bearer {TOKEN}",
-    "Accept": "application/vnd.github.v3.star+json",
-    "X-GitHub-Api-Version": "2022-11-28",
-    "User-Agent": f"star-history-action/{REPO}",
-})
+session.headers.update(
+    {
+        "Authorization": f"Bearer {TOKEN}",
+        "Accept": "application/vnd.github.v3.star+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": f"star-history-action/{REPO}",
+    }
+)
 
 
 def fetch_stargazers():
@@ -75,8 +78,7 @@ def main():
     ax.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=4, maxticks=8))
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
     fig.autofmt_xdate()
-    fig.text(0.99, 0.01, f"Updated {now}", ha="right", va="bottom",
-             fontsize=8, color="#888")
+    fig.text(0.99, 0.01, f"Updated {now}", ha="right", va="bottom", fontsize=8, color="#888")
     plt.tight_layout()
 
     OUT.parent.mkdir(parents=True, exist_ok=True)

@@ -20,13 +20,12 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Any, Dict, List
+from typing import Dict, List
 from unittest.mock import MagicMock
 
 import pytest
 
 from mcp_server.server import BM25Index, KnowledgeOrchestrator
-
 
 # =============================================================================
 # HELPERS
@@ -108,6 +107,7 @@ def _fake_client(collections: List[MagicMock]):
     # internal map — otherwise get_collection('prod') would still see the
     # old handle at the old name after swap.
     for c in collections:
+
         def _make_mod(coll):
             def _mod(name=None, metadata=None, configuration=None):
                 nonlocal _by_name
@@ -115,7 +115,9 @@ def _fake_client(collections: List[MagicMock]):
                     _by_name.pop(coll.name, None)
                     coll.name = name
                     _by_name[name] = coll
+
             return _mod
+
         c.modify.side_effect = _make_mod(c)
 
     client.list_collections.side_effect = _list
