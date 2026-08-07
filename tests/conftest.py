@@ -282,6 +282,80 @@ export class ApiController {
 
 
 @pytest.fixture
+def fts5_tmp_index(tmp_path):
+    """FTS5 index backed by a temp SQLite file, populated with 20 sample chunks.
+
+    Uses a real file (not ``:memory:``) so the WAL PRAGMA applied by
+    ``Fts5LexicalIndex._connect_and_configure`` exercises the same code path
+    as production. Yields the live ``Fts5LexicalIndex`` and closes it on
+    teardown.
+    """
+    from mcp_server.fts5_index import Fts5LexicalIndex, Fts5MigrationState
+
+    db_path = tmp_path / "fts5_index.db"
+    state_path = tmp_path / "fts5_migration.state"
+    Fts5MigrationState(state_path).write(
+        {
+            "status": "complete",
+            "docs_total": 20,
+            "docs_indexed": 20,
+            "started_at": "2026-08-07T12:00:00Z",
+            "completed_at": "2026-08-07T12:00:01Z",
+            "error": None,
+        }
+    )
+    index = Fts5LexicalIndex(db_path=db_path, state_path=state_path)
+    seeds = [
+        ("chunk_001", "Report references MDR-AD002 remediation", "mdr.md", "security"),
+        ("chunk_002", "Advisory covers CVE-2021-4034 Pwnkit", "pwnkit.md", "security"),
+        ("chunk_003", "CVE-2021-4034 exploitation walkthrough", "cve.md", "security"),
+        ("chunk_004", "CVE-2021-4034 patch analysis", "patch.md", "security"),
+        ("chunk_005", "Additional CVE-2021-4034 IoCs", "iocs.md", "security"),
+        ("chunk_006", "Baseline for CVE-2021-4034 telemetry", "telemetry.md", "security"),
+        ("chunk_007", "MITRE T1078.001 default accounts", "mitre.md", "attck"),
+        ("chunk_008", "CWE-79 cross-site scripting notes", "cwe.md", "security"),
+        ("chunk_009", "H1-P4-XXX-1234 disclosure summary", "h1.md", "bugbounty"),
+        ("chunk_010", "pass-the-hash lateral movement playbook", "pth.md", "adversary"),
+        ("chunk_011", "context.py loads YAML configuration", "context.md", "development"),
+        ("chunk_012", "Only MDR-AD003 mentioned here", "mdr3.md", "security"),
+        ("chunk_013", "OAuth token refresh workflow", "oauth.md", "development"),
+        ("chunk_014", "Prose about incident response process", "ir.md", "general"),
+        ("chunk_015", "General ransomware hardening guide", "ransom.md", "security"),
+        ("chunk_016", "How does OAuth token refresh work", "oauth2.md", "development"),
+        ("chunk_017", "Zero trust architecture overview", "zt.md", "security"),
+        ("chunk_018", "Blue team detection engineering", "bt.md", "security"),
+        ("chunk_019", "Threat hunting hypothesis backlog", "hunt.md", "security"),
+        ("chunk_020", "Retro on MDR incident closure", "retro.md", "security"),
+    ]
+    with index._fts5_lock:  # noqa: SLF001 — test helper for direct seeding
+        for chunk_id, content, filename, category in seeds:
+            index._conn.execute(  # noqa: SLF001
+                "INSERT INTO fts5_documents (chunk_id, content, filename, category) "
+                "VALUES (?, ?, ?, ?)",
+                (chunk_id, content, filename, category),
+            )
+        index._conn.commit()  # noqa: SLF001
+    try:
+        yield index
+    finally:
+        index.close()
+
+
+@pytest.fixture
+def migration_state_tmp(tmp_path):
+    """Empty ``Fts5MigrationState`` anchored at ``tmp_path/fts5_migration.state``."""
+    from mcp_server.fts5_index import Fts5MigrationState
+
+    return Fts5MigrationState(tmp_path / "fts5_migration.state")
+
+
+@pytest.fixture
+def sample_lexical_queries():
+    """Canonical lexical query set used across FTS5/router tests."""
+    return ["MDR-AD002", "CVE-2021-4034", "T1078.001", "CWE-79", "H1-P4-XXX-1234"]
+
+
+@pytest.fixture
 def sample_xml(tmp_path):
     """Create a sample XML file."""
     content = """<?xml version="1.0" encoding="UTF-8"?>

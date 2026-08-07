@@ -136,6 +136,33 @@ def _get(section: str, key: str, default):
     return val
 
 
+def _get_nested(section: str, subsection: str, key: str, default):
+    """Get a nested value from ``section.subsection.key`` in the YAML config.
+
+    Reproduces the ``_get`` pattern one level deeper so ``fts5_*`` fields
+    (backed by ``search.lexical_fast_path.*``) share the same fallback and
+    type-mismatch semantics as the existing ``models.reranker.*`` block.
+    """
+    outer = _yaml.get(section, {})
+    if not isinstance(outer, dict):
+        return default
+    inner = outer.get(subsection, {})
+    if not isinstance(inner, dict):
+        return default
+    val = inner.get(key)
+    if val is None:
+        return default
+    if default is None:
+        return val
+    if not isinstance(val, type(default)):
+        print(
+            f"[WARN] config.yaml: {section}.{subsection}.{key} has wrong type "
+            f"(expected {type(default).__name__}, got {type(val).__name__}), using default"
+        )
+        return default
+    return val
+
+
 def _get_top(key: str, default):
     """Get a top-level value from YAML, falling back to default if missing or None."""
     val = _yaml.get(key)
@@ -626,6 +653,33 @@ class Config:
         )
     )
 
+    # FTS5 Lexical Fast-Path (v4.8.2+, opt-in via search.lexical_fast_path.*).
+    # Default OFF preserves v4.8.1 behavior byte-for-byte. Task 03 wires the
+    # dispatch inside KnowledgeOrchestrator; Fase 1 only exposes the fields.
+    # Defaults chosen per ADR-002 (regex router heuristics) and ADR-003
+    # (rerank OFF by default in fast-path).
+    fts5_enabled: bool = field(
+        default_factory=lambda: _get_nested("search", "lexical_fast_path", "enabled", False)
+    )
+    fts5_min_hits: int = field(
+        default_factory=lambda: _get_nested("search", "lexical_fast_path", "min_hits", 3)
+    )
+    fts5_rerank_enabled: bool = field(
+        default_factory=lambda: _get_nested("search", "lexical_fast_path", "rerank_enabled", False)
+    )
+    fts5_patterns: List[str] = field(
+        default_factory=lambda: _get_nested(
+            "search",
+            "lexical_fast_path",
+            "patterns",
+            [
+                r"[A-Z]{2,}-\d+",
+                r"CVE-\d{4}-\d+",
+                r"^[a-f0-9]{32,64}$",
+            ],
+        )
+    )
+
     # ChromaDB
     collection_name: str = field(default_factory=lambda: _get("search", "collection_name", "knowledge_base"))
 
@@ -754,6 +808,7 @@ class Config:
         self._validate_server_transport()
         self._validate_supported_formats()
         self._validate_lists_and_maps()
+        self._validate_fts5()
         self._warn_missing_documents_dir()
         self._ensure_directories()
 
@@ -949,6 +1004,53 @@ class Config:
             self.query_expansion_groups = []
 
         self.query_expansions = _merge_query_expansion_sources(self.query_expansions, self.query_expansion_groups)
+
+    def _validate_fts5(self) -> None:
+        """Type-check and sanity-check the FTS5 fast-path config fields.
+
+        Invalid regex patterns raise ``re.error`` here (fail-fast on startup).
+        Overly broad or high-count pattern lists log warnings.
+        """
+        import re as _re
+
+        if not isinstance(self.fts5_enabled, bool):
+            print(f"[WARN] fts5_enabled={self.fts5_enabled!r} invalid, using False")
+            self.fts5_enabled = False
+        if not isinstance(self.fts5_rerank_enabled, bool):
+            print(f"[WARN] fts5_rerank_enabled={self.fts5_rerank_enabled!r} invalid, using False")
+            self.fts5_rerank_enabled = False
+        if not isinstance(self.fts5_min_hits, int) or self.fts5_min_hits < 1:
+            print(f"[WARN] fts5_min_hits={self.fts5_min_hits!r} invalid, using 3")
+            self.fts5_min_hits = 3
+        if not isinstance(self.fts5_patterns, list):
+            print(f"[WARN] fts5_patterns={self.fts5_patterns!r} invalid, using []")
+            self.fts5_patterns = []
+        else:
+            self.fts5_patterns = [p for p in self.fts5_patterns if isinstance(p, str)]
+
+        for idx, pattern in enumerate(self.fts5_patterns):
+            try:
+                _re.compile(pattern)
+            except _re.error as exc:
+                raise _re.error(
+                    f"config.yaml: search.lexical_fast_path.patterns[{idx}] "
+                    f"({pattern!r}) is not a valid regex: {exc}"
+                )
+            if pattern in (r".+", r".*", r"^.+$", r"^.*$"):
+                print(
+                    f"[WARN] fts5_patterns[{idx}]={pattern!r} is overly broad "
+                    f"and will classify most queries as lexical"
+                )
+        if not self.fts5_patterns:
+            print(
+                "[WARN] fts5_patterns is empty — the FTS5 router will never "
+                "classify a query as lexical"
+            )
+        elif len(self.fts5_patterns) > 20:
+            print(
+                f"[WARN] fts5_patterns has {len(self.fts5_patterns)} entries; "
+                f"high pattern count may impact router performance (recommended <=5)"
+            )
 
     def _warn_missing_documents_dir(self) -> None:
         """Emit a hint if documents_dir was set explicitly and does not exist."""

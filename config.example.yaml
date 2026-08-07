@@ -257,6 +257,39 @@ search:
   # Example: "work_kb", "research_kb", "personal_kb"
   collection_name: "knowledge_base"
 
+  # -----------------------------------------------------------------------
+  # FTS5 Lexical Fast-Path (v4.8.2+, opt-in)
+  # -----------------------------------------------------------------------
+  # Dedicated SQLite FTS5 index (data/fts5_index.db) optimized for exact
+  # identifier queries (CVE-IDs, MITRE ATT&CK codes, VRT/CWE codes, file
+  # hashes, error strings). See ADR-001 (storage), ADR-005 (tokenizer),
+  # ADR-004 (v4.9.0 default flip gated on bench).
+  #
+  # Fase 1 ships the module only — Task 03 wires dispatch. Enabling now has
+  # no runtime effect until Task 03 lands. Uncomment to opt in later.
+  #
+  # lexical_fast_path:
+  #   # Master toggle. Default false preserves v4.8.1 behavior byte-for-byte.
+  #   enabled: false
+  #
+  #   # Minimum FTS5 hits required to skip the hybrid fallback. Queries
+  #   # returning fewer than this many results fall back to hybrid so recall
+  #   # is not sacrificed for a nearly-empty lexical result set.
+  #   min_hits: 3
+  #
+  #   # Run the cross-encoder reranker on FTS5 results. Default false (ADR-003)
+  #   # because identifier queries rank correctly on bm25() alone and the
+  #   # reranker adds ~40-80ms per query without measurable recall gain.
+  #   rerank_enabled: false
+  #
+  #   # First-match-wins regex patterns that classify a query as "lexical".
+  #   # Ordering matters (PRD OQ-2). Default set targets bug bounty + SOC/DFIR
+  #   # identifier vocabulary. Add custom project-specific codes below.
+  #   patterns:
+  #     - "[A-Z]{2,}-\\d+"        # H1-P4-XXX, MDR-AD002, CWE-79, MS17-010
+  #     - "CVE-\\d{4}-\\d+"       # canonical CVE identifiers
+  #     - "^[a-f0-9]{32,64}$"     # md5/sha1/sha256 file hashes
+
 
 # ============================================================================
 # CATEGORIES

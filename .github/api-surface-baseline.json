@@ -13,6 +13,165 @@
       },
       "functions": {}
     },
+    "mcp_server.fts5_index": {
+      "classes": {
+        "Fts5CorruptError": {
+          "bases": [
+            "RuntimeError"
+          ],
+          "methods": {}
+        },
+        "Fts5LexicalIndex": {
+          "bases": [],
+          "methods": {
+            "close": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "db_path": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "is_ready": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "search": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "query"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "top_k"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "state": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            }
+          }
+        },
+        "Fts5MigrationError": {
+          "bases": [
+            "RuntimeError"
+          ],
+          "methods": {}
+        },
+        "Fts5MigrationState": {
+          "bases": [],
+          "methods": {
+            "is_complete": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "path": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "read": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "write": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "payload"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            }
+          }
+        },
+        "Fts5NotReadyError": {
+          "bases": [
+            "RuntimeError"
+          ],
+          "methods": {}
+        }
+      },
+      "functions": {}
+    },
     "mcp_server.guarded": {
       "classes": {},
       "functions": {
