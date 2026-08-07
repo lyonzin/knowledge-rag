@@ -337,6 +337,166 @@
         }
       }
     },
+    "mcp_server.security": {
+      "classes": {
+        "BearerAuthMiddleware": {
+          "bases": [],
+          "methods": {}
+        },
+        "PathEscapeError": {
+          "bases": [
+            "ValueError"
+          ],
+          "methods": {}
+        }
+      },
+      "functions": {
+        "bearer_token_matches": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "expected"
+            },
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "presented"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "content_sha256": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "text"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "detect_external_marker": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "content"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "extract_bearer_token": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "headers"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "is_path_within": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "base"
+            },
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "candidate"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "neutralize_injection_sentinels": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "text"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "sanitize_external_content": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "content"
+            },
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "source"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "validate_path_within": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "base"
+            },
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "candidate"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "wrap_external_content": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "content"
+            },
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "source"
+            },
+            {
+              "annotated": true,
+              "has_default": true,
+              "kind": "positional",
+              "name": "digest"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        }
+      }
+    },
     "mcp_server.server": {
       "classes": {
         "BM25Index": {
@@ -656,6 +816,12 @@
                   "has_default": false,
                   "kind": "positional",
                   "name": "category"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "external_source"
                 }
               ],
               "is_async": false,
@@ -764,6 +930,12 @@
                   "has_default": true,
                   "kind": "positional",
                   "name": "force"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "resume_state"
                 }
               ],
               "is_async": false,
@@ -806,6 +978,12 @@
                   "has_default": false,
                   "kind": "positional",
                   "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "swap"
                 }
               ],
               "is_async": false,
@@ -854,6 +1032,12 @@
                   "has_default": false,
                   "kind": "positional",
                   "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "resume_state"
                 }
               ],
               "is_async": false,
@@ -920,6 +1104,12 @@
                   "has_default": false,
                   "kind": "positional",
                   "name": "mode"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "resume_state"
                 }
               ],
               "is_async": false,
@@ -1182,6 +1372,12 @@
               "has_default": true,
               "kind": "positional",
               "name": "full_rebuild"
+            },
+            {
+              "annotated": true,
+              "has_default": true,
+              "kind": "positional",
+              "name": "resume"
             }
           ],
           "is_async": false,
