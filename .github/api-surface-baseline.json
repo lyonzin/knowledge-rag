@@ -455,6 +455,34 @@
         }
       }
     },
+    "mcp_server.query_router": {
+      "classes": {
+        "QueryRouter": {
+          "bases": [],
+          "methods": {
+            "classify": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "query"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            }
+          }
+        }
+      },
+      "functions": {}
+    },
     "mcp_server.ratelimit": {
       "classes": {
         "SlidingWindowCounter": {
