@@ -568,3 +568,329 @@ class TestDoSemanticCandidateMath:
         _ = orch.query("test query", max_results=20, hybrid_alpha=1.0)
 
         assert captured["n_results"] == 50
+
+
+# =============================================================================
+# FTS5 Fast-Path Dispatch — Task 03 (ADR-002, ADR-003, ADR-006)
+# =============================================================================
+
+
+class _FakeFts5:
+    """Controllable ``Fts5LexicalIndex`` substitute for dispatch tests."""
+
+    def __init__(self, hits=(), ready=True, raises=None):
+        self._hits = list(hits)
+        self._ready = ready
+        self._raises = raises
+        self.search_calls = []
+
+    def is_ready(self):
+        return self._ready
+
+    def search(self, query, top_k=20):
+        self.search_calls.append((query, top_k))
+        if self._raises is not None:
+            raise self._raises
+        return list(self._hits)
+
+
+class _FakeRouter:
+    """Controllable ``QueryRouter`` substitute — fixed or callable decision."""
+
+    def __init__(self, decision):
+        self._decision = decision
+        self.classify_calls = []
+
+    def classify(self, query):
+        self.classify_calls.append(query)
+        if callable(self._decision):
+            return self._decision(query)
+        return self._decision
+
+
+def _build_dispatch_orch(
+    monkeypatch,
+    *,
+    fts5_enabled=True,
+    fts5_index=None,
+    query_router=None,
+    fts5_min_hits=3,
+    fake_docs=None,
+    fake_metadatas=None,
+):
+    """Bare-bones orchestrator sufficient for exercising query() dispatch."""
+    import mcp_server.server as srv
+
+    monkeypatch.setattr(srv.config, "fts5_enabled", fts5_enabled)
+    monkeypatch.setattr(srv.config, "fts5_min_hits", fts5_min_hits)
+    monkeypatch.setattr(srv.config, "fts5_rerank_enabled", False)
+    monkeypatch.setattr(srv.config, "reranker_enabled", False)
+    monkeypatch.setattr(srv.config, "default_results", 5)
+    monkeypatch.setattr(srv.config, "max_results", 50)
+
+    docs = fake_docs or {}
+    metadatas = fake_metadatas or {}
+
+    class _FakeCollection:
+        def get(self, ids, include):
+            return {
+                "ids": list(ids),
+                "documents": [docs.get(cid, "") for cid in ids] if "documents" in include else None,
+                "metadatas": [metadatas.get(cid, {}) for cid in ids] if "metadatas" in include else None,
+            }
+
+        def query(self, query_texts, n_results, where, include):
+            return {"ids": [[]], "distances": [[]], "documents": [[]], "metadatas": [[]]}
+
+        def count(self):
+            return len(docs)
+
+    class _FakeBM25:
+        def search(self, query, top_k):
+            return []
+
+    orch = object.__new__(KnowledgeOrchestrator)
+    orch.query_cache = QueryCache(max_size=32, ttl_seconds=300)
+    orch.bm25_index = _FakeBM25()
+    orch.collection = _FakeCollection()
+    orch.fts5_index = fts5_index
+    orch.query_router = query_router
+    orch._ensure_bm25_index = lambda: None
+    orch._route_by_keywords = lambda q: None
+    orch._expand_with_adjacent_chunks = lambda r: r
+    orch._apply_mmr = lambda results, top_k, lambda_param=0.7: results[:top_k]
+    return orch
+
+
+class TestFtsDispatch:
+    """IT-001..IT-009 — dispatch decisions in ``KnowledgeOrchestrator.query()``."""
+
+    def test_it001_feature_off_never_dispatches_fts5(self, monkeypatch):
+        """IT-001: fts5_enabled=False → hybrid pipeline only, FTS5 untouched."""
+        fts5 = _FakeFts5(hits=[("chunk_1", 5.0)], ready=True)
+        router = _FakeRouter("lexical")
+        orch = _build_dispatch_orch(monkeypatch, fts5_enabled=False, fts5_index=fts5, query_router=router)
+
+        results = orch.query("CVE-2021-4034", search_method="auto")
+
+        assert results == []
+        assert fts5.search_calls == [], "FTS5 must never be invoked when the feature is off"
+        assert router.classify_calls == [], "router must never run when the feature is off"
+
+    def test_it002_lexical_query_dispatches_fts5(self, monkeypatch):
+        """IT-002: enabled + lexical + ready + hit → search_method='fts5' in results."""
+        hits = [("chunk_1", 5.0), ("chunk_2", 4.0), ("chunk_3", 3.0)]
+        docs = {"chunk_1": "H1-P4-XXX-1234 disclosure summary", "chunk_2": "other", "chunk_3": "more"}
+        metas = {
+            cid: {
+                "source": f"/{cid}",
+                "filename": f"{cid}.md",
+                "category": "bugbounty",
+                "chunk_index": 0,
+                "keywords": "",
+            }
+            for cid in docs
+        }
+        fts5 = _FakeFts5(hits=hits, ready=True)
+        router = _FakeRouter("lexical")
+        orch = _build_dispatch_orch(
+            monkeypatch, fts5_index=fts5, query_router=router, fake_docs=docs, fake_metadatas=metas
+        )
+
+        results = orch.query("H1-P4-XXX-1234", search_method="auto")
+
+        assert results, "expected at least one FTS5 result"
+        assert results[0]["search_method"] == "fts5"
+        assert fts5.search_calls, "FTS5 search was not invoked"
+
+    def test_it003_parametrized_lexical_queries_all_dispatch(self, monkeypatch, sample_lexical_queries):
+        """IT-003: each canonical lexical query dispatches to FTS5 when hits exist."""
+        for q in sample_lexical_queries:
+            hits = [(f"chunk_{i}", 10 - i) for i in range(3)]
+            docs = {f"chunk_{i}": f"doc mentioning {q}" for i in range(3)}
+            metas = {
+                f"chunk_{i}": {
+                    "source": f"/{i}",
+                    "filename": f"{i}.md",
+                    "category": "security",
+                    "chunk_index": 0,
+                    "keywords": "",
+                }
+                for i in range(3)
+            }
+            fts5 = _FakeFts5(hits=hits, ready=True)
+            router = _FakeRouter("lexical")
+            orch = _build_dispatch_orch(
+                monkeypatch, fts5_index=fts5, query_router=router, fake_docs=docs, fake_metadatas=metas
+            )
+            results = orch.query(q, search_method="auto")
+            assert results, f"no results for canonical lexical query {q!r}"
+            assert results[0]["search_method"] == "fts5"
+
+    def test_it004_zero_docs_corpus_returns_empty(self, monkeypatch):
+        """IT-004: FTS5 empty + hybrid empty → orch.query returns []."""
+        fts5 = _FakeFts5(hits=[], ready=True)
+        router = _FakeRouter("lexical")
+        orch = _build_dispatch_orch(monkeypatch, fts5_index=fts5, query_router=router)
+
+        results = orch.query("MDR-AD002", search_method="auto")
+
+        assert results == []
+
+    def test_it005_semantic_query_skips_fts5(self, monkeypatch):
+        """IT-005: router says semantic → FTS5 is never consulted."""
+        fts5 = _FakeFts5(hits=[("chunk_1", 5.0)], ready=True)
+        router = _FakeRouter("semantic")
+        orch = _build_dispatch_orch(monkeypatch, fts5_index=fts5, query_router=router)
+
+        results = orch.query("nuclei", search_method="auto")
+
+        assert fts5.search_calls == []
+        assert results == []
+
+    def test_it006_low_hits_triggers_fallback_metric(self, monkeypatch):
+        """IT-006: lexical + 0 fts5 hits + min_hits=3 → fallback_total{reason=low_hits} +1."""
+        from mcp_server.metrics import FAST_PATH_FALLBACK_TOTAL, get_metrics
+
+        fts5 = _FakeFts5(hits=[], ready=True)
+        router = _FakeRouter("lexical")
+        orch = _build_dispatch_orch(monkeypatch, fts5_index=fts5, query_router=router)
+
+        needle = f'{FAST_PATH_FALLBACK_TOTAL}{{reason="low_hits"}}'
+        before = get_metrics().exposition().count(needle)
+        results = orch.query("T-800", search_method="auto")
+        after = get_metrics().exposition().count(needle)
+
+        assert results == []
+        assert after > before, f"{needle} was not incremented"
+
+    def test_it007_high_min_hits_causes_fallback(self, monkeypatch):
+        """IT-007: min_hits=100 + 10 fts5 hits → fallback (result count below threshold)."""
+        hits = [(f"chunk_{i}", 10 - i) for i in range(10)]
+        fts5 = _FakeFts5(hits=hits, ready=True)
+        router = _FakeRouter("lexical")
+        orch = _build_dispatch_orch(monkeypatch, fts5_min_hits=100, fts5_index=fts5, query_router=router)
+
+        results = orch.query("CVE-2021-4034", search_method="auto")
+
+        assert results == []
+
+    def test_it008_fts5_error_triggers_fallback_and_error_metric(self, monkeypatch):
+        """IT-008: fts5.search raises OperationalError → fallback + errors_total{OperationalError}."""
+        import sqlite3
+
+        from mcp_server.metrics import FAST_PATH_ERRORS_TOTAL, get_metrics
+
+        fts5 = _FakeFts5(raises=sqlite3.OperationalError("readonly"))
+        router = _FakeRouter("lexical")
+        orch = _build_dispatch_orch(monkeypatch, fts5_index=fts5, query_router=router)
+
+        exposition_before = get_metrics().exposition()
+        orch.query("CVE-2021-4034", search_method="auto")
+        exposition_after = get_metrics().exposition()
+
+        assert 'error_class="OperationalError"' in exposition_after
+        assert exposition_after.count(FAST_PATH_ERRORS_TOTAL) > exposition_before.count(FAST_PATH_ERRORS_TOTAL)
+
+    def test_it009_fts5_databaseerror_falls_back(self, monkeypatch):
+        """IT-009: fts5.search raises DatabaseError → fallback + error metric labeled correctly."""
+        import sqlite3
+
+        from mcp_server.metrics import get_metrics
+
+        fts5 = _FakeFts5(raises=sqlite3.DatabaseError("file missing"))
+        router = _FakeRouter("lexical")
+        orch = _build_dispatch_orch(monkeypatch, fts5_index=fts5, query_router=router)
+
+        orch.query("CVE-2021-4034", search_method="auto")
+        exposition = get_metrics().exposition()
+
+        assert 'error_class="DatabaseError"' in exposition
+
+
+class TestConfigToggle:
+    """IT-015..IT-018 — config-driven feature toggle + custom pattern classification."""
+
+    def test_it015_fresh_install_default_off(self, monkeypatch):
+        """IT-015: fresh YAML has no search section → fts5_enabled defaults False."""
+        from mcp_server import config as config_module
+
+        monkeypatch.setattr(config_module, "_yaml", {})
+        cfg = config_module.Config()
+        assert cfg.fts5_enabled is False
+
+    def test_it016_legacy_config_unchanged(self, monkeypatch):
+        """IT-016: v4.8.1 config sans lexical_fast_path → fts5_enabled stays False."""
+        from mcp_server import config as config_module
+
+        monkeypatch.setattr(config_module, "_yaml", {"search": {"hybrid_alpha": 0.3}})
+        cfg = config_module.Config()
+        assert cfg.fts5_enabled is False
+
+    def test_it017_yaml_enables_fts5(self, monkeypatch):
+        """IT-017: enabled: true in YAML flips fts5_enabled."""
+        from mcp_server import config as config_module
+
+        monkeypatch.setattr(config_module, "_yaml", {"search": {"lexical_fast_path": {"enabled": True}}})
+        cfg = config_module.Config()
+        assert cfg.fts5_enabled is True
+
+    def test_it018_custom_pattern_classifies_query(self):
+        """IT-018: custom PROJ pattern classifies matching query as lexical."""
+        from mcp_server.query_router import QueryRouter
+
+        router = QueryRouter([r"PROJ-\d{3,5}"])
+        assert router.classify("PROJ-12345") == "lexical"
+        assert router.classify("random prose") == "semantic"
+
+
+class TestMetricsScrape:
+    """IT-019 — exposition after mixed lexical + semantic query traffic."""
+
+    def test_it019_mixed_queries_produce_expected_counters(self, monkeypatch):
+        from mcp_server.metrics import FAST_PATH_HITS_TOTAL, get_metrics
+
+        hits = [(f"chunk_{i}", 10 - i) for i in range(5)]
+        docs = {f"chunk_{i}": f"CVE-2021-4034 content {i}" for i in range(5)}
+        metas = {
+            f"chunk_{i}": {
+                "source": f"/{i}",
+                "filename": f"{i}.md",
+                "category": "security",
+                "chunk_index": 0,
+                "keywords": "",
+            }
+            for i in range(5)
+        }
+        fts5 = _FakeFts5(hits=hits, ready=True)
+        router = _FakeRouter(lambda q: "lexical" if "CVE" in q else "semantic")
+        orch = _build_dispatch_orch(
+            monkeypatch, fts5_index=fts5, query_router=router, fake_docs=docs, fake_metadatas=metas
+        )
+
+        for _ in range(3):
+            orch.query("CVE-2021-4034", search_method="auto")
+            orch.query_cache.invalidate()
+        for _ in range(2):
+            orch.query("how does OAuth token refresh work", search_method="auto")
+            orch.query_cache.invalidate()
+
+        exposition = get_metrics().exposition()
+        assert FAST_PATH_HITS_TOTAL in exposition
+        assert 'path="fts5"' in exposition
+        assert 'path="hybrid"' in exposition
+
+
+class TestQueryCacheKey:
+    """UT-059, UT-060 — 5th-param backward compat + collision-free keys per path."""
+
+    def test_ut059_make_key_default_matches_explicit_auto(self):
+        cache = QueryCache()
+        without_arg = cache._make_key("q", 5, None, 0.3)
+        with_auto = cache._make_key("q", 5, None, 0.3, "auto")
+        assert without_arg == with_auto
+
+    def test_ut060_search_method_variants_produce_distinct_keys(self):
+        cache = QueryCache()
+        keys = {cache._make_key("q", 5, None, 0.3, sm) for sm in ("auto", "hybrid", "fts5")}
+        assert len(keys) == 3

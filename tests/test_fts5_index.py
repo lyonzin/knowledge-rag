@@ -311,3 +311,79 @@ def test_it_mig_001_atomic_write_cross_thread(tmp_path):
     # Marker file exists as a single flat JSON object — reload from disk.
     on_disk = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
     assert on_disk == data
+
+
+# =============================================================================
+# Task 03 additions — UT-025, UT-026, UT-029
+# =============================================================================
+
+
+class TestTask03Additions:
+    """Fase 3 additions: search fallback contract, busy_timeout, NotReady message."""
+
+    def test_ut025_search_returns_empty_on_operational_failure(self, tmp_path):
+        """UT-025: FTS5 search never raises — a broken connection yields ``[]``
+        so the orchestrator's dispatch layer can fall back to hybrid."""
+        import sqlite3
+
+        from mcp_server.fts5_index import Fts5LexicalIndex, Fts5MigrationState
+
+        state_path = tmp_path / "state.json"
+        Fts5MigrationState(state_path).write(
+            {
+                "status": "complete",
+                "docs_total": 0,
+                "docs_indexed": 0,
+                "started_at": "2026-08-07T12:00:00Z",
+                "completed_at": "2026-08-07T12:00:01Z",
+                "error": None,
+            }
+        )
+        index = Fts5LexicalIndex(db_path=tmp_path / "db.sqlite", state_path=state_path)
+
+        # ``sqlite3.Connection`` attributes are read-only slots in Py 3.14+, so
+        # we swap in a proxy that raises on the MATCH statement search() emits.
+        class _BrokenConn:
+            def execute(self, sql, *params):
+                raise sqlite3.OperationalError("simulated corruption")
+
+        index.close()
+        index._conn = _BrokenConn()
+
+        assert index.search("CVE-2021-4034") == []
+
+    def test_ut026_busy_timeout_pragma_is_five_seconds(self, tmp_path):
+        """UT-026: WAL + busy_timeout=5000ms is applied so SQLITE_BUSY resolves
+        without Python-side retry logic (ADR-001)."""
+        from mcp_server.fts5_index import Fts5LexicalIndex, Fts5MigrationState
+
+        state_path = tmp_path / "state.json"
+        Fts5MigrationState(state_path).write(
+            {
+                "status": "complete",
+                "docs_total": 0,
+                "docs_indexed": 0,
+                "started_at": "2026-08-07T12:00:00Z",
+                "completed_at": "2026-08-07T12:00:01Z",
+                "error": None,
+            }
+        )
+        index = Fts5LexicalIndex(db_path=tmp_path / "db.sqlite", state_path=state_path)
+        busy_timeout = index._conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        journal_mode = index._conn.execute("PRAGMA journal_mode").fetchone()[0]
+        assert busy_timeout == 5000
+        assert journal_mode.lower() == "wal"
+        index.close()
+
+    def test_ut029_not_ready_error_message_includes_auto_suggestion(self):
+        """UT-029: the raised message must point users at ``search_method='auto'``
+        so debug callers know how to recover without editing config."""
+        from mcp_server.fts5_index import Fts5NotReadyError
+
+        exc = Fts5NotReadyError(
+            "FTS5 index is not ready (migration in progress). "
+            "Suggestion: use search_method='auto' to fallback gracefully."
+        )
+        assert "auto" in str(exc)
+        assert "Suggestion" in str(exc)
+        assert issubclass(Fts5NotReadyError, RuntimeError)

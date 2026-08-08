@@ -61,8 +61,18 @@ from watchdog.observers import Observer
 
 # Local imports
 from .config import config
+from .fts5_index import Fts5LexicalIndex, Fts5NotReadyError
 from .ingestion import Document, DocumentParser
-from .metrics import instrument
+from .metrics import (
+    FAST_PATH_ERRORS_TOTAL,
+    FAST_PATH_FALLBACK_TOTAL,
+    FAST_PATH_HITS_TOTAL,
+    FAST_PATH_LATENCY_SECONDS,
+    FAST_PATH_RERANK_SKIPPED_TOTAL,
+    get_metrics,
+    instrument,
+)
+from .query_router import QueryRouter
 from .ratelimit import rate_limited
 from .security import (
     BearerAuthMiddleware,
@@ -97,14 +107,33 @@ class QueryCache:
         self._hits = 0
         self._misses = 0
 
-    def _make_key(self, query: str, max_results: int, category: Optional[str], hybrid_alpha: float) -> str:
-        """Generate cache key from query parameters"""
-        raw = f"{query}|{max_results}|{category}|{hybrid_alpha}"
+    def _make_key(
+        self,
+        query: str,
+        max_results: int,
+        category: Optional[str],
+        hybrid_alpha: float,
+        search_method: str = "auto",
+    ) -> str:
+        """Generate cache key from query parameters.
+
+        ``search_method`` defaults to ``"auto"`` so calls that omit it hash the
+        same as pre-v4.8.2 callers (backward compat for internal callers not
+        yet aware of the FTS5 fast-path dispatch).
+        """
+        raw = f"{query}|{max_results}|{category}|{hybrid_alpha}|{search_method}"
         return hashlib.sha256(raw.encode()).hexdigest()[:24]
 
-    def get(self, query: str, max_results: int, category: Optional[str], hybrid_alpha: float) -> Optional[Any]:
+    def get(
+        self,
+        query: str,
+        max_results: int,
+        category: Optional[str],
+        hybrid_alpha: float,
+        search_method: str = "auto",
+    ) -> Optional[Any]:
         """Get cached result if exists and not expired"""
-        key = self._make_key(query, max_results, category, hybrid_alpha)
+        key = self._make_key(query, max_results, category, hybrid_alpha, search_method)
 
         with self._lock:
             if key in self._cache:
@@ -119,9 +148,22 @@ class QueryCache:
             self._misses += 1
             return None
 
-    def put(self, query: str, max_results: int, category: Optional[str], hybrid_alpha: float, result: Any) -> None:
-        """Store result in cache"""
-        key = self._make_key(query, max_results, category, hybrid_alpha)
+    def put(
+        self,
+        query: str,
+        max_results: int,
+        category: Optional[str],
+        hybrid_alpha: float,
+        result: Any,
+        search_method: str = "auto",
+    ) -> None:
+        """Store result in cache.
+
+        ``search_method`` is appended (with default ``"auto"``) rather than
+        inserted before ``result`` so pre-v4.8.2 positional callers keep
+        working — the FTS5 dispatch passes it as a keyword argument.
+        """
+        key = self._make_key(query, max_results, category, hybrid_alpha, search_method)
         with self._lock:
             if len(self._cache) >= self.max_size:
                 self._cache.popitem(last=False)
@@ -1145,6 +1187,15 @@ class KnowledgeOrchestrator:
 
         # Migration: deferred — checked in main() after full init
         self._needs_rebuild = False
+
+        # FTS5 lexical fast-path (Task 03, ADR-006). Opt-in via YAML
+        # ``search.lexical_fast_path.enabled: true``. When the toggle is off
+        # both handles stay ``None`` and ``query()`` short-circuits before any
+        # FTS5 dispatch runs — preserving v4.8.1 behaviour byte-for-byte.
+        self.fts5_index: Optional[Fts5LexicalIndex] = None
+        self.query_router: Optional[QueryRouter] = None
+        if config.fts5_enabled:
+            self._initialize_fts5_dispatch()
 
         # Background reindex progress (polled via get_index_stats).
         # v4.8.0 Fase 4 fields (chunks_processed/chunks_total/throughput_cps/
@@ -2304,20 +2355,207 @@ class KnowledgeOrchestrator:
     # Search
     # =========================================================================
 
+    # =========================================================================
+    # FTS5 lexical fast-path helpers (Task 03; ADR-002/003/006).
+    # =========================================================================
+
+    def _initialize_fts5_dispatch(self) -> None:
+        """Instantiate ``Fts5LexicalIndex`` + ``QueryRouter`` under the toggle.
+
+        Kept separate from ``__init__`` so failures surface with a clear source
+        (config typo vs Chroma issue vs FTS5 issue) and callers can retry after
+        fixing config without rebuilding the whole orchestrator.
+        """
+        db_path = config.data_dir / "fts5_index.db"
+        state_path = config.data_dir / "fts5_migration.state"
+        self.fts5_index = Fts5LexicalIndex(db_path=db_path, state_path=state_path)
+        # QueryRouter raises re.error at construction if any pattern is
+        # malformed — treat that as a fatal startup error so the operator
+        # sees the broken pattern immediately instead of on the first query.
+        self.query_router = QueryRouter(config.fts5_patterns)
+
+    def _maybe_dispatch_fts5(
+        self,
+        query_text: str,
+        max_results: int,
+        category_filter: Optional[str],
+        search_method: str,
+    ) -> Tuple[Optional[List[Dict[str, Any]]], str]:
+        """Decide whether to serve the query from the FTS5 fast-path.
+
+        Returns ``(result, path)``:
+        - ``(list, "fts5")`` — fast-path succeeded, caller returns ``result``.
+        - ``(None, "hybrid")`` — router said semantic OR explicit ``"hybrid"``
+          override; caller runs the existing hybrid pipeline.
+        - ``(None, "fallback")`` — FTS5 attempted but failed (not ready /
+          low_hits / error); caller runs hybrid as recovery. Fallback and
+          error counters are already incremented here.
+        Raises ``Fts5NotReadyError`` when ``search_method="fts5"`` is explicit
+        and the index is not ready — surfaces to the MCP wrapper.
+        """
+        metrics = get_metrics()
+        if search_method == "fts5":
+            if self.fts5_index is None or not self.fts5_index.is_ready():
+                raise Fts5NotReadyError(
+                    "FTS5 index is not ready (migration in progress). "
+                    "Suggestion: use search_method='auto' to fallback gracefully."
+                )
+            return self._run_fts5_search(query_text, max_results, category_filter, skip_min_hits=True), "fts5"
+        if search_method == "hybrid":
+            return None, "hybrid"
+        if self.query_router is None or self.query_router.classify(query_text) != "lexical":
+            return None, "hybrid"
+        if self.fts5_index is None or not self.fts5_index.is_ready():
+            metrics.inc(FAST_PATH_FALLBACK_TOTAL, '{reason="disabled"}')
+            return None, "fallback"
+        try:
+            result = self._run_fts5_search(query_text, max_results, category_filter, skip_min_hits=False)
+        except Fts5NotReadyError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — every FTS5 failure must fall back
+            metrics.inc(FAST_PATH_ERRORS_TOTAL, f'{{error_class="{exc.__class__.__name__}"}}')
+            metrics.inc(FAST_PATH_FALLBACK_TOTAL, '{reason="error"}')
+            return None, "fallback"
+        if result is None:
+            metrics.inc(FAST_PATH_FALLBACK_TOTAL, '{reason="low_hits"}')
+            return None, "fallback"
+        return result, "fts5"
+
+    def _run_fts5_search(
+        self,
+        query_text: str,
+        max_results: int,
+        category_filter: Optional[str],
+        *,
+        skip_min_hits: bool,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Execute the FTS5 search + result formatting, tracking latency.
+
+        Returns ``None`` when the hit count is below ``config.fts5_min_hits``
+        (only when ``skip_min_hits=False`` — explicit ``search_method="fts5"``
+        bypasses the threshold so debug/testing paths always see raw output).
+        Rerank stays disabled on the fast-path (ADR-003); Task 04 will wire the
+        opt-in ``config.fts5_rerank_enabled`` toggle. For now we always skip
+        and record ``FAST_PATH_RERANK_SKIPPED_TOTAL``.
+        """
+        assert self.fts5_index is not None  # narrowed by caller
+        metrics = get_metrics()
+        candidates = max(max_results * 3, 20)
+        start = time.monotonic()
+        try:
+            hits = self.fts5_index.search(query_text, top_k=candidates)
+        finally:
+            metrics.observe(FAST_PATH_LATENCY_SECONDS, time.monotonic() - start)
+        if not skip_min_hits and len(hits) < config.fts5_min_hits:
+            return None
+        formatted = self._format_fts5_results(hits, max_results, category_filter)
+        formatted = self._expand_with_adjacent_chunks(formatted)
+        metrics.inc(FAST_PATH_HITS_TOTAL, '{path="fts5"}')
+        metrics.inc(FAST_PATH_RERANK_SKIPPED_TOTAL)
+        return formatted
+
+    def _format_fts5_results(
+        self,
+        hits: List[Tuple[str, float]],
+        max_results: int,
+        category_filter: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        """Hydrate FTS5 ``(chunk_id, score)`` hits into full result dicts."""
+        if not hits:
+            return []
+        chunk_ids = [chunk_id for chunk_id, _ in hits]
+        try:
+            fetched = self.collection.get(ids=chunk_ids, include=["documents", "metadatas"])
+        except Exception as exc:  # noqa: BLE001 — degrade gracefully; caller falls back
+            print(f"[WARN] FTS5 metadata fetch failed: {exc}")
+            return []
+        documents_by_id = dict(zip(fetched.get("ids", []), fetched.get("documents", [])))
+        metadata_by_id = dict(zip(fetched.get("ids", []), fetched.get("metadatas", [])))
+        formatted: List[Dict[str, Any]] = []
+        raw_scores = [float(score) for _, score in hits if chunk_ids]
+        max_score = max(raw_scores) if raw_scores else 1.0
+        min_score = min(raw_scores) if raw_scores else 0.0
+        score_range = max_score - min_score
+        for chunk_id, raw_score in hits:
+            metadata = metadata_by_id.get(chunk_id) or {}
+            if category_filter and metadata.get("category") != category_filter:
+                continue
+            normalized = (float(raw_score) - min_score) / score_range if score_range > 0 else 1.0
+            formatted.append(
+                {
+                    "content": documents_by_id.get(chunk_id) or "",
+                    "source": metadata.get("source", ""),
+                    "filename": metadata.get("filename", ""),
+                    "category": metadata.get("category", ""),
+                    "chunk_index": metadata.get("chunk_index", 0),
+                    "score": round(normalized, 4),
+                    "raw_rrf_score": None,
+                    "reranker_score": None,
+                    "semantic_rank": None,
+                    "bm25_rank": None,
+                    "search_method": "fts5",
+                    "keywords": (metadata.get("keywords") or "").split(","),
+                    "routed_by": "fts5_router",
+                }
+            )
+            if len(formatted) >= max_results:
+                break
+        return formatted
+
+    # =========================================================================
+    # Query — hybrid pipeline (with optional FTS5 fast-path dispatch on top).
+    # =========================================================================
+
     def query(
-        self, query_text: str, max_results: int = None, category_filter: Optional[str] = None, hybrid_alpha: float = 0.5
+        self,
+        query_text: str,
+        max_results: int = None,
+        category_filter: Optional[str] = None,
+        hybrid_alpha: float = 0.5,
+        search_method: str = "auto",
     ) -> List[Dict[str, Any]]:
         """
         Hybrid search with RRF fusion + cross-encoder reranking.
 
-        Pipeline: Semantic + BM25 -> RRF fusion -> Reranker -> Results
+        Pipeline: Semantic + BM25 -> RRF fusion -> Reranker -> Results.
+
+        ``search_method`` (v4.8.2+) selects the dispatch:
+        - ``"auto"`` (default): router classifies the query. Lexical goes to
+          the FTS5 fast-path when ``config.fts5_enabled`` and the index is
+          ready; semantic goes to the hybrid pipeline.
+        - ``"hybrid"``: skip the router; force the hybrid pipeline (kill
+          switch for suspected router misclassification).
+        - ``"fts5"``: skip the router; force the FTS5 fast-path. Raises
+          ``Fts5NotReadyError`` when the feature is disabled or the index is
+          not ready — the MCP wrapper surfaces the error to the caller.
         """
         max_results = max_results or config.default_results
 
-        # Check cache
-        cached = self.query_cache.get(query_text, max_results, category_filter, hybrid_alpha)
+        # Cache lookup (5-tuple key includes search_method — different paths
+        # produce different result sets, they MUST NOT share cache entries).
+        cached = self.query_cache.get(query_text, max_results, category_filter, hybrid_alpha, search_method)
         if cached is not None:
             return cached
+
+        # FTS5 dispatch (feature-gated). When the toggle is off, this whole
+        # block short-circuits — zero cost on the hybrid path.
+        hybrid_path_label = "hybrid"
+        if config.fts5_enabled:
+            fast_path_result, hybrid_path_label = self._maybe_dispatch_fts5(
+                query_text, max_results, category_filter, search_method
+            )
+            if fast_path_result is not None:
+                self.query_cache.put(
+                    query_text,
+                    max_results,
+                    category_filter,
+                    hybrid_alpha,
+                    fast_path_result,
+                    search_method=search_method,
+                )
+                return fast_path_result
+        elif search_method == "fts5":
+            raise Fts5NotReadyError("FTS5 fast-path is disabled in config; set search.lexical_fast_path.enabled=true")
 
         self._ensure_bm25_index()
 
@@ -2522,7 +2760,16 @@ class KnowledgeOrchestrator:
         # Adjacent Chunk Retrieval — expand content with surrounding chunks for context
         formatted = self._expand_with_adjacent_chunks(formatted)
 
-        self.query_cache.put(query_text, max_results, category_filter, hybrid_alpha, formatted)
+        self.query_cache.put(
+            query_text,
+            max_results,
+            category_filter,
+            hybrid_alpha,
+            formatted,
+            search_method=search_method,
+        )
+        if config.fts5_enabled:
+            get_metrics().inc(FAST_PATH_HITS_TOTAL, f'{{path="{hybrid_path_label}"}}')
         return formatted
 
     def _expand_with_adjacent_chunks(self, results: List[Dict], window: int = 1) -> List[Dict]:
@@ -3304,6 +3551,7 @@ def search_knowledge(
     hybrid_alpha: float = 0.3,
     min_score: float = 0.0,
     snippet_mode: bool = True,
+    search_method: str = "auto",
 ) -> str:
     """
     Hybrid search combining semantic search + BM25 keyword search with cross-encoder reranking.
@@ -3324,6 +3572,12 @@ def search_knowledge(
         snippet_mode: When true (default), truncates content to ~500 characters at a natural break
             point and adds a content_length field with the original size. Use get_document() to
             fetch full content when needed. Set to false to return full chunk content.
+        search_method: Dispatch selector (v4.8.2+). One of ``"auto"`` (router picks FTS5 fast-path
+            for lexical queries when enabled, hybrid otherwise), ``"hybrid"`` (force hybrid path —
+            kill switch for suspected router misclassification), or ``"fts5"`` (force FTS5 fast-path
+            — debug/testing; errors out when the feature is disabled or the index is not ready).
+            Default ``"auto"`` preserves pre-v4.8.2 behavior byte-for-byte when the fast-path is
+            disabled in config.
 
     Returns:
         JSON string with results including content chunks, source filepath, relevance score, and
@@ -3336,6 +3590,14 @@ def search_knowledge(
     if not query or not query.strip():
         return json.dumps({"status": "error", "message": "Query cannot be empty"})
 
+    if search_method not in ("auto", "hybrid", "fts5"):
+        return json.dumps(
+            {
+                "status": "error",
+                "message": f"Invalid search_method '{search_method}'. Valid: auto, hybrid, fts5",
+            }
+        )
+
     max_results = max(1, min(max_results or 5, config.max_results))
     hybrid_alpha = max(0.0, min(hybrid_alpha if hybrid_alpha is not None else 0.3, 1.0))
     min_score = max(0.0, min(min_score if min_score is not None else 0.0, 1.0))
@@ -3347,9 +3609,24 @@ def search_knowledge(
         )
 
     orchestrator = get_orchestrator()
-    results = orchestrator.query(
-        query.strip(), max_results=max_results, category_filter=category, hybrid_alpha=hybrid_alpha
-    )
+    try:
+        results = orchestrator.query(
+            query.strip(),
+            max_results=max_results,
+            category_filter=category,
+            hybrid_alpha=hybrid_alpha,
+            search_method=search_method,
+        )
+    except Fts5NotReadyError as exc:
+        # Surface the fast-path error verbatim + always add the auto-fallback
+        # suggestion so debug users can recover without hunting docs.
+        return json.dumps(
+            {
+                "status": "error",
+                "error": str(exc),
+                "suggestion": "search_method='auto' fallback gracefully",
+            }
+        )
 
     if not results:
         return json.dumps({"status": "no_results", "query": query, "message": "No relevant documents found."})

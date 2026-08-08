@@ -355,6 +355,28 @@ def sample_lexical_queries():
 
 
 @pytest.fixture
+def mcp_client_test():
+    """In-process MCP client harness for e2e tests (Task 03, IT-020/E2E-*).
+
+    A real MCP subprocess spawn is too heavy for CI. This fixture routes
+    calls straight to the module-level tool functions and parses the JSON
+    envelope so tests can assert on the returned dict — same call surface
+    the production MCP handshake exposes, minus the protocol framing.
+    """
+    import json as _json
+
+    class _Client:
+        def call(self, tool_name: str, **kwargs):
+            from mcp_server import server
+
+            fn = getattr(server, tool_name)
+            raw = fn(**kwargs)
+            return _json.loads(raw) if isinstance(raw, str) else raw
+
+    return _Client()
+
+
+@pytest.fixture
 def sample_xml(tmp_path):
     """Create a sample XML file."""
     content = """<?xml version="1.0" encoding="UTF-8"?>

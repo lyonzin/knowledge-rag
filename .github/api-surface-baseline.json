@@ -373,6 +373,30 @@
               "is_async": false,
               "returns_annotated": true
             },
+            "register_histogram_buckets": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "name"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "buckets"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
             "set_gauge": {
               "args": [
                 {
@@ -1207,6 +1231,12 @@
                   "has_default": true,
                   "kind": "positional",
                   "name": "hybrid_alpha"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "search_method"
                 }
               ],
               "is_async": false,
@@ -1362,6 +1392,12 @@
                   "has_default": false,
                   "kind": "positional",
                   "name": "hybrid_alpha"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "search_method"
                 }
               ],
               "is_async": false,
@@ -1416,6 +1452,12 @@
                   "has_default": false,
                   "kind": "positional",
                   "name": "result"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "search_method"
                 }
               ],
               "is_async": false,
@@ -1625,6 +1667,12 @@
               "has_default": true,
               "kind": "positional",
               "name": "snippet_mode"
+            },
+            {
+              "annotated": true,
+              "has_default": true,
+              "kind": "positional",
+              "name": "search_method"
             }
           ],
           "is_async": false,

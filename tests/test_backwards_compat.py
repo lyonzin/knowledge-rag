@@ -67,7 +67,17 @@ def test_legacy_v3_7_0_config_with_excludes_parses():
 # Frozen contract: parameter names callers (LLMs) supply by name.
 # Bumping requires MAJOR version + CHANGELOG migration entry.
 MCP_TOOL_SIGNATURES = {
-    "search_knowledge": ["query", "max_results", "category", "hybrid_alpha", "min_score", "snippet_mode"],
+    # Task 03 (ADR-006, v4.8.2+): appended ``search_method`` opt-in override.
+    # Insertion is additive with default ``"auto"`` — legacy callers unaffected.
+    "search_knowledge": [
+        "query",
+        "max_results",
+        "category",
+        "hybrid_alpha",
+        "min_score",
+        "snippet_mode",
+        "search_method",
+    ],
     "search_similar": ["filepath", "max_results"],
     "get_document": ["filepath"],
     "add_document": ["content", "filepath", "category"],
@@ -112,6 +122,76 @@ def test_exception_classes_present():
 
     assert issubclass(EmbeddingError, RuntimeError)
     assert issubclass(EmbeddingModelLoadError, RuntimeError)
+
+
+# ---------------------------------------------------------------------------
+# UT-041, UT-042 — search_knowledge accepts the new opt-in `search_method`
+# ---------------------------------------------------------------------------
+
+
+def test_ut041_search_knowledge_without_new_param_returns_json(monkeypatch):
+    """UT-041: pre-v4.8.2 call surface (no ``search_method``) still returns JSON."""
+    import json
+
+    from mcp_server import server as srv
+
+    # Isolate: fake orchestrator that yields empty results — the wrapper still
+    # emits a well-formed JSON envelope (no TypeError from missing arg).
+    class _Orch:
+        query_cache = type("_C", (), {"stats": staticmethod(lambda: {"hit_rate": "0%"})})()
+
+        def query(self, *args, **kwargs):
+            return []
+
+    monkeypatch.setattr(srv, "get_orchestrator", lambda: _Orch())
+    raw = srv.search_knowledge(query="X")
+    payload = json.loads(raw)
+    assert payload["status"] in ("no_results", "success", "error")
+
+
+def test_ut042_search_knowledge_with_all_seven_params_returns_json(monkeypatch):
+    """UT-042: passing all 7 params (incl. ``search_method``) does not raise."""
+    import json
+
+    from mcp_server import server as srv
+
+    class _Orch:
+        query_cache = type("_C", (), {"stats": staticmethod(lambda: {"hit_rate": "0%"})})()
+
+        def query(self, *args, **kwargs):
+            return []
+
+    monkeypatch.setattr(srv, "get_orchestrator", lambda: _Orch())
+    raw = srv.search_knowledge(
+        query="X",
+        max_results=5,
+        category=None,
+        hybrid_alpha=0.3,
+        min_score=0.0,
+        snippet_mode=True,
+        search_method="auto",
+    )
+    payload = json.loads(raw)
+    assert isinstance(payload, dict)
+
+
+def test_ut042b_invalid_search_method_returns_structured_error(monkeypatch):
+    """Guardrail: unknown ``search_method`` value returns a JSON error, not a crash."""
+    import json
+
+    from mcp_server import server as srv
+
+    class _Orch:
+        query_cache = type("_C", (), {"stats": staticmethod(lambda: {"hit_rate": "0%"})})()
+
+        def query(self, *args, **kwargs):
+            return []
+
+    monkeypatch.setattr(srv, "get_orchestrator", lambda: _Orch())
+    raw = srv.search_knowledge(query="X", search_method="nonsense")
+    payload = json.loads(raw)
+    assert payload["status"] == "error"
+    assert "search_method" in payload["message"]
 
 
 def test_instance_lock_module_public_surface():
