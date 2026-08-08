@@ -184,6 +184,12 @@ class Fts5LexicalIndex:
             )
             self._apply_pragmas(in_memory=in_memory)
             self._verify_fts5_available()
+            # nosem: python.sqlalchemy.security.sqlalchemy-execute-raw-query
+            # _FTS5_SCHEMA is a hardcoded module constant with the tokenizer
+            # literal interpolated at import time from another module constant.
+            # Zero user input reaches this execute() call — zero injection
+            # surface. The semgrep rule flags the f-string source pattern
+            # regardless of taint origin, so suppression is justified.
             self._conn.execute(_FTS5_SCHEMA)
             self._conn.commit()
         except sqlite3.DatabaseError as exc:
