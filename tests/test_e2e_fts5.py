@@ -77,6 +77,7 @@ class TestE2EFts5:
 
     def test_e2e003_soc_cve_search_lands_on_fts5(self, monkeypatch, mcp_client_test):
         """E2E-003: CVE-2021-4034 exact match → search_method='fts5' + top-1 matches."""
+        import mcp_server.server as srv
         from tests.test_search import _FakeFts5, _FakeRouter
 
         hits = [("chunk_0", 10.0)]
@@ -93,6 +94,9 @@ class TestE2EFts5:
         fts5 = _FakeFts5(hits=hits, ready=True)
         router = _FakeRouter("lexical")
         _install_dispatch_orch(monkeypatch, fts5, router, docs, metas)
+        # Single seeded chunk — lower min_hits so the fast-path is not
+        # short-circuited by the default threshold of 3.
+        monkeypatch.setattr(srv.config, "fts5_min_hits", 1)
 
         payload = mcp_client_test.call("search_knowledge", query="CVE-2021-4034")
 

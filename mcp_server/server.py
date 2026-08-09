@@ -2416,7 +2416,9 @@ class KnowledgeOrchestrator:
             metrics.inc(FAST_PATH_ERRORS_TOTAL, f'{{error_class="{exc.__class__.__name__}"}}')
             metrics.inc(FAST_PATH_FALLBACK_TOTAL, '{reason="error"}')
             return None, "fallback"
-        if result is None:
+        # Empty list means category_filter or hydration reduced effective hits
+        # to zero — semantically same as low_hits, must trigger fallback.
+        if not result:
             metrics.inc(FAST_PATH_FALLBACK_TOTAL, '{reason="low_hits"}')
             return None, "fallback"
         return result, "fts5"
@@ -2450,6 +2452,11 @@ class KnowledgeOrchestrator:
             return None
         formatted = self._format_fts5_results(hits, max_results, category_filter)
         formatted = self._expand_with_adjacent_chunks(formatted)
+        # If category_filter or hydration wiped all hits, treat as no useful
+        # fast-path result — return None so caller records low_hits fallback
+        # instead of incrementing a misleading FAST_PATH_HITS_TOTAL{path=fts5}.
+        if not skip_min_hits and not formatted:
+            return None
         metrics.inc(FAST_PATH_HITS_TOTAL, '{path="fts5"}')
         metrics.inc(FAST_PATH_RERANK_SKIPPED_TOTAL)
         return formatted
