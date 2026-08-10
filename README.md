@@ -1252,6 +1252,27 @@ This keeps backward compatibility while allowing concise synonym groups.
 | 0.7 | Semantic-heavy | Conceptual queries, related topics |
 | 1.0 | Pure semantic | "How to..." questions, abstract concepts |
 
+### Search Method (v4.8.2+)
+
+Two paths ship with v4.8.2 — the default `hybrid` path (BM25 + semantic + RRF
++ optional rerank) that has been the sole path since v4.0, and an opt-in
+`fts5` lexical fast-path optimised for exact identifier queries (CVEs, MITRE
+ATT&CK codes, CWEs, file hashes, bug-bounty IDs). Enable via
+`search.lexical_fast_path.enabled: true` in `config.yaml`.
+
+| Method                  | Path              | Latency (typical)     | Best For                                     |
+|-------------------------|-------------------|-----------------------|----------------------------------------------|
+| `auto` **(default)**    | Router decides    | Router adds ~0.1ms    | Mixed workloads — safe default               |
+| `hybrid`                | BM25 + semantic   | 50-150ms (with rerank)| Prose queries, "how does X work", exploration|
+| `fts5`                  | SQLite FTS5 only  | <10ms cold / <2ms hot | CVE / MITRE / CWE / hash lookups             |
+
+The `search_knowledge` MCP tool exposes `search_method: Literal["auto",
+"hybrid", "fts5"] = "auto"` (ADR-006, additive on the LEI 1 contract). The
+default `enabled: false` preserves v4.8.1 behaviour byte-for-byte; the flip
+to `enabled: true` by default is reserved for v4.9.0 pending the CI
+perf-gate adjudication documented in ADR-004 and ADR-009. Full user guide
+in [`docs/features/fts5_fast_path.md`](docs/features/fts5_fast_path.md).
+
 ---
 
 ## Project Structure
@@ -1414,6 +1435,38 @@ Common issues:
 
 ### Unreleased
 
+### v4.8.2 (2026-08-10) — FTS5 Lexical Fast-Path Opt-In Release (default OFF)
+
+v4.8.2 bundles Fases 1–5 of the FTS5 Lexical Fast-Path plan
+(`.compozy/tasks/fts5-lexical-fast-path/`) as an **opt-in** release —
+`search.lexical_fast_path.enabled` remains `false` by default, so users
+who do not touch `config.yaml` keep v4.8.1 behaviour byte-for-byte
+(LEI 1 preserved). The v4.9.0 default flip is deferred to the CI
+perf-gate adjudication documented in ADR-009 (bench harness ships in
+this release; the flip PR follows once G1 ≥15× and G2 ≤2% both pass on
+CI hardware).
+
+- **DOCS (search)**: new `docs/features/fts5_fast_path.md` user guide
+  covering overview / quick-start / 5-key config reference / how it
+  works / 5 troubleshooting scenarios / when-to-use guidance. README
+  Configuration section cross-links it.
+- **NEW (bench)**: `bench/test_bench_fts5_lexical.py` ships the
+  BENCH-001 (cold, p95 ≤ 10ms target) + BENCH-002 (hot, p95 ≤ 2ms
+  target) harness against a self-contained 3865-row FTS5 corpus. The
+  gate G2 comparison against `bench/test_bench_search.py` is executed
+  by CI per `.compozy/tasks/fts5-lexical-fast-path/bench_v4_9_0_gate.md`;
+  the two-round A/B was not run locally because the release-authoring
+  workstation cannot fairly baseline against CI hardware (ADR-004
+  §Risks).
+- **DOCS (adr)**: new ADR-009 documenting why the ADR-004 gate is
+  deferred to the CI perf-gate step and what conditions unlock the
+  v4.9.0 flip PR.
+- **CHANGE (config)**: `config.example.yaml` uncomments the
+  `search.lexical_fast_path.*` block so new users see the full
+  configuration surface (still `enabled: false`). Existing installs
+  are unaffected.
+- **VERSION**: 4.8.1 → **4.8.2** (PATCH — opt-in infrastructure + docs,
+  zero behaviour change on the default install).
 - **feat (search)**: FTS5 lazy background migration for existing corpus + CRUD sync (ADR-008). `Fts5LexicalIndex` gains `add_document`/`update_document`/`remove_document` (SQL INSERT/DELETE under `_fts5_lock`, incremental — diverges from BM25's full-rebuild pattern because FTS5 mutations are O(1) native SQL) and `start_migration_background(chunk_iter_factory, docs_total, resume_from=0, on_progress=...)` (daemon thread that persists checkpoint every 100 rows into the marker file). On daemon startup, `_maybe_start_fts5_migration` reads the marker: `complete` = fast-path live, `in_progress` = resume from `docs_indexed`, `failed`/missing = start fresh migration; queries during migration fall back to hybrid + emit `fast_path_fallback_total{reason="disabled"}`. `KnowledgeOrchestrator.{add,update,remove}_document_*` gain best-effort FTS5 sync hooks after the BM25 rebuild — errors are caught, logged, and counted (`fast_path_errors_total{error_class="Fts5CrudSyncError"}`) but never propagate to the CRUD tool (upstream write must keep succeeding). `nuclear_rebuild` and `_rebuild_bm25_post_swap` drop the FTS5 db + WAL/SHM/marker and dispatch a fresh migration from the swapped-in Chroma corpus. Two Prometheus gauges expose migration progress (`knowledge_rag_fast_path_migration_docs_indexed`, `_docs_total`). Standalone rebuild helper `scripts/build_fts5_index.py --data-dir <path> [--force] [--foreground] [--verbose]` for operator-driven repair. Operational runbook in `docs/runbooks/fts5_migration.md` covering enable / wait / verify / manual rebuild / large-corpus caveat. New coverage: `tests/test_fts5_migration.py` (17 tests — TestMigrationLifecycle UT-043..048, TestCRUDSync UT-049..052, TestMigrationIntegration IT-021..023, TestCRUDSyncIntegration IT-CRUD-001..004) + `tests/test_e2e_fts5.py::test_e2e006_forced_fts5_with_migration_pending_raises` (E2E-006). Fase 4 of the FTS5 Lexical Fast-Path plan.
 - **NEW (search)**: Optional cross-encoder rerank toggle on the FTS5 fast-path via `search.lexical_fast_path.rerank_enabled` (default `false` — see ADR-003 for rationale). When `true`, `KnowledgeOrchestrator._run_fts5_search` layers `CrossEncoderReranker.rerank` on top of the FTS5 results before adjacent-chunk expansion; result items keep `search_method="fts5"` (rerank is a rescorer, not a path change) and `reranker_score` is populated. When `false`, the `knowledge_rag_fast_path_rerank_skipped_total` counter increments and the fast-path stays under the <10ms lexical latency budget. Empirical basis: Flash-Rerank MiniLM-L-6-v2 CPU ≈72ms/100 docs vs the <10ms target — keeping rerank OFF by default is the correct trade-off; opt in only when recall on lexical queries matters more than latency. New coverage: `tests/test_search.py::TestRerankToggle` (UT-062, UT-063, IT-024, IT-025). Fase 3.5 of the FTS5 Lexical Fast-Path plan.
 - **NEW (search)**: FTS5 lexical fast-path dispatch wired inside `KnowledgeOrchestrator.query()` behind the opt-in `search.lexical_fast_path.enabled` toggle (default `false` — v4.8.1 behavior byte-for-byte for users who don't touch config). When enabled, the query router (Fase 2) classifies each query; lexical queries dispatch to the FTS5 index (Fase 1) via a new `_maybe_dispatch_fts5` helper, semantic queries flow through the existing hybrid pipeline. Per ADR-003 the cross-encoder reranker is skipped on the fast-path (real opt-in toggle deferred to Task 04). Per ADR-006 the `search_knowledge` MCP tool gains one optional param `search_method: Literal["auto","hybrid","fts5"] = "auto"` — additive-safe on the LEI 1 backward-compat contract. Explicit `"fts5"` when the feature is disabled OR the index is not ready raises `Fts5NotReadyError` and the MCP wrapper surfaces it as a JSON error envelope with a `suggestion` field pointing at `search_method='auto'`. `QueryCache._make_key` gains a 5th `search_method` param so paths cannot share cache entries. `MetricsCollector` gains five FTS5 counters plus a bucketed latency histogram (`knowledge_rag_fast_path_hits_total{path}`, `..._fallback_total{reason}`, `..._latency_seconds`, `..._errors_total{error_class}`, `..._rerank_skipped_total`) exposed through `/metrics`. New coverage: `tests/test_search_method_override.py` (5 IT), `tests/test_metrics.py` (2 UT), `tests/test_e2e_fts5.py` (7 E2E), and extensions to `tests/test_search.py` (16 IT/UT — dispatch, config toggle, cache key, metrics scrape), `tests/test_backwards_compat.py` (3 UT — MCP tool signature + guardrail), `tests/test_fts5_index.py` (3 UT — fallback dispatch, busy_timeout, NotReady message). Fase 3 of the FTS5 Lexical Fast-Path plan.
