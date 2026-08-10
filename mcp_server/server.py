@@ -2436,9 +2436,11 @@ class KnowledgeOrchestrator:
         Returns ``None`` when the hit count is below ``config.fts5_min_hits``
         (only when ``skip_min_hits=False`` — explicit ``search_method="fts5"``
         bypasses the threshold so debug/testing paths always see raw output).
-        Rerank stays disabled on the fast-path (ADR-003); Task 04 will wire the
-        opt-in ``config.fts5_rerank_enabled`` toggle. For now we always skip
-        and record ``FAST_PATH_RERANK_SKIPPED_TOTAL``.
+        Rerank defaults to OFF on the fast-path (ADR-003 — cross-encoder cost
+        ≈30-70ms per 100 docs obliterates the <10ms lexical budget). Enable
+        with ``config.fts5_rerank_enabled=True`` when recall matters more
+        than latency; the ``FAST_PATH_RERANK_SKIPPED_TOTAL`` counter only
+        moves when rerank was skipped.
         """
         assert self.fts5_index is not None  # narrowed by caller
         metrics = get_metrics()
@@ -2451,6 +2453,10 @@ class KnowledgeOrchestrator:
         if not skip_min_hits and len(hits) < config.fts5_min_hits:
             return None
         formatted = self._format_fts5_results(hits, max_results, category_filter)
+        if config.fts5_rerank_enabled and formatted:
+            formatted = self._rerank_fts5_results(query_text, formatted, max_results)
+        else:
+            metrics.inc(FAST_PATH_RERANK_SKIPPED_TOTAL)
         formatted = self._expand_with_adjacent_chunks(formatted)
         # If category_filter or hydration wiped all hits, treat as no useful
         # fast-path result — return None so caller records low_hits fallback
@@ -2458,8 +2464,27 @@ class KnowledgeOrchestrator:
         if not skip_min_hits and not formatted:
             return None
         metrics.inc(FAST_PATH_HITS_TOTAL, '{path="fts5"}')
-        metrics.inc(FAST_PATH_RERANK_SKIPPED_TOTAL)
         return formatted
+
+    def _rerank_fts5_results(
+        self,
+        query_text: str,
+        formatted: List[Dict[str, Any]],
+        max_results: int,
+    ) -> List[Dict[str, Any]]:
+        """Apply cross-encoder rerank to fast-path results, preserving schema.
+
+        The reranker reads ``doc["document"]`` and writes ``doc["reranker_score"]``.
+        Fast-path items use ``"content"`` as the text field, so alias it in and
+        pop it out. ``search_method`` stays ``"fts5"`` — rerank is a layered
+        rescorer, not a path change.
+        """
+        for item in formatted:
+            item["document"] = item.get("content", "")
+        reranked = self.reranker.rerank(query_text, formatted, top_k=max_results)
+        for item in reranked:
+            item.pop("document", None)
+        return reranked
 
     def _format_fts5_results(
         self,

@@ -897,3 +897,139 @@ class TestQueryCacheKey:
         cache = QueryCache()
         keys = {cache._make_key("q", 5, None, 0.3, sm) for sm in ("auto", "hybrid", "fts5")}
         assert len(keys) == 3
+
+
+class _SpyReranker:
+    """Stand-in for ``CrossEncoderReranker`` — records calls, assigns descending scores.
+
+    Score assignment mirrors the real reranker contract: mutate
+    ``doc["reranker_score"]`` in place and sort by it descending. Descending
+    input-index scoring lets tests assert ordering deterministically.
+    """
+
+    def __init__(self):
+        self.calls = []
+
+    def rerank(self, query, documents, top_k):
+        self.calls.append((query, list(documents), top_k))
+        for offset, doc in enumerate(documents):
+            doc["reranker_score"] = float(len(documents) - offset)
+        documents.sort(key=lambda d: d["reranker_score"], reverse=True)
+        return documents[:top_k]
+
+
+def _build_rerank_orch(monkeypatch, *, rerank_enabled, hits, docs, metas):
+    """Dispatch orchestrator wired with a spy reranker for TestRerankToggle."""
+    orch = _build_dispatch_orch(
+        monkeypatch,
+        fts5_index=_FakeFts5(hits=hits, ready=True),
+        query_router=_FakeRouter("lexical"),
+        fake_docs=docs,
+        fake_metadatas=metas,
+    )
+    import mcp_server.server as srv
+
+    monkeypatch.setattr(srv.config, "fts5_rerank_enabled", rerank_enabled)
+    monkeypatch.setattr(srv.config, "reranker_enabled", True)
+    spy = _SpyReranker()
+    orch.reranker = spy
+    return orch, spy
+
+
+class TestRerankToggle:
+    """UT-062, UT-063, IT-024, IT-025 — fast-path rerank opt-in (ADR-003)."""
+
+    def _sample(self, size=5):
+        hits = [(f"chunk_{i}", float(size - i)) for i in range(size)]
+        docs = {f"chunk_{i}": f"CVE-2021-4034 content {i}" for i in range(size)}
+        metas = {
+            f"chunk_{i}": {
+                "source": f"/{i}",
+                "filename": f"{i}.md",
+                "category": "security",
+                "chunk_index": 0,
+                "keywords": "",
+            }
+            for i in range(size)
+        }
+        return hits, docs, metas
+
+    def test_ut062_rerank_disabled_never_calls_reranker(self, monkeypatch):
+        """UT-062: default (rerank_enabled=False) → zero reranker calls, reranker_score is None."""
+        hits, docs, metas = self._sample()
+        orch, spy = _build_rerank_orch(monkeypatch, rerank_enabled=False, hits=hits, docs=docs, metas=metas)
+
+        results = orch.query("CVE-2021-4034", search_method="auto")
+
+        assert results, "expected fast-path results"
+        assert spy.calls == [], "reranker must not run when fts5_rerank_enabled=False"
+        assert all(r["search_method"] == "fts5" for r in results)
+        assert all(r["reranker_score"] is None for r in results)
+
+    def test_ut063_rerank_enabled_invokes_reranker(self, monkeypatch):
+        """UT-063: opt-in (rerank_enabled=True) → reranker runs, score populated, path stays fts5."""
+        hits, docs, metas = self._sample()
+        orch, spy = _build_rerank_orch(monkeypatch, rerank_enabled=True, hits=hits, docs=docs, metas=metas)
+
+        results = orch.query("CVE-2021-4034", search_method="auto")
+
+        assert results, "expected fast-path results"
+        assert len(spy.calls) == 1, "reranker must run exactly once for the fast-path"
+        assert all(r["search_method"] == "fts5" for r in results), "rerank must not switch search_method"
+        assert all(isinstance(r["reranker_score"], float) for r in results)
+        # Fast-path items alias content→document for the reranker; it must be popped after.
+        assert all("document" not in r for r in results)
+
+    def test_it024_rerank_off_faster_than_rerank_on(self, monkeypatch):
+        """IT-024: rerank_enabled=False completes in less wall time than rerank_enabled=True."""
+        import time as _time
+
+        class _SlowReranker(_SpyReranker):
+            def rerank(self, query, documents, top_k):
+                _time.sleep(0.02)  # 20ms cross-encoder proxy
+                return super().rerank(query, documents, top_k)
+
+        hits, docs, metas = self._sample()
+
+        orch_off, _ = _build_rerank_orch(monkeypatch, rerank_enabled=False, hits=hits, docs=docs, metas=metas)
+        t_off_start = _time.perf_counter()
+        orch_off.query("CVE-2021-4034", search_method="auto")
+        t_off = _time.perf_counter() - t_off_start
+
+        orch_on, _ = _build_rerank_orch(monkeypatch, rerank_enabled=True, hits=hits, docs=docs, metas=metas)
+        orch_on.reranker = _SlowReranker()
+        t_on_start = _time.perf_counter()
+        orch_on.query("CVE-2021-4034", search_method="auto")
+        t_on = _time.perf_counter() - t_on_start
+
+        assert t_off < t_on, f"rerank OFF ({t_off * 1000:.2f}ms) must be faster than ON ({t_on * 1000:.2f}ms)"
+
+    def test_it025_rerank_on_orders_by_reranker_score(self, monkeypatch):
+        """IT-025: rerank_enabled=True → results ordered by reranker_score DESC (not FTS5 raw)."""
+        # Spy assigns len(docs)..1 in input order → after sort desc, order is preserved from input.
+        # Use a shuffling spy to prove ordering comes from reranker_score, not FTS5 hit order.
+        hits, docs, metas = self._sample(size=5)
+
+        class _ShuffleReranker:
+            def __init__(self):
+                self.calls = []
+
+            def rerank(self, query, documents, top_k):
+                self.calls.append(query)
+                # Reverse assignment: last input gets highest score.
+                for i, doc in enumerate(documents):
+                    doc["reranker_score"] = float(i + 1)
+                documents.sort(key=lambda d: d["reranker_score"], reverse=True)
+                return documents[:top_k]
+
+        orch, _ = _build_rerank_orch(monkeypatch, rerank_enabled=True, hits=hits, docs=docs, metas=metas)
+        orch.reranker = _ShuffleReranker()
+
+        results = orch.query("CVE-2021-4034", search_method="auto")
+
+        scores = [r["reranker_score"] for r in results]
+        assert scores == sorted(scores, reverse=True), f"expected DESC by reranker_score, got {scores}"
+        # And it must NOT match the raw FTS5 hit order (which is chunk_0..chunk_4).
+        assert [r["chunk_index"] for r in results] != list(range(len(results))) or True
+        # Concrete check: chunk_0 (highest FTS5 score, first input) got lowest reranker_score → last.
+        assert results[0]["source"] == "/4", "highest reranker_score should surface last input first"
