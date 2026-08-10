@@ -20,6 +20,10 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from mcp_server.fts5_index import Fts5LexicalIndex
 
 # Allow running directly from source checkout ``python scripts/build_fts5_index.py``.
 _ROOT = Path(__file__).resolve().parents[1]
@@ -70,7 +74,7 @@ def _drop_existing(data_dir: Path) -> None:
             print(f"[BUILD-FTS5] could not remove {path}: {exc}")
 
 
-def _iter_chroma_chunks(collection) -> list[tuple[str, str, str, str]]:
+def _iter_chroma_chunks(collection: Any) -> list[tuple[str, str, str, str]]:
     count = collection.count()
     if count == 0:
         return []
@@ -94,7 +98,7 @@ def _iter_chroma_chunks(collection) -> list[tuple[str, str, str, str]]:
     return rows
 
 
-def _open_index(data_dir: Path):
+def _open_index(data_dir: Path) -> "Fts5LexicalIndex":
     from mcp_server.fts5_index import Fts5LexicalIndex
 
     db = data_dir / "fts5_index.db"
@@ -102,7 +106,7 @@ def _open_index(data_dir: Path):
     return Fts5LexicalIndex(db_path=db, state_path=state)
 
 
-def _open_collection(data_dir: Path):
+def _open_collection(data_dir: Path) -> Any:
     import chromadb
 
     from mcp_server.config import config
@@ -111,7 +115,7 @@ def _open_collection(data_dir: Path):
     return client.get_or_create_collection(name=config.collection_name)
 
 
-def _run_migration_sync(index, rows: list[tuple[str, str, str, str]], verbose: bool) -> None:
+def _run_migration_sync(index: "Fts5LexicalIndex", rows: list[tuple[str, str, str, str]], verbose: bool) -> None:
     total = len(rows)
     started_at = datetime.now(timezone.utc).isoformat()
     index._write_state("in_progress", total, 0, started_at, None, None)  # noqa: SLF001
