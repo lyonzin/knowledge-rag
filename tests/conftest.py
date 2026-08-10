@@ -354,6 +354,34 @@ def sample_lexical_queries():
     return ["MDR-AD002", "CVE-2021-4034", "T1078.001", "CWE-79", "H1-P4-XXX-1234"]
 
 
+def _get_metric_value(needle: str) -> float:
+    """Parse Prometheus exposition, return counter value for the exact metric.
+
+    ``needle`` should be the fully-qualified name+labels, e.g.
+    ``knowledge_rag_fast_path_fallback_total{reason="low_hits"}``.
+    Returns 0.0 when the metric has never been observed.
+
+    Fixes the ``.exposition().count(needle)`` anti-pattern: Prometheus emits
+    each counter on a single line, so counting substring occurrences always
+    yields 0 or 1 regardless of the actual counter value — tests that expect
+    ``after > before`` would fail as soon as any prior test in the session
+    incremented the counter.
+    """
+    from mcp_server.metrics import get_metrics
+
+    prefix = needle + " "
+    for line in get_metrics().exposition().split("\n"):
+        if line.startswith(prefix):
+            return float(line.split()[-1])
+    return 0.0
+
+
+@pytest.fixture
+def get_metric_value():
+    """Fixture form of ``_get_metric_value`` for tests that prefer injection."""
+    return _get_metric_value
+
+
 @pytest.fixture
 def mcp_client_test():
     """In-process MCP client harness for e2e tests (Task 03, IT-020/E2E-*).

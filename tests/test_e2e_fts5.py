@@ -107,7 +107,8 @@ class TestE2EFts5:
     def test_e2e004_fallback_low_hits(self, monkeypatch, mcp_client_test):
         """E2E-004: min_hits=5 + only 2 fts5 hits → fallback → hybrid label."""
         import mcp_server.server as srv
-        from mcp_server.metrics import FAST_PATH_FALLBACK_TOTAL, get_metrics
+        from mcp_server.metrics import FAST_PATH_FALLBACK_TOTAL
+        from tests.conftest import _get_metric_value
         from tests.test_search import _FakeFts5, _FakeRouter
 
         fts5 = _FakeFts5(hits=[("chunk_0", 5.0), ("chunk_1", 4.0)], ready=True)
@@ -116,11 +117,11 @@ class TestE2EFts5:
         monkeypatch.setattr(srv.config, "fts5_min_hits", 5)
 
         needle = f'{FAST_PATH_FALLBACK_TOTAL}{{reason="low_hits"}}'
-        before = get_metrics().exposition().count(needle)
+        before = _get_metric_value(needle)
         mcp_client_test.call("search_knowledge", query="MDR-AD999")
-        after = get_metrics().exposition().count(needle)
+        after = _get_metric_value(needle)
 
-        assert after > before
+        assert after > before, f"{needle} was not incremented"
 
     def test_e2e005_kill_switch_hybrid_override_bypasses_fts5(self, monkeypatch, mcp_client_test):
         """E2E-005: search_method='hybrid' override forces hybrid even for lexical query."""

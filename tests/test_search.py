@@ -750,16 +750,17 @@ class TestFtsDispatch:
 
     def test_it006_low_hits_triggers_fallback_metric(self, monkeypatch):
         """IT-006: lexical + 0 fts5 hits + min_hits=3 → fallback_total{reason=low_hits} +1."""
-        from mcp_server.metrics import FAST_PATH_FALLBACK_TOTAL, get_metrics
+        from mcp_server.metrics import FAST_PATH_FALLBACK_TOTAL
+        from tests.conftest import _get_metric_value
 
         fts5 = _FakeFts5(hits=[], ready=True)
         router = _FakeRouter("lexical")
         orch = _build_dispatch_orch(monkeypatch, fts5_index=fts5, query_router=router)
 
         needle = f'{FAST_PATH_FALLBACK_TOTAL}{{reason="low_hits"}}'
-        before = get_metrics().exposition().count(needle)
+        before = _get_metric_value(needle)
         results = orch.query("T-800", search_method="auto")
-        after = get_metrics().exposition().count(needle)
+        after = _get_metric_value(needle)
 
         assert results == []
         assert after > before, f"{needle} was not incremented"
@@ -780,17 +781,19 @@ class TestFtsDispatch:
         import sqlite3
 
         from mcp_server.metrics import FAST_PATH_ERRORS_TOTAL, get_metrics
+        from tests.conftest import _get_metric_value
 
         fts5 = _FakeFts5(raises=sqlite3.OperationalError("readonly"))
         router = _FakeRouter("lexical")
         orch = _build_dispatch_orch(monkeypatch, fts5_index=fts5, query_router=router)
 
-        exposition_before = get_metrics().exposition()
+        needle = f'{FAST_PATH_ERRORS_TOTAL}{{error_class="OperationalError"}}'
+        before = _get_metric_value(needle)
         orch.query("CVE-2021-4034", search_method="auto")
-        exposition_after = get_metrics().exposition()
+        after = _get_metric_value(needle)
 
-        assert 'error_class="OperationalError"' in exposition_after
-        assert exposition_after.count(FAST_PATH_ERRORS_TOTAL) > exposition_before.count(FAST_PATH_ERRORS_TOTAL)
+        assert 'error_class="OperationalError"' in get_metrics().exposition()
+        assert after > before, f"{needle} was not incremented"
 
     def test_it009_fts5_databaseerror_falls_back(self, monkeypatch):
         """IT-009: fts5.search raises DatabaseError → fallback + error metric labeled correctly."""
