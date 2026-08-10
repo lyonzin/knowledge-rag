@@ -18,6 +18,8 @@ FAST_PATH_FALLBACK_TOTAL = "knowledge_rag_fast_path_fallback_total"
 FAST_PATH_LATENCY_SECONDS = "knowledge_rag_fast_path_latency_seconds"
 FAST_PATH_ERRORS_TOTAL = "knowledge_rag_fast_path_errors_total"
 FAST_PATH_RERANK_SKIPPED_TOTAL = "knowledge_rag_fast_path_rerank_skipped_total"
+FAST_PATH_MIGRATION_DOCS_INDEXED = "knowledge_rag_fast_path_migration_docs_indexed"
+FAST_PATH_MIGRATION_DOCS_TOTAL = "knowledge_rag_fast_path_migration_docs_total"
 
 # Histogram buckets pinned by TechSpec — cover fast-path targets (p95 <=10ms)
 # plus a long tail so runaway queries are still visible in the +Inf bucket.

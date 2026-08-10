@@ -24,6 +24,42 @@
         "Fts5LexicalIndex": {
           "bases": [],
           "methods": {
+            "add_document": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "chunk_id"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "content"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "filename"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "category"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
             "close": {
               "args": [
                 {
@@ -60,6 +96,24 @@
               "is_async": false,
               "returns_annotated": true
             },
+            "remove_document": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "chunk_id"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
             "search": {
               "args": [
                 {
@@ -84,6 +138,42 @@
               "is_async": false,
               "returns_annotated": true
             },
+            "start_migration_background": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "chunk_iter_factory"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "docs_total"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "keyword_only",
+                  "name": "resume_from"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "keyword_only",
+                  "name": "on_progress"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
             "state": {
               "args": [
                 {
@@ -91,6 +181,42 @@
                   "has_default": false,
                   "kind": "positional",
                   "name": "self"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "update_document": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "chunk_id"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "content"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "filename"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "category"
                 }
               ],
               "is_async": false,

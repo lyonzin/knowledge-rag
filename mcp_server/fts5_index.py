@@ -20,8 +20,13 @@ import re
 import sqlite3
 import tempfile
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Callable, Iterable, List, Optional, Sequence, Tuple
+
+ChunkRow = Tuple[str, str, str, str]
+ChunkIterFactory = Callable[[], Iterable[ChunkRow]]
+ProgressCallback = Callable[[int, int], None]
 
 _FTS5_TOKENIZER = "unicode61 remove_diacritics 2 tokenchars '-_.'"
 
@@ -251,3 +256,179 @@ class Fts5LexicalIndex:
                     self._conn.close()
                 finally:
                     self._conn = None
+
+    # -----------------------------------------------------------------
+    # CRUD sync (Task 05, ADR-008). SQL nativo incremental — diverge do
+    # BM25 full-rebuild pattern porque FTS5 tem INSERT/DELETE O(1) e o
+    # full rebuild custaria segundos por mutation em corpus 3865 docs.
+    # Todos os writes acquire ``_fts5_lock`` (RLock, Q2 do TechSpec) e
+    # sao serializados pelo WAL SQLite (ADR-001).
+    # -----------------------------------------------------------------
+
+    def add_document(self, chunk_id: str, content: str, filename: str, category: str) -> None:
+        """Insert one chunk row via ``INSERT`` (ADR-008)."""
+        if self._conn is None:
+            raise Fts5CorruptError("FTS5 connection is closed")
+        with self._fts5_lock:
+            self._conn.execute(
+                "INSERT INTO fts5_documents (chunk_id, content, filename, category) VALUES (?, ?, ?, ?)",
+                (chunk_id, content, filename, category),
+            )
+            self._conn.commit()
+
+    def remove_document(self, chunk_id: str) -> None:
+        """Delete every row matching ``chunk_id`` (ADR-008)."""
+        if self._conn is None:
+            raise Fts5CorruptError("FTS5 connection is closed")
+        with self._fts5_lock:
+            self._conn.execute(
+                "DELETE FROM fts5_documents WHERE chunk_id = ?",
+                (chunk_id,),
+            )
+            self._conn.commit()
+
+    def update_document(self, chunk_id: str, content: str, filename: str, category: str) -> None:
+        """DELETE + INSERT atomico — FTS5 nao tem UPDATE efficient em virtual table."""
+        if self._conn is None:
+            raise Fts5CorruptError("FTS5 connection is closed")
+        with self._fts5_lock:
+            self._conn.execute("DELETE FROM fts5_documents WHERE chunk_id = ?", (chunk_id,))
+            self._conn.execute(
+                "INSERT INTO fts5_documents (chunk_id, content, filename, category) VALUES (?, ?, ?, ?)",
+                (chunk_id, content, filename, category),
+            )
+            self._conn.commit()
+
+    # -----------------------------------------------------------------
+    # Migration lifecycle (Task 05). ``start_migration_background``
+    # dispara uma thread nao-daemon (join graceful no shutdown), que
+    # persiste checkpoint a cada 100 docs no marker file. Retomavel:
+    # se marker mostra ``in_progress`` + ``docs_indexed=N``, o worker
+    # skipa as primeiras N rows do iterator e continua do batch N+1.
+    # -----------------------------------------------------------------
+
+    def start_migration_background(
+        self,
+        chunk_iter_factory: ChunkIterFactory,
+        docs_total: int,
+        *,
+        resume_from: int = 0,
+        on_progress: Optional[ProgressCallback] = None,
+    ) -> threading.Thread:
+        """Launch the migration daemon thread. Returns the started thread."""
+        thread = threading.Thread(
+            target=self._migration_worker,
+            args=(chunk_iter_factory, docs_total, resume_from, on_progress),
+            name="fts5-migration",
+            daemon=False,
+        )
+        thread.start()
+        return thread
+
+    def _migration_worker(
+        self,
+        chunk_iter_factory: ChunkIterFactory,
+        docs_total: int,
+        resume_from: int,
+        on_progress: Optional[ProgressCallback],
+    ) -> None:
+        started_at = datetime.now(timezone.utc).isoformat()
+        docs_indexed = int(resume_from)
+        self._write_state("in_progress", docs_total, docs_indexed, started_at, None, None)
+        try:
+            docs_indexed = self._run_migration_batches(
+                chunk_iter_factory, docs_total, docs_indexed, started_at, on_progress
+            )
+        except Exception as exc:  # noqa: BLE001 — one place to record every failure
+            self._write_state(
+                "failed",
+                docs_total,
+                docs_indexed,
+                started_at,
+                None,
+                f"{exc.__class__.__name__}: {exc}",
+            )
+            print(f"[FTS5] migration failed at {docs_indexed}/{docs_total}: {exc}")
+            return
+        completed_at = datetime.now(timezone.utc).isoformat()
+        self._write_state("complete", docs_total, docs_indexed, started_at, completed_at, None)
+        with self._fts5_lock:
+            self._ready = True
+        print(f"[FTS5] migration complete: {docs_indexed} docs indexed")
+
+    def _run_migration_batches(
+        self,
+        chunk_iter_factory: ChunkIterFactory,
+        docs_total: int,
+        docs_indexed: int,
+        started_at: str,
+        on_progress: Optional[ProgressCallback],
+    ) -> int:
+        """Consume the iterator batch-by-batch. Returns the final ``docs_indexed``."""
+        resume_from = docs_indexed
+        seen = 0
+        batch: List[ChunkRow] = []
+        last_percent_logged = -10
+        for row in chunk_iter_factory():
+            if seen < resume_from:
+                seen += 1
+                continue
+            seen += 1
+            batch.append(row)
+            if len(batch) >= 100:
+                self._populate_batch(batch)
+                docs_indexed += len(batch)
+                batch = []
+                self._write_state("in_progress", docs_total, docs_indexed, started_at, None, None)
+                if on_progress is not None:
+                    on_progress(docs_indexed, docs_total)
+                last_percent_logged = self._maybe_log_progress(docs_indexed, docs_total, last_percent_logged)
+        if batch:
+            self._populate_batch(batch)
+            docs_indexed += len(batch)
+            if on_progress is not None:
+                on_progress(docs_indexed, docs_total)
+        return docs_indexed
+
+    @staticmethod
+    def _maybe_log_progress(docs_indexed: int, docs_total: int, last_percent_logged: int) -> int:
+        """Emit an INFO log line every 10% of progress. Returns the new watermark."""
+        if docs_total <= 0:
+            return last_percent_logged
+        percent = int(100 * docs_indexed / docs_total)
+        if percent >= last_percent_logged + 10:
+            print(f"[FTS5] migration progress: {percent}% ({docs_indexed}/{docs_total})")
+            return percent
+        return last_percent_logged
+
+    def _populate_batch(self, rows: Sequence[ChunkRow]) -> None:
+        """Insert a batch under ``_fts5_lock``. Raises on SQL failure."""
+        if self._conn is None:
+            raise Fts5MigrationError("FTS5 connection is closed during migration")
+        with self._fts5_lock:
+            self._conn.executemany(
+                "INSERT INTO fts5_documents (chunk_id, content, filename, category) VALUES (?, ?, ?, ?)",
+                rows,
+            )
+            self._conn.commit()
+
+    def _write_state(
+        self,
+        status: str,
+        docs_total: int,
+        docs_indexed: int,
+        started_at: str,
+        completed_at: Optional[str],
+        error: Optional[str],
+    ) -> None:
+        """Persist the marker file with the canonical schema (TechSpec §Q3)."""
+        self._migration_state.write(
+            {
+                "status": status,
+                "docs_total": int(docs_total),
+                "docs_indexed": int(docs_indexed),
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "error": error,
+            }
+        )

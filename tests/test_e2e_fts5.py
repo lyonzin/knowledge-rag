@@ -151,6 +151,30 @@ class TestE2EFts5:
         assert payload.get("status") in ("no_results", "success")
         assert fts5.search_calls == []
 
+    def test_e2e006_forced_fts5_with_migration_pending_raises(self, monkeypatch, mcp_client_test):
+        """E2E-006 (US-013.EC-2): search_method='fts5' + migration in-progress → error JSON.
+
+        The MCP wrapper must surface ``Fts5NotReadyError`` as a structured
+        error payload (not silently fall back to hybrid) so a debug caller
+        immediately sees the mismatch between the requested path and the
+        current index state.
+        """
+        from tests.test_search import _FakeFts5, _FakeRouter
+
+        # ready=False simulates migration in progress.
+        fts5 = _FakeFts5(hits=[], ready=False)
+        router = _FakeRouter("semantic")
+        _install_dispatch_orch(monkeypatch, fts5, router)
+
+        payload = mcp_client_test.call("search_knowledge", query="CVE-2021-4034", search_method="fts5")
+
+        assert isinstance(payload, dict)
+        assert payload.get("status") == "error" or "error" in payload
+        # Some tolerance on shape — the important contract is that no
+        # results come back and the message names the FTS5 readiness issue.
+        error_msg = str(payload.get("error") or payload.get("message") or "").lower()
+        assert "fts5" in error_msg or "not ready" in error_msg
+
     def test_e2e008_legacy_mcp_client_calls_never_break(self, monkeypatch, mcp_client_test):
         """E2E-008: 20 queries WITHOUT ``search_method`` all return well-formed JSON."""
         from tests.test_search import _FakeFts5, _FakeRouter

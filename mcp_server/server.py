@@ -37,7 +37,7 @@ from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 # ChromaDB
 import chromadb
@@ -68,6 +68,8 @@ from .metrics import (
     FAST_PATH_FALLBACK_TOTAL,
     FAST_PATH_HITS_TOTAL,
     FAST_PATH_LATENCY_SECONDS,
+    FAST_PATH_MIGRATION_DOCS_INDEXED,
+    FAST_PATH_MIGRATION_DOCS_TOTAL,
     FAST_PATH_RERANK_SKIPPED_TOTAL,
     get_metrics,
     instrument,
@@ -2206,6 +2208,9 @@ class KnowledgeOrchestrator:
         self.query_cache.invalidate()
         # Trigger a fresh build from the swapped-in ChromaDB contents.
         self._ensure_bm25_index()
+        # ADR-008 ``on_reindex_complete`` hook — same rationale as the
+        # destructive path: FTS5 is derived from Chroma and must be rebuilt.
+        self._fts5_reset_and_rebuild()
 
     def _rebuild_destructive(self) -> Dict[str, Any]:
         """Legacy destructive rebuild — DELETE everything and re-embed.
@@ -2250,6 +2255,10 @@ class KnowledgeOrchestrator:
 
         self.bm25_index.build_index()
         self._bm25_initialized = True
+        # ADR-008: FTS5 is a derived index; drop and repopulate from the
+        # freshly-rebuilt Chroma corpus so the lexical fast-path stays
+        # consistent with the vector store.
+        self._fts5_reset_and_rebuild()
 
         elapsed = time.time() - start_time
         stats["elapsed_seconds"] = round(elapsed, 2)
@@ -2365,6 +2374,13 @@ class KnowledgeOrchestrator:
         Kept separate from ``__init__`` so failures surface with a clear source
         (config typo vs Chroma issue vs FTS5 issue) and callers can retry after
         fixing config without rebuilding the whole orchestrator.
+
+        Task 05: after instantiation, inspect the marker file. When status is
+        anything other than ``complete``, dispatch the lazy background
+        migration so first-time users (fresh install / zero-touch upgrade)
+        get a populated index without editing config or running a script.
+        Interrupted migrations (``in_progress`` with a partial
+        ``docs_indexed`` count) resume from the last checkpointed batch.
         """
         db_path = config.data_dir / "fts5_index.db"
         state_path = config.data_dir / "fts5_migration.state"
@@ -2373,6 +2389,141 @@ class KnowledgeOrchestrator:
         # malformed — treat that as a fatal startup error so the operator
         # sees the broken pattern immediately instead of on the first query.
         self.query_router = QueryRouter(config.fts5_patterns)
+        self._maybe_start_fts5_migration()
+
+    def _maybe_start_fts5_migration(self) -> None:
+        """Dispatch the lazy FTS5 rebuild when the marker isn't ``complete``."""
+        if self.fts5_index is None:
+            return
+        state_payload = self.fts5_index.state.read() or {}
+        status = state_payload.get("status")
+        if status == "complete":
+            return
+        resume_from = int(state_payload.get("docs_indexed", 0)) if status == "in_progress" else 0
+        try:
+            docs_total = int(self.collection.count())
+        except Exception as exc:  # noqa: BLE001 — Chroma error must not kill startup
+            print(f"[FTS5] migration skipped — cannot count corpus: {exc}")
+            return
+        if docs_total <= 0:
+            # Empty corpus: nothing to rebuild. Mark as complete so the
+            # fast-path becomes ready immediately for future writes.
+            self.fts5_index._write_state(  # noqa: SLF001 — trusted internal
+                "complete",
+                0,
+                0,
+                datetime.now().isoformat(),
+                datetime.now().isoformat(),
+                None,
+            )
+            with self.fts5_index._fts5_lock:  # noqa: SLF001
+                self.fts5_index._ready = True  # noqa: SLF001
+            return
+        print(f"[FTS5] migration starting (resume_from={resume_from}, docs_total={docs_total})")
+        get_metrics().set_gauge(FAST_PATH_MIGRATION_DOCS_TOTAL, float(docs_total))
+        get_metrics().set_gauge(FAST_PATH_MIGRATION_DOCS_INDEXED, float(resume_from))
+        self.fts5_index.start_migration_background(
+            self._iter_chroma_chunks_for_fts5,
+            docs_total,
+            resume_from=resume_from,
+            on_progress=self._fts5_migration_progress,
+        )
+
+    @staticmethod
+    def _fts5_migration_progress(docs_indexed: int, docs_total: int) -> None:
+        """Push the migration checkpoint into Prometheus gauges."""
+        metrics = get_metrics()
+        metrics.set_gauge(FAST_PATH_MIGRATION_DOCS_INDEXED, float(docs_indexed))
+        metrics.set_gauge(FAST_PATH_MIGRATION_DOCS_TOTAL, float(docs_total))
+
+    def _iter_chroma_chunks_for_fts5(self) -> Iterable[Tuple[str, str, str, str]]:
+        """Yield ``(chunk_id, content, filename, category)`` rows in stable order.
+
+        Sorted by ``chunk_id`` so a resumed migration replays deterministically
+        (worker skips the first ``docs_indexed`` yields).
+        """
+        try:
+            count = self.collection.count()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[FTS5] chunk iterator aborted — Chroma count failed: {exc}")
+            return
+        if count == 0:
+            return
+        fetched = self.collection.get(include=["documents", "metadatas"], limit=count)
+        ids = fetched.get("ids") or []
+        docs = fetched.get("documents") or []
+        metas = fetched.get("metadatas") or []
+        order = sorted(range(len(ids)), key=lambda i: ids[i])
+        for i in order:
+            meta = metas[i] or {}
+            yield (
+                str(ids[i]),
+                str(docs[i] or ""),
+                str(meta.get("filename", "") or ""),
+                str(meta.get("category", "") or ""),
+            )
+
+    def _fts5_sync_add(self, ids: Sequence[str], docs: Sequence[str], metas: Sequence[Dict[str, Any]]) -> None:
+        """Best-effort CRUD sync hook after a successful ChromaDB write.
+
+        Errors are caught + logged + tallied on the FTS5 error counter
+        (``error_class="Fts5CrudSyncError"``) but NEVER raised — upstream
+        CRUD must keep succeeding even when the FTS5 secondary index is
+        temporarily unwritable (disk full, permission drift). See ADR-008.
+        """
+        if not (config.fts5_enabled and self.fts5_index is not None):
+            return
+        for chunk_id, content, meta in zip(ids, docs, metas):
+            try:
+                self.fts5_index.add_document(
+                    str(chunk_id),
+                    str(content or ""),
+                    str((meta or {}).get("filename", "")),
+                    str((meta or {}).get("category", "")),
+                )
+            except Exception as exc:  # noqa: BLE001 — see docstring; NEVER raise
+                get_metrics().inc(FAST_PATH_ERRORS_TOTAL, '{error_class="Fts5CrudSyncError"}')
+                print(f"[FTS5] add sync failed for chunk_id={chunk_id}: {exc}")
+
+    def _fts5_sync_remove_by_doc_id(self, doc_id: str) -> None:
+        """Remove every chunk whose id begins with ``<doc_id>_`` (see ``_dedup_chunks``)."""
+        if not (config.fts5_enabled and self.fts5_index is not None):
+            return
+        try:
+            results = self.collection.get(where={"doc_id": doc_id}, include=[])
+        except Exception as exc:  # noqa: BLE001
+            get_metrics().inc(FAST_PATH_ERRORS_TOTAL, '{error_class="Fts5CrudSyncError"}')
+            print(f"[FTS5] remove sync fetch failed for doc_id={doc_id}: {exc}")
+            return
+        for chunk_id in results.get("ids") or []:
+            try:
+                self.fts5_index.remove_document(str(chunk_id))
+            except Exception as exc:  # noqa: BLE001
+                get_metrics().inc(FAST_PATH_ERRORS_TOTAL, '{error_class="Fts5CrudSyncError"}')
+                print(f"[FTS5] remove sync failed for chunk_id={chunk_id}: {exc}")
+
+    def _fts5_reset_and_rebuild(self) -> None:
+        """Drop the FTS5 database + marker file then start a fresh migration.
+
+        Called from ``nuclear_rebuild`` and swap-based rebuilds — the corpus
+        was recreated from scratch so the derived FTS5 index MUST be dropped
+        and repopulated from the swapped-in ChromaDB contents.
+        """
+        if not (config.fts5_enabled and self.fts5_index is not None):
+            return
+        try:
+            self.fts5_index.close()
+        except Exception:  # noqa: BLE001 — best-effort close
+            pass
+        db_path = config.data_dir / "fts5_index.db"
+        state_path = config.data_dir / "fts5_migration.state"
+        for path in (db_path, state_path, db_path.with_suffix(".db-wal"), db_path.with_suffix(".db-shm")):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                print(f"[FTS5] could not remove {path}: {exc}")
+        self.fts5_index = Fts5LexicalIndex(db_path=db_path, state_path=state_path)
+        self._maybe_start_fts5_migration()
 
     def _maybe_dispatch_fts5(
         self,
@@ -3039,6 +3190,7 @@ class KnowledgeOrchestrator:
         self._save_metadata()
         self.query_cache.invalidate()
         self.bm25_index.build_index()
+        self._fts5_sync_add_from_doc(doc)
 
         return {
             "chunks_added": chunks_added,
@@ -3046,6 +3198,15 @@ class KnowledgeOrchestrator:
             "category": category,
             "filepath": str(full_path),
         }
+
+    def _fts5_sync_add_from_doc(self, doc: Document) -> None:
+        """Insert every chunk of ``doc`` into FTS5. Best-effort (ADR-008)."""
+        if not (config.fts5_enabled and self.fts5_index is not None and doc.chunks):
+            return
+        ids = [f"{doc.id}_{chunk.index}" for chunk in doc.chunks]
+        docs_content = [chunk.content for chunk in doc.chunks]
+        metas = [{"filename": doc.filename, "category": doc.category} for _ in doc.chunks]
+        self._fts5_sync_add(ids, docs_content, metas)
 
     def update_document_content(self, filepath: str, content: str) -> Dict[str, Any]:
         """Update an existing document. Removes old chunks and re-indexes.
@@ -3068,6 +3229,7 @@ class KnowledgeOrchestrator:
 
         old_chunks_removed = 0
         if doc_id:
+            self._fts5_sync_remove_by_doc_id(doc_id)
             old_chunks_removed = self._remove_document_chunks(doc_id)
             self._source_to_docid.pop(filepath_resolved, None)
             del self._indexed_docs[doc_id]
@@ -3104,6 +3266,7 @@ class KnowledgeOrchestrator:
         self._save_metadata()
         self.query_cache.invalidate()
         self.bm25_index.build_index()
+        self._fts5_sync_add_from_doc(doc)
 
         return {
             "old_chunks_removed": old_chunks_removed,
@@ -3131,6 +3294,7 @@ class KnowledgeOrchestrator:
         if not doc_id:
             return {"error": f"Document not found in index: {filepath}"}
 
+        self._fts5_sync_remove_by_doc_id(doc_id)
         chunks_removed = self._remove_document_chunks(doc_id)
         self._source_to_docid.pop(filepath_resolved, None)
         del self._indexed_docs[doc_id]
