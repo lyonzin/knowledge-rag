@@ -1155,6 +1155,21 @@ class KnowledgeOrchestrator:
     """Main orchestrator for knowledge retrieval with semantic search + keyword routing"""
 
     def __init__(self):
+        # Instance-scoped reindex lock. MUST be per-instance — the previous
+        # class-level `_index_lock` was silently shared across staging/main
+        # orchestrators created by nuclear_rebuild (task 05 swap). When the
+        # staging orch was garbage-collected while holding the lock, the class
+        # attribute stayed acquired forever and every subsequent reindex
+        # returned `reindex_already_running` despite `active: false`.
+        self._index_lock = threading.Lock()
+
+        # GH #161 (v4.8.3): _staging_target holds the staging collection
+        # while populate is running. Write helpers dispatch through
+        # ``_write_collection`` so writes hit staging but the query path
+        # keeps reading ``self.collection`` (production) unchanged.
+        # Zero-downtime is now real, not just a docs promise.
+        self._staging_target = None
+
         self.parser = DocumentParser()
         self.embed_fn = FastEmbedEmbeddings()
 
@@ -1332,11 +1347,22 @@ class KnowledgeOrchestrator:
                     # a later call retries once documents become available.
                     return
 
-                all_data = self.collection.get(include=["documents"], limit=count)
-                if not all_data["ids"] or not all_data["documents"]:
+                # Batch to avoid SQLite "too many SQL variables" (chromadb 1.x
+                # rebuilds IN(?, ?, ...) per row; single get(limit=count) blows
+                # past the 999 default max_variable_number at ~48k chunks).
+                batch_size = 500
+                all_ids: list = []
+                all_docs: list = []
+                for offset in range(0, count, batch_size):
+                    batch = self.collection.get(include=["documents"], limit=batch_size, offset=offset)
+                    if not batch.get("ids"):
+                        break
+                    all_ids.extend(batch["ids"])
+                    all_docs.extend(batch["documents"] or [])
+                if not all_ids or not all_docs:
                     return
 
-                self.bm25_index.add_documents(all_data["ids"], all_data["documents"])
+                self.bm25_index.add_documents(all_ids, all_docs)
                 self.bm25_index.build_index()
                 print(f"[INFO] BM25 index built with {len(self.bm25_index)} documents")
                 self._bm25_initialized = True
@@ -1347,8 +1373,6 @@ class KnowledgeOrchestrator:
     # =========================================================================
     # Indexing
     # =========================================================================
-
-    _index_lock = threading.Lock()
 
     def index_all(
         self,
@@ -1471,11 +1495,21 @@ class KnowledgeOrchestrator:
         chunks_processed = int(resume_state.get("chunks_processed", 0)) if resume_state else 0
         chunks_total_estimate = self._seed_chunks_total_estimate(stats)
 
+        # GH #162 (v4.8.3): committed_this_run tracks only docs successfully
+        # processed by this specific run. The previous checkpoint serialized
+        # ``list(self._indexed_docs.keys())`` — every doc in the metadata,
+        # including ones the current run had not yet reached. Resume then
+        # skipped a changed-but-not-yet-processed doc solely by ID membership,
+        # leaving stale vectors silently. Now checkpoint only writes IDs the
+        # run actually committed, so resume mtime-checks anything unseen.
+        # Prior ``resume_ids`` also fold in so the previous run's committed
+        # doc list survives across interruptions.
         return {
             "op_mode": op_mode,
             "checkpoint_enabled": op_mode == "smart_reindex",
             "last_checkpoint_ts": time.monotonic(),
             "resume_doc_ids": resume_ids,
+            "committed_this_run": set(resume_ids),
             "chunks_processed": chunks_processed,
             "throughput_window": deque(maxlen=100),
             "chunks_total_estimate": chunks_total_estimate,
@@ -1567,6 +1601,7 @@ class KnowledgeOrchestrator:
         # Only bump chunks_processed on success — chunks_added is
         # meaningful only when _index_document returned normally.
         tracking["chunks_processed"] += chunks_added
+        tracking["committed_this_run"].add(doc.id)  # GH #162: only IDs this run committed go into the checkpoint
         self._register_indexed_doc(doc, chunks_added)
 
     def _unchanged_since_last_index(self, doc, existing_doc_id: str) -> bool:
@@ -1691,9 +1726,13 @@ class KnowledgeOrchestrator:
             return
         try:
             self._save_metadata()
+            # GH #162 (v4.8.3): serialize only IDs actually committed by this
+            # run. Serializing ``list(self._indexed_docs.keys())`` conflated
+            # "in metadata" with "processed this run" and hid changed docs on
+            # resume.
             self._write_checkpoint(
                 operation=tracking["op_mode"],
-                indexed_doc_ids=list(self._indexed_docs.keys()),
+                indexed_doc_ids=list(tracking["committed_this_run"]),
                 chunks_processed=tracking["chunks_processed"],
                 started_at=self._reindex_progress.get("started_at"),
             )
@@ -1791,8 +1830,12 @@ class KnowledgeOrchestrator:
             self._add_chunks_parallel(ids, docs, metas, bs, workers)
         else:
             # Single-threaded path (default) — byte-identical to prior behavior.
+            # GH #161 (v4.8.3): _write_collection routes to staging when a
+            # nuclear rebuild is populating, else production. Queries keep
+            # reading self.collection so users see zero-downtime.
+            target = self._write_collection
             for i in range(0, len(ids), bs):
-                self.collection.add(
+                target.add(
                     ids=ids[i : i + bs],
                     documents=docs[i : i + bs],
                     metadatas=metas[i : i + bs],
@@ -1807,10 +1850,13 @@ class KnowledgeOrchestrator:
         """
         from concurrent.futures import ThreadPoolExecutor
 
+        # GH #161 (v4.8.3): route to staging via _write_collection during
+        # nuclear rebuild. Snapshot the target once so all workers agree.
+        target = self._write_collection
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = [
                 pool.submit(
-                    self.collection.add,
+                    target.add,
                     ids=ids[i : i + bs],
                     documents=docs[i : i + bs],
                     metadatas=metas[i : i + bs],
@@ -1821,12 +1867,19 @@ class KnowledgeOrchestrator:
                 f.result()
 
     def _remove_document_chunks(self, doc_id: str) -> int:
-        """Remove all chunks belonging to a document from ChromaDB and BM25."""
+        """Remove all chunks belonging to a document from ChromaDB and BM25.
+
+        GH #161 (v4.8.3): routes through ``_write_collection`` so nuclear
+        rebuild evictions land on staging, not production. Same doc_id may
+        exist in both during populate — that's intentional; production keeps
+        serving queries with the pre-rebuild state until swap.
+        """
+        target = self._write_collection
         try:
-            results = self.collection.get(where={"doc_id": doc_id}, include=[])
+            results = target.get(where={"doc_id": doc_id}, include=[])
 
             if results["ids"]:
-                self.collection.delete(ids=results["ids"])
+                target.delete(ids=results["ids"])
                 self._bm25_initialized = False
                 return len(results["ids"])
         except Exception as e:
@@ -1851,9 +1904,13 @@ class KnowledgeOrchestrator:
 
         self._reindex_progress = self._fresh_reindex_progress(mode, resume_state)
 
+        # GH #163 (v4.8.3): propagate force through smart_reindex so
+        # reindex_documents(force=True) actually re-embeds files after a
+        # prefix/model change (the pre-fix path skipped every unchanged
+        # file). Nuclear_rebuild always re-embeds regardless.
         target = {
             "incremental": lambda: self.index_all(force=False),
-            "smart_reindex": lambda: self.reindex_all(resume_state=resume_state),
+            "smart_reindex": lambda: self.reindex_all(resume_state=resume_state, force=True),
             "nuclear_rebuild": self.nuclear_rebuild,
         }[mode]
 
@@ -1896,12 +1953,18 @@ class KnowledgeOrchestrator:
     def reindex_all(
         self,
         resume_state: Optional[Dict[str, Any]] = None,
+        force: bool = False,
     ) -> Dict[str, Any]:
         """Smart reindex: incremental detection + BM25 rebuild + orphan cleanup.
 
         When ``resume_state`` is provided (v4.8.0 Fase 4), docs listed in
         it are skipped so the interrupted previous run picks up where it
         stopped.
+
+        ``force`` (v4.8.3, GH #163) propagates the caller's re-embed intent
+        down to ``index_all``. The MCP ``reindex_documents(force=True)``
+        migration path documented in ``docs/migration-v4.8.0.md`` relies on
+        this to re-embed unchanged files after prefix/model changes.
         """
         import shutil
 
@@ -1911,11 +1974,13 @@ class KnowledgeOrchestrator:
                 f"({len(resume_state.get('doc_ids', []))} docs already "
                 f"processed, {resume_state.get('chunks_processed', 0)} chunks)"
             )
+        elif force:
+            print("[REINDEX] Starting FORCED smart reindex (re-embedding all files)...")
         else:
             print("[REINDEX] Starting smart incremental reindex...")
         start_time = time.time()
 
-        stats = self.index_all(force=False, resume_state=resume_state)
+        stats = self.index_all(force=force, resume_state=resume_state)
 
         print("[REINDEX] Rebuilding BM25 index...")
         self.bm25_index.clear()
@@ -2033,31 +2098,32 @@ class KnowledgeOrchestrator:
         )
 
     def _populate_staging(self, staging) -> Dict[str, Any]:
-        """Populate ``staging`` by temporarily rebinding orchestrator state.
+        """Populate ``staging`` while ``self.collection`` keeps serving queries.
 
-        The whole indexing pipeline (_index_all_impl, _index_document,
-        _remove_document_chunks, orphan cleanup, checkpoint I/O) reads from
-        ``self.collection`` / ``self.bm25_index`` / ``self._indexed_docs``.
-        Refactoring every helper to accept a target-collection parameter
-        would touch 4 methods and ~200 lines. Temporary rebind is 12 lines
-        and preserves the pipeline byte-for-byte.
+        GH #161 (v4.8.3): the previous implementation rebound
+        ``self.collection = staging`` before populate, so concurrent queries
+        arriving during the hours-long populate phase saw the empty staging
+        collection instead of production. Now writes go through
+        ``_write_collection`` (which returns ``self._staging_target`` when
+        set) while reads on ``self.collection`` continue hitting production.
+        Zero-downtime is finally atomic.
 
-        BM25 is rebound to a throwaway instance so the production BM25
-        index that queries currently rely on is not touched. If populate or
-        the caller's subsequent validate/swap steps fail, ``_saved`` is
-        restored so production state is exactly as it was.
+        BM25 / _indexed_docs / _source_to_docid are still rebound because
+        those in-memory structures have no equivalent read/write split and
+        their staging state is only committed on final swap. If populate or
+        validate raises, ``_saved`` is restored so production sees zero net
+        change.
 
         Returns the ``index_all`` stats dict on success. Rollback is the
         caller's responsibility on any exception raised out of here.
         """
         _saved = {
-            "collection": self.collection,
             "bm25_index": self.bm25_index,
             "_bm25_initialized": self._bm25_initialized,
             "_indexed_docs": dict(self._indexed_docs),
             "_source_to_docid": dict(self._source_to_docid),
         }
-        self.collection = staging
+        self._staging_target = staging  # write dispatch redirects here
         self.bm25_index = BM25Index()
         self._bm25_initialized = True  # suppress lazy rebuild on staging
         self._indexed_docs = {}
@@ -2065,9 +2131,15 @@ class KnowledgeOrchestrator:
         try:
             return self.index_all(force=True)
         except Exception:
+            self._staging_target = None
             for k, v in _saved.items():
                 setattr(self, k, v)
             raise
+
+    @property
+    def _write_collection(self):
+        """Return the collection writes should hit — staging if active, else prod."""
+        return self._staging_target if self._staging_target is not None else self.collection
 
     def _rollback_staging_state(self, saved: Dict[str, Any]) -> None:
         """Restore orchestrator state from a snapshot taken pre-populate."""
@@ -2203,6 +2275,10 @@ class KnowledgeOrchestrator:
             name=prod_name,
             embedding_function=self.embed_fn,
         )
+        # GH #161 (v4.8.3): populate finished + swap done, so _staging_target
+        # is no longer needed. Writes now hit the swapped-in production
+        # collection through self.collection directly.
+        self._staging_target = None
         self.bm25_index.clear()
         self._bm25_initialized = False
         self.query_cache.invalidate()
@@ -2332,6 +2408,10 @@ class KnowledgeOrchestrator:
 
     def _rollback_and_cleanup_staging(self, prod_name: str, ts: int, saved) -> None:
         """Restore pre-staging prod state + delete the staging orphan."""
+        # GH #161 (v4.8.3): populate may have set _staging_target — clear
+        # it before restoring so future writes hit production, not the
+        # collection we're about to delete.
+        self._staging_target = None
         self._rollback_staging_state(saved)
         try:
             self.chroma_client.delete_collection(f"{prod_name}__staging_{ts}")
@@ -2392,13 +2472,24 @@ class KnowledgeOrchestrator:
         self._maybe_start_fts5_migration()
 
     def _maybe_start_fts5_migration(self) -> None:
-        """Dispatch the lazy FTS5 rebuild when the marker isn't ``complete``."""
+        """Dispatch the lazy FTS5 rebuild when the marker isn't ``complete``.
+
+        v4.8.3 sanity check: even when the marker says ``complete``, cross-
+        check FTS5 row count against Chroma. A stale marker with an empty
+        FTS5 index (post-swap orphan cleanup, manual truncate, disk
+        corruption) previously left the fast-path permanently silent —
+        queries returned no_results forever without any error surfaced.
+        """
         if self.fts5_index is None:
             return
         state_payload = self.fts5_index.state.read() or {}
         status = state_payload.get("status")
         if status == "complete":
-            return
+            if not self._fts5_marker_matches_reality():
+                print("[FTS5] stale complete marker detected — forcing rebuild")
+                # Fall through to dispatch a fresh migration below.
+            else:
+                return
         resume_from = int(state_payload.get("docs_indexed", 0)) if status == "in_progress" else 0
         try:
             docs_total = int(self.collection.count())
@@ -2429,6 +2520,23 @@ class KnowledgeOrchestrator:
             on_progress=self._fts5_migration_progress,
         )
 
+    def _fts5_marker_matches_reality(self) -> bool:
+        """Return True when the FTS5 marker is credible vs actual state.
+
+        Rejects markers claiming ``complete`` while the FTS5 index holds far
+        fewer rows than Chroma. Threshold is 10% because a small drift is
+        normal (chunk-level dedup, deletes), but a >90% deficit means the
+        marker is lying about a rebuild that didn't actually populate.
+        """
+        try:
+            fts5_count = self.fts5_index.count()
+            chroma_count = self.collection.count()
+        except Exception:
+            return True  # can't check → trust the marker (fail-safe)
+        if chroma_count == 0:
+            return True  # empty corpus, marker complete is legitimate
+        return fts5_count >= chroma_count * 0.1
+
     @staticmethod
     def _fts5_migration_progress(docs_indexed: int, docs_total: int) -> None:
         """Push the migration checkpoint into Prometheus gauges."""
@@ -2439,8 +2547,12 @@ class KnowledgeOrchestrator:
     def _iter_chroma_chunks_for_fts5(self) -> Iterable[Tuple[str, str, str, str]]:
         """Yield ``(chunk_id, content, filename, category)`` rows in stable order.
 
-        Sorted by ``chunk_id`` so a resumed migration replays deterministically
-        (worker skips the first ``docs_indexed`` yields).
+        Batches via offset+limit to avoid the SQLite ``too many SQL variables``
+        error (chromadb 1.x rebuilds an ``IN (?, ?, ...)`` clause for every
+        returned row; a single ``limit=48184`` call blows past the 999 default
+        max_variable_number and the whole migration fails). Deterministic order
+        is preserved by sorting each batch by ``chunk_id`` — good enough for
+        resume-from-index semantics since chunk_ids are UUIDs.
         """
         try:
             count = self.collection.count()
@@ -2449,19 +2561,33 @@ class KnowledgeOrchestrator:
             return
         if count == 0:
             return
-        fetched = self.collection.get(include=["documents", "metadatas"], limit=count)
-        ids = fetched.get("ids") or []
-        docs = fetched.get("documents") or []
-        metas = fetched.get("metadatas") or []
-        order = sorted(range(len(ids)), key=lambda i: ids[i])
-        for i in order:
-            meta = metas[i] or {}
-            yield (
-                str(ids[i]),
-                str(docs[i] or ""),
-                str(meta.get("filename", "") or ""),
-                str(meta.get("category", "") or ""),
-            )
+        batch_size = 500  # SQLite default max_variable_number is 999
+        offset = 0
+        while offset < count:
+            try:
+                fetched = self.collection.get(
+                    include=["documents", "metadatas"],
+                    limit=batch_size,
+                    offset=offset,
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"[FTS5] chunk batch failed at offset={offset}: {exc}")
+                return
+            ids = fetched.get("ids") or []
+            docs = fetched.get("documents") or []
+            metas = fetched.get("metadatas") or []
+            if not ids:
+                break
+            order = sorted(range(len(ids)), key=lambda i: ids[i])
+            for i in order:
+                meta = metas[i] or {}
+                yield (
+                    str(ids[i]),
+                    str(docs[i] or ""),
+                    str(meta.get("filename", "") or ""),
+                    str(meta.get("category", "") or ""),
+                )
+            offset += len(ids)
 
     def _fts5_sync_add(self, ids: Sequence[str], docs: Sequence[str], metas: Sequence[Dict[str, Any]]) -> None:
         """Best-effort CRUD sync hook after a successful ChromaDB write.
@@ -2660,13 +2786,20 @@ class KnowledgeOrchestrator:
         min_score = min(raw_scores) if raw_scores else 0.0
         score_range = max_score - min_score
         for chunk_id, raw_score in hits:
+            # v4.8.3: skip orphan hits where FTS5 has the chunk_id but Chroma
+            # doesn't (nuclear rebuild residue, manual delete race). Previous
+            # behavior emitted empty result items with source="" that broke
+            # downstream reranking + polluted result lists.
+            document = documents_by_id.get(chunk_id)
+            if not document:
+                continue
             metadata = metadata_by_id.get(chunk_id) or {}
             if category_filter and metadata.get("category") != category_filter:
                 continue
             normalized = (float(raw_score) - min_score) / score_range if score_range > 0 else 1.0
             formatted.append(
                 {
-                    "content": documents_by_id.get(chunk_id) or "",
+                    "content": document,
                     "source": metadata.get("source", ""),
                     "filename": metadata.get("filename", ""),
                     "category": metadata.get("category", ""),

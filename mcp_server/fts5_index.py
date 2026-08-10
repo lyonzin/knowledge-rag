@@ -173,7 +173,36 @@ class Fts5LexicalIndex:
     def state(self) -> Fts5MigrationState:
         return self._migration_state
 
+    def count(self) -> int:
+        """Return the total number of indexed FTS5 rows.
+
+        Used by ``_fts5_marker_matches_reality`` (v4.8.3, GH-issue) to
+        cross-check the migration marker against actual on-disk state so a
+        stale ``complete`` marker on an empty index doesn't silence the
+        fast-path forever.
+        """
+        if self._conn is None:
+            return 0
+        with self._fts5_lock:
+            try:
+                return int(self._conn.execute("SELECT count(*) FROM fts5_documents").fetchone()[0])
+            except sqlite3.OperationalError:
+                return 0
+
     def is_ready(self) -> bool:
+        """Return True once migration has completed at least once.
+
+        Re-checks the marker file when the cached flag is False so a
+        background migration finishing AFTER this instance was constructed
+        (e.g. an orchestrator built during nuclear_rebuild swap while the
+        FTS5 migration is still running) flips ``_ready`` on the next call
+        instead of being permanently stuck at False.
+        """
+        if self._ready:
+            return True
+        if self._migration_state.is_complete():
+            with self._fts5_lock:
+                self._ready = True
         return self._ready
 
     def _connect_and_configure(self) -> None:

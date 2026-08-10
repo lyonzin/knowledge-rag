@@ -1435,6 +1435,29 @@ Common issues:
 
 ### Unreleased
 
+### v4.8.3 (2026-08-10) — Critical hotfix: nuclear-rebuild + smart-reindex hardening
+
+**Recommended upgrade for any corpus with >1000 chunks or any user relying on `reindex_documents(force=True)` after a config change.** The v4.8.0 nuclear rebuild + v4.8.2 FTS5 fast-path have several latent state-management bugs that only trigger under a real-world combination (large corpus + rebuild + concurrent queries + FTS5 opt-in). Enterprise users with hacktricks-scale corpora (~50k+ chunks) are affected.
+
+Fixes 3 GitHub issues opened by @grishkovei against v4.8.1:
+
+- **Fixes #161** — `_rebuild_via_swap()` no longer rebinds `self.collection` to the empty staging collection during populate. Writes now route through the new `_write_collection` property (returns `self._staging_target` when set, else production). Queries keep reading `self.collection` unchanged. Zero-downtime is now real, not just a docs promise. `nuclear_rebuild(swap=True)` on 50k-chunk corpora previously served empty results for the entire hours-long populate window; queries now hit production until the atomic swap completes.
+- **Fixes #162** — Smart-reindex checkpoint now serializes only doc-ids the current run actually committed (via new `tracking["committed_this_run"]` set), not the full `_indexed_docs.keys()` snapshot. A document that changed on disk before the reindex reached it is no longer silently skipped on resume — its mtime/size delta is properly detected.
+- **Fixes #163** — `reindex_documents(force=True)` now propagates through to `index_all(force=True)`. The v4.8 migration path (`docs/migration-v4.8.0.md`) documented `force=True` as the way to re-embed after prefix/model changes; the hardcoded `force=False` in `reindex_all()` silently skipped every unchanged file. Prefix-only changes no longer leave mixed old/new embedding conventions.
+
+Additional fixes discovered while triaging production issues on a 5889-doc / 75016-chunk corpus:
+
+- **fix(indexing)** — `_index_lock` moved from class-level to instance-level (`__init__`). The class-level `threading.Lock` was silently shared across all `KnowledgeOrchestrator` instances, so a staging orchestrator from a previous `nuclear_rebuild` swap could be garbage-collected while holding the lock, leaving every subsequent `reindex_documents` returning `reindex_already_running` despite `active: false`. Requires daemon restart to recover pre-fix.
+- **fix(chromadb)** — `_ensure_bm25_initialized` and `_iter_chroma_chunks_for_fts5` now batch-read Chroma via `offset+limit=500` instead of `collection.get(limit=count)`. Chromadb 1.x rebuilds an `IN (?, ?, ...)` clause per returned row, so a single `limit=48184` call blew past SQLite's default `max_variable_number=999` with `Internal error: too many SQL variables`. Any user with >999 chunks who ran nuclear rebuild or triggered the FTS5 lazy migration got a silently failed rebuild.
+- **fix(fts5)** — `Fts5LexicalIndex.is_ready()` now re-reads the marker file when the cached `_ready` is False. Previously an orchestrator instantiated during nuclear-swap while the FTS5 migration was still running cached `_ready=False` forever and never re-checked the marker, permanently silencing the fast-path.
+- **fix(fts5)** — `_maybe_start_fts5_migration` cross-checks FTS5 row count vs Chroma count on startup. A stale `complete` marker paired with a near-empty FTS5 index (post-swap orphan cleanup, manual truncate, disk corruption) previously left the fast-path silent forever. The new `_fts5_marker_matches_reality` helper triggers rebuild when FTS5 holds less than 10% of Chroma's row count.
+- **fix(fts5)** — `_format_fts5_results` skips orphan hits (FTS5 has the `chunk_id` but Chroma doesn't — nuclear-rebuild residue or manual-delete race). Previously emitted empty result items with `source=""` that broke reranking and polluted result lists.
+- **fix(indexing, config)** — Added `Fts5LexicalIndex.count()` for the new sanity check.
+
+All 6 core fixes were confirmed via production reproduction on a 75016-chunk corpus + 2052 newly-added catalog documents; the `nuclear_rebuild(full_rebuild=True)` path now completes cleanly and populates FTS5 with 75016 rows on first attempt.
+
+Migration path: `pip install -U knowledge-rag==4.8.3` (or `npx -y knowledge-rag@4.8.3` / `docker pull ghcr.io/lyonzin/knowledge-rag:4.8.3`) then restart the MCP daemon. No config changes required. If your FTS5 index is corrupted from a prior partial rebuild (marker says `complete` but queries return empty), delete `data/fts5_migration.state` and restart — the daemon will detect the drift and rebuild automatically.
+
 ### v4.8.2 (2026-08-10) — FTS5 Lexical Fast-Path Opt-In Release (default OFF)
 
 v4.8.2 bundles Fases 1–5 of the FTS5 Lexical Fast-Path plan
