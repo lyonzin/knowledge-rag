@@ -2138,8 +2138,15 @@ class KnowledgeOrchestrator:
 
     @property
     def _write_collection(self):
-        """Return the collection writes should hit — staging if active, else prod."""
-        return self._staging_target if self._staging_target is not None else self.collection
+        """Return the collection writes should hit — staging if active, else prod.
+
+        ``getattr`` default handles legacy code paths (tests that bypass
+        ``__init__`` via ``patch.object(__init__)``) so old fixtures don't
+        break — attribute is initialized to None in ``__init__`` for real
+        instances.
+        """
+        target = getattr(self, "_staging_target", None)
+        return target if target is not None else self.collection
 
     def _rollback_staging_state(self, saved: Dict[str, Any]) -> None:
         """Restore orchestrator state from a snapshot taken pre-populate."""
