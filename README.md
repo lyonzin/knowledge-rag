@@ -418,7 +418,7 @@ flowchart LR
 
 ### hybrid_alpha Parameter Effect
 
-`hybrid_alpha` weights RRF fusion between semantic and BM25 rankings on the **hybrid pipeline only**. When `search_method="auto"` and the QueryRouter classifies the query as lexical (e.g. `CVE-2021-4034`, `MDR-AD002`, `T1078.001`, file hashes), the FTS5 fast-path fires and `hybrid_alpha` is not consulted — FTS5 uses SQLite's native `bm25()` scoring exclusively. Pass `search_method="hybrid"` to force RRF fusion + rerank on every query if you want deterministic hybrid semantics regardless of the query shape.
+`hybrid_alpha` weights RRF fusion between semantic and BM25 rankings on the **hybrid pipeline only**. When `search_method="auto"` and the QueryRouter classifies the query as lexical (e.g. `CVE-2021-4034`, `C2-CLOUDFLARE`, `T1078.001`, file hashes), the FTS5 fast-path fires and `hybrid_alpha` is not consulted — FTS5 uses SQLite's native `bm25()` scoring exclusively. Pass `search_method="hybrid"` to force RRF fusion + rerank on every query if you want deterministic hybrid semantics regardless of the query shape.
 
 ```mermaid
 flowchart LR
