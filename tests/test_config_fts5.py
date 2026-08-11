@@ -34,6 +34,7 @@ def test_ut030_defaults_when_section_missing(monkeypatch):
     assert cfg.fts5_rerank_enabled is False
     assert cfg.fts5_patterns == [
         r"[A-Z]{2,}-\d+",
+        r"[A-Z]+\d+-\d+",
         r"CVE-\d{4}-\d+",
         r"^[a-f0-9]{32,64}$",
     ]
@@ -45,7 +46,7 @@ def test_ut031_defaults_when_section_empty(monkeypatch):
     assert cfg.fts5_enabled is False
     assert cfg.fts5_min_hits == 3
     assert cfg.fts5_rerank_enabled is False
-    assert len(cfg.fts5_patterns) == 3
+    assert len(cfg.fts5_patterns) == 4
 
 
 def test_ut032_invalid_regex_pattern_raises(monkeypatch):

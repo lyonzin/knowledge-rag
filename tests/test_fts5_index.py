@@ -57,8 +57,8 @@ class TestFts5LexicalIndexSearch:
             index.close()
 
     def test_ut021_search_identifier_returns_seeded_chunk(self, fts5_tmp_index):
-        """UT-021: seed contains MDR-AD002 → search returns matching chunk in top-3."""
-        results = fts5_tmp_index.search("MDR-AD002", top_k=5)
+        """UT-021: seed contains MS17-010 → search returns matching chunk in top-3."""
+        results = fts5_tmp_index.search("MS17-010", top_k=5)
         assert results, "expected at least one result"
         top_ids = [chunk_id for chunk_id, _ in results[:3]]
         assert "chunk_001" in top_ids
@@ -73,10 +73,10 @@ class TestFts5LexicalIndexSearch:
         assert scores == sorted(scores, reverse=True)
 
     def test_ut023_composite_preserved_no_false_match(self, fts5_tmp_index):
-        """UT-023: query 'MDR-AD002' does not match a chunk that only contains 'MDR-AD003'."""
-        results = fts5_tmp_index.search("MDR-AD002", top_k=20)
+        """UT-023: query 'MS17-010' does not match a chunk that only contains 'MS17-020'."""
+        results = fts5_tmp_index.search("MS17-010", top_k=20)
         ids = [chunk_id for chunk_id, _ in results]
-        assert "chunk_012" not in ids  # chunk_012 mentions MDR-AD003 only
+        assert "chunk_012" not in ids  # chunk_012 mentions MS17-020 only
 
     def test_ut024_hyphenated_phrase_preserved(self, fts5_tmp_index):
         """UT-024: 'pass-the-hash' is a single token thanks to tokenchars '-_.'."""
@@ -92,7 +92,7 @@ class TestFts5LexicalIndexSearch:
 
     def test_ut026_case_insensitive_via_unicode61(self, fts5_tmp_index):
         """UT-026: lowercase query matches uppercase-seeded identifier (unicode61 lowercases)."""
-        results = fts5_tmp_index.search("mdr-ad002", top_k=5)
+        results = fts5_tmp_index.search("ms17-010", top_k=5)
         ids = [chunk_id for chunk_id, _ in results]
         assert "chunk_001" in ids
 
@@ -272,7 +272,7 @@ class TestSecurity:
     def test_search_after_dangerous_payload_still_functional(self, fts5_tmp_index):
         """Post-attack sanity: index remains queryable after hostile input."""
         fts5_tmp_index.search("; DROP TABLE fts5_documents", top_k=5)
-        results = fts5_tmp_index.search("MDR-AD002", top_k=5)
+        results = fts5_tmp_index.search("MS17-010", top_k=5)
         assert results, "index must remain queryable after hostile payload"
 
 

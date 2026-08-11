@@ -57,7 +57,7 @@ Default `patterns`:
 
 ```yaml
 patterns:
-  - "[A-Z]{2,}-\\d+"    # H1-P4-XXX, MDR-AD002, CWE-79, MS17-010
+  - "[A-Z]{2,}-\\d+"    # H1-P4-XXX, MS17-010, CWE-79, MS17-010
   - "CVE-\\d{4}-\\d+"   # canonical CVE identifiers
   - "^[a-f0-9]{32,64}$" # md5/sha1/sha256 file hashes
 ```

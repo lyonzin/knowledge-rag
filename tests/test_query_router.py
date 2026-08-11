@@ -16,6 +16,7 @@ from mcp_server.query_router import QueryRouter
 
 DEFAULT_PATTERNS = [
     r"[A-Z]{2,}-\d+",
+    r"[A-Z]+\d+-\d+",
     r"CVE-\d{4}-\d+",
     r"^[a-f0-9]{32,64}$",
 ]
@@ -28,7 +29,8 @@ DEFAULT_PATTERNS = [
 # operator would ship in ``search.lexical_fast_path.patterns`` for strict
 # routing.
 ROUTER_TEST_PATTERNS = [
-    r"^[A-Z]{2,}(-[A-Z0-9]+)+$",  # MDR-AD002, CWE-79, CVE-2021-4034
+    r"^[A-Z]{2,}(-[A-Z0-9]+)+$",  # CWE-79, CVE-2021-4034
+    r"^[A-Z]+\d+-\d+$",  # MS17-010 (letter+digit compound)
     r"^[A-Z]\d(-[A-Z0-9]+)+$",  # H1-P4-XXX-1234 (H1-style handle prefix)
     r"^T\d{4}(\.\d{3})?$",  # T1078.001 (MITRE technique)
     r"^[a-f0-9]{32,128}$",  # md5/sha1/sha256/sha512 hex hashes
@@ -51,13 +53,13 @@ class TestQueryRouterClassify:
     def test_empty_patterns_returns_semantic(self) -> None:
         """UT-001 — no patterns means nothing can classify as lexical."""
         router = QueryRouter([])
-        assert router.classify("MDR-AD002") == "semantic"
+        assert router.classify("MS17-010") == "semantic"
         assert router.classify("anything at all") == "semantic"
 
     @pytest.mark.parametrize(
         "query",
         [
-            "MDR-AD002",
+            "MS17-010",
             "CVE-2021-4034",
             "T1078.001",
             "CWE-79",

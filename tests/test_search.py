@@ -733,7 +733,7 @@ class TestFtsDispatch:
         router = _FakeRouter("lexical")
         orch = _build_dispatch_orch(monkeypatch, fts5_index=fts5, query_router=router)
 
-        results = orch.query("MDR-AD002", search_method="auto")
+        results = orch.query("MS17-010", search_method="auto")
 
         assert results == []
 

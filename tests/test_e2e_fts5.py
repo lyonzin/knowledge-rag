@@ -118,7 +118,7 @@ class TestE2EFts5:
 
         needle = f'{FAST_PATH_FALLBACK_TOTAL}{{reason="low_hits"}}'
         before = _get_metric_value(needle)
-        mcp_client_test.call("search_knowledge", query="MDR-AD999")
+        mcp_client_test.call("search_knowledge", query="MS99-999")
         after = _get_metric_value(needle)
 
         assert after > before, f"{needle} was not incremented"

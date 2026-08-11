@@ -30,7 +30,7 @@ import pytest
 from mcp_server.fts5_index import Fts5LexicalIndex
 
 _CORPUS_SIZE = 3865
-_LEXICAL_QUERIES = ["CVE-2021-4034", "MDR-AD002", "T1078.001", "CWE-79"]
+_LEXICAL_QUERIES = ["CVE-2021-4034", "MS17-010", "T1078.001", "CWE-79"]
 
 
 def _seed_fts5_corpus(index: Fts5LexicalIndex) -> None:

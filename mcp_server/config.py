@@ -669,9 +669,10 @@ class Config:
             "lexical_fast_path",
             "patterns",
             [
-                r"[A-Z]{2,}-\d+",
-                r"CVE-\d{4}-\d+",
-                r"^[a-f0-9]{32,64}$",
+                r"[A-Z]{2,}-\d+",  # generic uppercase-code, e.g. CWE-79
+                r"[A-Z]+\d+-\d+",  # letter+digit compound, e.g. MS17-010
+                r"CVE-\d{4}-\d+",  # CVE format explicit
+                r"^[a-f0-9]{32,64}$",  # md5/sha1/sha256 hex hashes
             ],
         )
     )

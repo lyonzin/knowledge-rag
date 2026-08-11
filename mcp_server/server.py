@@ -843,10 +843,10 @@ class BM25Index:
         """Tokenize: lowercase, split on non-alphanumeric, emit composite + sub-tokens.
 
         For alphanumeric-code composites (containing at least one digit — e.g.
-        "mdr-ad002", "cve-2024-1234", "ms17-010"), emit both the composite token
-        AND its sub-parts of length >= 2. This enables fragment queries ("AD002",
-        "CVE", "010") to match while IDF preserves exact-match ranking (composite
-        is rarer).
+        "ms17-010", "cve-2024-1234", "h1-p4-xxx-1234"), emit both the composite
+        token AND its sub-parts of length >= 2. This enables fragment queries
+        ("010", "CVE", "xxx") to match while IDF preserves exact-match ranking
+        (composite is rarer).
 
         Natural-language hyphenated words (e.g. "pass-the-hash", "state-of-the-art")
         are kept as single tokens — expanding them would flood the inverted index

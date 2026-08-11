@@ -306,7 +306,7 @@ def fts5_tmp_index(tmp_path):
     )
     index = Fts5LexicalIndex(db_path=db_path, state_path=state_path)
     seeds = [
-        ("chunk_001", "Report references MDR-AD002 remediation", "mdr.md", "security"),
+        ("chunk_001", "Report references MS17-010 remediation", "ms17.md", "security"),
         ("chunk_002", "Advisory covers CVE-2021-4034 Pwnkit", "pwnkit.md", "security"),
         ("chunk_003", "CVE-2021-4034 exploitation walkthrough", "cve.md", "security"),
         ("chunk_004", "CVE-2021-4034 patch analysis", "patch.md", "security"),
@@ -317,7 +317,7 @@ def fts5_tmp_index(tmp_path):
         ("chunk_009", "H1-P4-XXX-1234 disclosure summary", "h1.md", "bugbounty"),
         ("chunk_010", "pass-the-hash lateral movement playbook", "pth.md", "adversary"),
         ("chunk_011", "context.py loads YAML configuration", "context.md", "development"),
-        ("chunk_012", "Only MDR-AD003 mentioned here", "mdr3.md", "security"),
+        ("chunk_012", "Only MS17-020 mentioned here", "ms17-2.md", "security"),
         ("chunk_013", "OAuth token refresh workflow", "oauth.md", "development"),
         ("chunk_014", "Prose about incident response process", "ir.md", "general"),
         ("chunk_015", "General ransomware hardening guide", "ransom.md", "security"),
@@ -325,7 +325,7 @@ def fts5_tmp_index(tmp_path):
         ("chunk_017", "Zero trust architecture overview", "zt.md", "security"),
         ("chunk_018", "Blue team detection engineering", "bt.md", "security"),
         ("chunk_019", "Threat hunting hypothesis backlog", "hunt.md", "security"),
-        ("chunk_020", "Retro on MDR incident closure", "retro.md", "security"),
+        ("chunk_020", "Retro on incident closure notes", "retro.md", "security"),
     ]
     with index._fts5_lock:  # noqa: SLF001 — test helper for direct seeding
         for chunk_id, content, filename, category in seeds:
@@ -351,7 +351,7 @@ def migration_state_tmp(tmp_path):
 @pytest.fixture
 def sample_lexical_queries():
     """Canonical lexical query set used across FTS5/router tests."""
-    return ["MDR-AD002", "CVE-2021-4034", "T1078.001", "CWE-79", "H1-P4-XXX-1234"]
+    return ["MS17-010", "CVE-2021-4034", "T1078.001", "CWE-79", "H1-P4-XXX-1234"]
 
 
 def _get_metric_value(needle: str) -> float:
