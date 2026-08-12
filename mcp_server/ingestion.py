@@ -613,18 +613,33 @@ class DocumentParser:
             metadata["is_valid_json"] = False
             return raw, metadata
 
+        # Valid JSON, but not necessarily a well-formed notebook: it may be a
+        # bare list/scalar, or have null / wrong-typed "metadata"/"cells" fields.
+        # Guard the lookups so a malformed-but-parseable .ipynb is handled
+        # gracefully instead of crashing with AttributeError/TypeError.
+        if not isinstance(nb, dict):
+            metadata["is_valid_json"] = False
+            return raw, metadata
+
         metadata["is_valid_json"] = True
         metadata["nbformat"] = nb.get("nbformat", 0)
-        kernel = nb.get("metadata", {}).get("kernelspec", {})
+        nb_metadata = nb.get("metadata")
+        kernel = nb_metadata.get("kernelspec") if isinstance(nb_metadata, dict) else None
+        if not isinstance(kernel, dict):
+            kernel = {}
         metadata["kernel"] = kernel.get("display_name", kernel.get("name", "unknown"))
 
-        cells = nb.get("cells", [])
+        cells = nb.get("cells")
+        if not isinstance(cells, list):
+            cells = []
         metadata["cells"] = len(cells)
         code_cells = 0
         markdown_cells = 0
 
         parts = []
         for cell in cells:
+            if not isinstance(cell, dict):
+                continue
             cell_type = cell.get("cell_type", "")
             source = cell.get("source", "")
 
