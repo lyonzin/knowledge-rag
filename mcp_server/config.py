@@ -793,6 +793,20 @@ class Config:
             _get("server", "metrics", {}).get("port", 9179) if isinstance(_get("server", "metrics", {}), dict) else 9179
         )
     )
+    log_format: str = field(
+        default_factory=lambda: (
+            _get("server", "logging", {}).get("format", "text")
+            if isinstance(_get("server", "logging", {}), dict)
+            else "text"
+        )
+    )
+    log_level: str = field(
+        default_factory=lambda: (
+            _get("server", "logging", {}).get("level", "INFO")
+            if isinstance(_get("server", "logging", {}), dict)
+            else "INFO"
+        )
+    )
 
     def __post_init__(self):
         """Validate config values and ensure directories exist."""
@@ -937,6 +951,15 @@ class Config:
             self.metrics_port = 9179
         if not isinstance(self.rate_limit_rpm, int) or self.rate_limit_rpm < 1:
             self.rate_limit_rpm = 60
+        if not isinstance(self.log_format, str) or self.log_format not in ("text", "json"):
+            print(f"[WARN] server.logging.format={self.log_format!r} invalid, using 'text'")
+            self.log_format = "text"
+        _valid_levels = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+        if not isinstance(self.log_level, str) or self.log_level.upper() not in _valid_levels:
+            print(f"[WARN] server.logging.level={self.log_level!r} invalid, using 'INFO'")
+            self.log_level = "INFO"
+        else:
+            self.log_level = self.log_level.upper()
         if not isinstance(self.rate_limit_burst, int) or self.rate_limit_burst < 0:
             self.rate_limit_burst = 10
 

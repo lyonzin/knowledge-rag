@@ -4540,20 +4540,9 @@ def _run_transport(transport: str) -> None:
 
     token = getattr(config, "auth_bearer_token", "") or ""
 
-    if not token:
-        print(
-            f"[WARN] Bearer auth disabled on {transport} transport — "
-            "set server.auth.bearer_token in config.yaml to require credentials.",
-            file=sys.stderr,
-        )
-        mcp.run(
-            transport=transport,
-            host=config.server_host,
-            port=config.server_port,
-        )
-        return
-
     import uvicorn
+
+    from .health import HealthMiddleware
 
     app_factory = _http_app_factory(transport)
     # Build the app with the configured host. MCP 2.0.0's factories default to
@@ -4561,12 +4550,30 @@ def _run_transport(transport: str) -> None:
     # without this, a non-loopback server_host is served by uvicorn but the app
     # rejects the configured host with 421 before auth runs (GH #174).
     app = app_factory(host=config.server_host)
-    guarded = BearerAuthMiddleware(app, token)
+
+    if not token:
+        print(
+            f"[WARN] Bearer auth disabled on {transport} transport — "
+            "set server.auth.bearer_token in config.yaml to require credentials.",
+            file=sys.stderr,
+        )
+        served = HealthMiddleware(app, get_orchestrator)
+    else:
+        guarded = BearerAuthMiddleware(app, token)
+        # HealthMiddleware wraps the bearer app so /health probes bypass auth
+        # (matches BearerAuthMiddleware.exempt_paths). Order matters: health
+        # first, then bearer — a probe never reaches the auth layer.
+        served = HealthMiddleware(guarded, get_orchestrator)
+        print(
+            f"[SECURITY] Bearer auth enforced on {transport} transport ({config.server_host}:{config.server_port})",
+            file=sys.stderr,
+        )
+
     print(
-        f"[SECURITY] Bearer auth enforced on {transport} transport ({config.server_host}:{config.server_port})",
+        f"[HEALTH] Probe endpoint at http://{config.server_host}:{config.server_port}/health",
         file=sys.stderr,
     )
-    uvicorn.run(guarded, host=config.server_host, port=config.server_port)
+    uvicorn.run(served, host=config.server_host, port=config.server_port)
 
 
 def main():
@@ -4580,7 +4587,15 @@ def main():
         AlreadyRunningError,
         single_instance_lock,
     )
+    from .logging_config import setup_logging
     from .preflight import run_preflight
+
+    # Opt-in JSON logging. Default ("text") is a no-op — existing print()
+    # sites remain the source of stderr output. When operators set
+    # server.logging.format: "json" in config.yaml, structured records
+    # emitted via ``get_logger(__name__).info(...)`` land on stderr as
+    # single-line JSON ready for ELK/Loki/Datadog ingestion.
+    setup_logging(fmt=config.log_format, level=config.log_level)
 
     try:
         # SSE/HTTP mode: auto-enable single-instance lock (port collision prevention)

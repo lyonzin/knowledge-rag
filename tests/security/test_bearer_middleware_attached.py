@@ -94,8 +94,14 @@ def test_streamable_http_wraps_the_app_when_a_token_is_configured(monkeypatch):
 
     server_module._run_transport("streamable-http")
 
-    assert isinstance(served["app"], BearerAuthMiddleware)
-    assert served["app"].token == TOKEN
+    # v4.8.5: wired stack is HealthMiddleware(BearerAuthMiddleware(app)) so
+    # health probes bypass auth. Unwrap one layer to reach the bearer guard.
+    from mcp_server.health import HealthMiddleware
+
+    assert isinstance(served["app"], HealthMiddleware)
+    bearer = served["app"].app
+    assert isinstance(bearer, BearerAuthMiddleware)
+    assert bearer.token == TOKEN
 
 
 def test_sse_transport_also_wraps_the_app(monkeypatch):
@@ -115,7 +121,11 @@ def test_sse_transport_also_wraps_the_app(monkeypatch):
 
     server_module._run_transport("sse")
 
-    assert isinstance(served["app"], BearerAuthMiddleware)
+    # v4.8.5: wired stack is HealthMiddleware(BearerAuthMiddleware(app)).
+    from mcp_server.health import HealthMiddleware
+
+    assert isinstance(served["app"], HealthMiddleware)
+    assert isinstance(served["app"].app, BearerAuthMiddleware)
 
 
 def test_streamable_http_app_is_built_with_the_configured_host(monkeypatch):
@@ -209,8 +219,11 @@ def test_wired_stack_serves_401_when_no_token_is_presented(monkeypatch):
     monkeypatch.setattr("uvicorn.run", lambda app, **kwargs: served.update(app=app))
     server_module._run_transport("streamable-http")
 
+    # v4.8.5: wired stack is HealthMiddleware(BearerAuthMiddleware(RecordingApp)).
+    # Non-health paths still traverse both middlewares; the bearer guard rejects.
     wired_app = served["app"]
-    downstream = wired_app.app  # unwrap the middleware for the recording assertion
+    bearer = wired_app.app
+    downstream = bearer.app  # unwrap two layers for the recording assertion
 
     messages = _drive(wired_app, _http_scope())
     assert _status(messages) == 401
@@ -229,8 +242,10 @@ def test_wired_stack_lets_the_correct_token_through(monkeypatch):
     monkeypatch.setattr("uvicorn.run", lambda app, **kwargs: served.update(app=app))
     server_module._run_transport("streamable-http")
 
+    # v4.8.5: wired stack is HealthMiddleware(BearerAuthMiddleware(RecordingApp)).
     wired_app = served["app"]
-    downstream = wired_app.app
+    bearer = wired_app.app
+    downstream = bearer.app  # unwrap two layers to reach the recording app
 
     messages = _drive(wired_app, _http_scope([(b"authorization", f"Bearer {TOKEN}".encode())]))
     assert _status(messages) == 200

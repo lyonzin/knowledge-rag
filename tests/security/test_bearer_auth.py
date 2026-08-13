@@ -302,8 +302,14 @@ def test_http_transport_with_token_installs_the_middleware(monkeypatch):
 
     server_module._run_transport("streamable-http")
 
-    assert isinstance(served["app"], BearerAuthMiddleware)
-    assert served["app"].token == TOKEN
+    # v4.8.5: wired stack is HealthMiddleware(BearerAuthMiddleware(app)) so
+    # health probes bypass auth. Unwrap one layer to reach the bearer guard.
+    from mcp_server.health import HealthMiddleware
+
+    assert isinstance(served["app"], HealthMiddleware)
+    bearer = served["app"].app
+    assert isinstance(bearer, BearerAuthMiddleware)
+    assert bearer.token == TOKEN
 
 
 def test_unknown_transport_is_rejected(monkeypatch):
