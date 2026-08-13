@@ -75,7 +75,7 @@ Only after those three come back empty does the agent apply general debugging te
    | Related incident, different fix | Read the incident, adapt |
    | Nothing found | Do general-purpose debugging, but flag that "this may be a new failure mode" |
 
-6. **After solving**, if the fix is non-obvious, chain to [`rag-index-decisions`](rag-index-decisions.md) to add a short note back to the corpus so the next occurrence is one search away.
+6. **After solving**, if the fix is non-obvious, chain to [`rag-index-decisions`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/maintenance/rag-index-decisions/SKILL.md) to add a short note back to the corpus so the next occurrence is one search away.
 
 ---
 
@@ -157,7 +157,7 @@ Once you find the root cause, worth indexing back — see rag-index-decisions."
 
 ## Related skills
 
-- **[`rag-check-first`](rag-check-first.md)** — the parent skill (troubleshooting is a specialized variant).
-- **[`rag-cite-sources`](rag-cite-sources.md)** — when you propose a fix, cite the source that documented it.
-- **[`rag-index-decisions`](rag-index-decisions.md)** — after solving a novel bug, index the postmortem for next time.
-- **[`rag-web-fallback`](rag-web-fallback.md)** — for truly novel errors, escalate to GitHub / StackOverflow after RAG comes back empty.
+- **[`rag-check-first`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/foundation/rag-check-first/SKILL.md)** — the parent skill (troubleshooting is a specialized variant).
+- **[`rag-cite-sources`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/foundation/rag-cite-sources/SKILL.md)** — when you propose a fix, cite the source that documented it.
+- **[`rag-index-decisions`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/maintenance/rag-index-decisions/SKILL.md)** — after solving a novel bug, index the postmortem for next time.
+- **[`rag-web-fallback`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/workflow/rag-web-fallback/SKILL.md)** — for truly novel errors, escalate to GitHub / StackOverflow after RAG comes back empty.

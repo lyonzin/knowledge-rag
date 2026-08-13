@@ -82,7 +82,7 @@ For security tasks, the corpus is **primary**:
    mcp__shodan__shodan_host(ip=...)
    ```
 
-7. **After resolution**, chain to [`rag-index-decisions`](rag-index-decisions.md) if the incident produced a new detection rule, runbook entry, or lesson.
+7. **After resolution**, chain to [`rag-index-decisions`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/maintenance/rag-index-decisions/SKILL.md) if the incident produced a new detection rule, runbook entry, or lesson.
 
 ---
 
@@ -200,7 +200,7 @@ avoid RC4 detection."
 
 ## Related skills
 
-- **[`rag-check-first`](rag-check-first.md)** — the base pattern (this is `check-first` with security priorities).
-- **[`rag-cite-sources`](rag-cite-sources.md)** — extra important in security (auditable trail matters).
-- **[`rag-troubleshoot`](rag-troubleshoot.md)** — incident triage often overlaps with debugging.
-- **[`rag-index-decisions`](rag-index-decisions.md)** — after handling an incident, index the postmortem.
+- **[`rag-check-first`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/foundation/rag-check-first/SKILL.md)** — the base pattern (this is `check-first` with security priorities).
+- **[`rag-cite-sources`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/foundation/rag-cite-sources/SKILL.md)** — extra important in security (auditable trail matters).
+- **[`rag-troubleshoot`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/workflow/rag-troubleshoot/SKILL.md)** — incident triage often overlaps with debugging.
+- **[`rag-index-decisions`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/maintenance/rag-index-decisions/SKILL.md)** — after handling an incident, index the postmortem.

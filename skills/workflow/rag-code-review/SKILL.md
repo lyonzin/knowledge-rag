@@ -165,7 +165,7 @@ becomes a repeated topic, worth opening an ADR."
 
 ## Related skills
 
-- **[`rag-check-first`](rag-check-first.md)** — the base pattern (this is `check-first` specialized for review).
-- **[`rag-cite-sources`](rag-cite-sources.md)** — critical here; a review comment without a citation is just opinion.
-- **[`rag-deep-dive`](rag-deep-dive.md)** — for very architectural reviews, chain into deep-dive to understand the full context.
-- **[`rag-index-decisions`](rag-index-decisions.md)** — if the review surfaces a new pattern, index the decision.
+- **[`rag-check-first`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/foundation/rag-check-first/SKILL.md)** — the base pattern (this is `check-first` specialized for review).
+- **[`rag-cite-sources`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/foundation/rag-cite-sources/SKILL.md)** — critical here; a review comment without a citation is just opinion.
+- **[`rag-deep-dive`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/workflow/rag-deep-dive/SKILL.md)** — for very architectural reviews, chain into deep-dive to understand the full context.
+- **[`rag-index-decisions`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/maintenance/rag-index-decisions/SKILL.md)** — if the review surfaces a new pattern, index the decision.

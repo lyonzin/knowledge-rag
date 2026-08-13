@@ -203,7 +203,7 @@ Proceed?"
 
 ## Related skills
 
-- **[`rag-troubleshoot`](rag-troubleshoot.md)** — the natural upstream: after a novel bug fix, index the postmortem.
-- **[`rag-code-review`](rag-code-review.md)** — the other upstream: after a review surfaces a new pattern, index it.
-- **[`rag-onboard-context`](rag-onboard-context.md)** — the next session's onboarding will surface the new index; this closes the loop.
-- **[`rag-evaluate-quality`](rag-evaluate-quality.md)** — after significant indexing activity, worth measuring quality delta.
+- **[`rag-troubleshoot`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/workflow/rag-troubleshoot/SKILL.md)** — the natural upstream: after a novel bug fix, index the postmortem.
+- **[`rag-code-review`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/workflow/rag-code-review/SKILL.md)** — the other upstream: after a review surfaces a new pattern, index it.
+- **[`rag-onboard-context`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/foundation/rag-onboard-context/SKILL.md)** — the next session's onboarding will surface the new index; this closes the loop.
+- **[`rag-evaluate-quality`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/maintenance/rag-evaluate-quality/SKILL.md)** — after significant indexing activity, worth measuring quality delta.

@@ -109,7 +109,7 @@ Numbers get logged so the trend is visible over time.
    - Notes: added 200 new ADRs this week; MRR up because ADRs are more targeted.
    ```
 
-   Then chain to [`rag-index-decisions`](rag-index-decisions.md) to make the log part of the searchable corpus.
+   Then chain to [`rag-index-decisions`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/maintenance/rag-index-decisions/SKILL.md) to make the log part of the searchable corpus.
 
 ---
 
@@ -207,6 +207,6 @@ Next step: I can run per-category evaluation to isolate the regression."
 
 ## Related skills
 
-- **[`rag-onboard-context`](rag-onboard-context.md)** — the light-touch version (get_index_stats only, no evaluation).
-- **[`rag-index-decisions`](rag-index-decisions.md)** — after quality tuning, index the decision so next reader knows what changed and why.
-- **[`rag-check-first`](rag-check-first.md)** — the workhorse that BENEFITS from the quality tracked here.
+- **[`rag-onboard-context`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/foundation/rag-onboard-context/SKILL.md)** — the light-touch version (get_index_stats only, no evaluation).
+- **[`rag-index-decisions`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/maintenance/rag-index-decisions/SKILL.md)** — after quality tuning, index the decision so next reader knows what changed and why.
+- **[`rag-check-first`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/foundation/rag-check-first/SKILL.md)** — the workhorse that BENEFITS from the quality tracked here.

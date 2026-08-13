@@ -144,6 +144,6 @@ committing."
 
 ## Related skills
 
-- **[`rag-check-first`](rag-check-first.md)** — the prerequisite: search happens first, citations follow.
-- **[`rag-deep-dive`](rag-deep-dive.md)** — chained citations across a full drill-down.
-- **[`rag-code-review`](rag-code-review.md)** — code review is where citation discipline pays off most.
+- **[`rag-check-first`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/foundation/rag-check-first/SKILL.md)** — the prerequisite: search happens first, citations follow.
+- **[`rag-deep-dive`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/workflow/rag-deep-dive/SKILL.md)** — chained citations across a full drill-down.
+- **[`rag-code-review`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/workflow/rag-code-review/SKILL.md)** — code review is where citation discipline pays off most.

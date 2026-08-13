@@ -26,26 +26,63 @@ Installing knowledge-rag gives your AI 13 tools. It does not tell the AI **when*
 
 ## Installation
 
-### Claude Code (recommended)
-
-Claude Code auto-discovers skills placed in one of these directories:
-
-- **Global** (all projects): `~/.claude/skills/`
-- **Project-scoped**: `.claude/skills/` inside a project
-
-Copy the skills you want:
+### Option 1 — Via `skills.sh` (the shortest path)
 
 ```bash
-# Clone or download this repo
+npx skills add lyonzin/knowledge-rag
+```
+
+This uses the [Vercel Labs `skills` CLI](https://github.com/vercel-labs/skills) which auto-discovers this repo's `skills/**/SKILL.md` layout and installs into `.claude/skills/`. Zero clone, zero curl, one command.
+
+### Option 2 — Via our `install.sh` (no Node required)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lyonzin/knowledge-rag/master/skills/install.sh | bash
+```
+
+Works on **Linux, macOS, WSL, and Git Bash on Windows**. Downloads and installs all 10 skills to `~/.claude/skills/`, skips duplicates gracefully, and prints a summary. Restart Claude Code — skills auto-discover via their frontmatter.
+
+> **Windows users without WSL or Git Bash:** either use Option 1 (needs Node.js) or fall back to the [manual install](#manual-install-claude-code) below.
+
+### Installer options (`install.sh`)
+
+| Option | What it does |
+|---|---|
+| `--project` | Install to `./.claude/skills` (project-scoped, not global) |
+| `--target <path>` | Install to a custom directory |
+| `--only rag-check-first,rag-cite-sources` | Install a subset only |
+| `--dry-run` | Show what would happen, do not write files |
+| `--list` | List available skills |
+| `--help` | Show the full help |
+
+Examples:
+
+```bash
+# Install only the 3 foundation skills, project-scoped
+bash skills/install.sh --project --only rag-check-first,rag-cite-sources,rag-onboard-context
+
+# Dry-run to preview what would land where
+bash skills/install.sh --dry-run
+
+# Install to a custom folder
+bash skills/install.sh --target ~/my-agent-skills
+```
+
+### Manual install (Claude Code)
+
+If you prefer to see the files before installing:
+
+```bash
 git clone https://github.com/lyonzin/knowledge-rag.git
 
-# Install globally (all your projects benefit)
+# Global — all projects benefit
 mkdir -p ~/.claude/skills
-cp knowledge-rag/skills/rag-*.md ~/.claude/skills/
-
-# Or install per-project
-mkdir -p .claude/skills
-cp knowledge-rag/skills/rag-*.md .claude/skills/
+# The repo organizes skills by category (foundation/workflow/maintenance/domain);
+# copy the SKILL.md files out and rename them per skill:
+for f in knowledge-rag/skills/*/*/SKILL.md; do
+  skill=$(basename "$(dirname "$f")")
+  cp "$f" ~/.claude/skills/"$skill".md
+done
 ```
 
 Restart Claude Code. The skills are auto-discovered by their frontmatter `description` — trigger by typing keywords that match, or invoke explicitly with `/rag-check-first`, `/rag-cite-sources`, etc.

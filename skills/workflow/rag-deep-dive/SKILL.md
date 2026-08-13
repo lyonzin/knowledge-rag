@@ -138,6 +138,6 @@ Agent (internal):
 
 ## Related skills
 
-- **[`rag-check-first`](rag-check-first.md)** — the prerequisite (deep-dive is `check-first` + 2 more tools).
-- **[`rag-cite-sources`](rag-cite-sources.md)** — even more important on deep-dive because you are quoting many sources.
-- **[`rag-web-fallback`](rag-web-fallback.md)** — if the corpus does not cover the topic in depth, the deep-dive itself will surface that gap and you can chain to web search.
+- **[`rag-check-first`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/foundation/rag-check-first/SKILL.md)** — the prerequisite (deep-dive is `check-first` + 2 more tools).
+- **[`rag-cite-sources`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/foundation/rag-cite-sources/SKILL.md)** — even more important on deep-dive because you are quoting many sources.
+- **[`rag-web-fallback`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/workflow/rag-web-fallback/SKILL.md)** — if the corpus does not cover the topic in depth, the deep-dive itself will surface that gap and you can chain to web search.

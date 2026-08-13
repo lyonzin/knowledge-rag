@@ -130,6 +130,6 @@ though — for the syntax reference itself, I will pull from LangChain's public 
 
 ## Related skills
 
-- **[`rag-check-first`](rag-check-first.md)** — the prerequisite (this skill is `check-first` with an explicit escalation rule).
-- **[`rag-cite-sources`](rag-cite-sources.md)** — if you DO answer from RAG, cite. If from web, cite the URL.
-- **[`rag-troubleshoot`](rag-troubleshoot.md)** — troubleshooting has its own escalation path (StackOverflow, GitHub issues) that follows the same pattern.
+- **[`rag-check-first`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/foundation/rag-check-first/SKILL.md)** — the prerequisite (this skill is `check-first` with an explicit escalation rule).
+- **[`rag-cite-sources`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/foundation/rag-cite-sources/SKILL.md)** — if you DO answer from RAG, cite. If from web, cite the URL.
+- **[`rag-troubleshoot`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/workflow/rag-troubleshoot/SKILL.md)** — troubleshooting has its own escalation path (StackOverflow, GitHub issues) that follows the same pattern.

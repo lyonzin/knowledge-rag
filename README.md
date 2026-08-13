@@ -214,31 +214,34 @@ docker run -v $(pwd)/documents:/app/documents -p 8179:8179 ghcr.io/lyonzin/knowl
 
 Installing knowledge-rag gives your agent 13 MCP tools. It does not tell the agent **when** to use them. That is what the [`skills/`](skills/) folder solves — drop-in behavioural skills for Claude Code, Cursor, Windsurf, Cline, Zed, VS Code Copilot that turn "AI with access to RAG" into "AI that actually uses RAG first".
 
-**10 skills, MIT licensed, one file each:**
+**10 skills, MIT licensed, organized by kind:**
 
 | # | Skill | What it does |
 |---|---|---|
-| 1 | [`rag-check-first`](skills/rag-check-first.md) | Search the corpus **before** answering any technical claim |
-| 2 | [`rag-cite-sources`](skills/rag-cite-sources.md) | Every claim ships with `path:line` citations |
-| 3 | [`rag-onboard-context`](skills/rag-onboard-context.md) | First interaction of a session probes what is indexed |
-| 4 | [`rag-deep-dive`](skills/rag-deep-dive.md) | 3-step drill: `search` → `fetch` → `find similar` |
-| 5 | [`rag-web-fallback`](skills/rag-web-fallback.md) | Only hit the web when local RAG comes back empty |
-| 6 | [`rag-troubleshoot`](skills/rag-troubleshoot.md) | Bug / error → RAG first for prior fixes |
-| 7 | [`rag-code-review`](skills/rag-code-review.md) | Review consults ADRs / patterns before commenting |
-| 8 | [`rag-index-decisions`](skills/rag-index-decisions.md) | After a decision, index it back — close the feedback loop |
-| 9 | [`rag-security-first`](skills/rag-security-first.md) | Security tasks: MITRE / CVE / runbook first |
-| 10 | [`rag-evaluate-quality`](skills/rag-evaluate-quality.md) | Weekly checkup — MRR@5 · Recall@5 · Precision@5 |
+| 1 | [`rag-check-first`](skills/foundation/rag-check-first/SKILL.md) | Search the corpus **before** answering any technical claim |
+| 2 | [`rag-cite-sources`](skills/foundation/rag-cite-sources/SKILL.md) | Every claim ships with `path:line` citations |
+| 3 | [`rag-onboard-context`](skills/foundation/rag-onboard-context/SKILL.md) | First interaction of a session probes what is indexed |
+| 4 | [`rag-deep-dive`](skills/workflow/rag-deep-dive/SKILL.md) | 3-step drill: `search` → `fetch` → `find similar` |
+| 5 | [`rag-web-fallback`](skills/workflow/rag-web-fallback/SKILL.md) | Only hit the web when local RAG comes back empty |
+| 6 | [`rag-troubleshoot`](skills/workflow/rag-troubleshoot/SKILL.md) | Bug / error → RAG first for prior fixes |
+| 7 | [`rag-code-review`](skills/workflow/rag-code-review/SKILL.md) | Review consults ADRs / patterns before commenting |
+| 8 | [`rag-index-decisions`](skills/maintenance/rag-index-decisions/SKILL.md) | After a decision, index it back — close the feedback loop |
+| 9 | [`rag-security-first`](skills/domain/rag-security-first/SKILL.md) | Security tasks: MITRE / CVE / runbook first |
+| 10 | [`rag-evaluate-quality`](skills/maintenance/rag-evaluate-quality/SKILL.md) | Weekly checkup — MRR@5 · Recall@5 · Precision@5 |
 
-**Install in Claude Code (30 seconds):**
+**Install — pick the shortest path for your machine:**
 
 ```bash
-git clone https://github.com/lyonzin/knowledge-rag.git
-mkdir -p ~/.claude/skills
-cp knowledge-rag/skills/rag-*.md ~/.claude/skills/
-# Restart Claude Code — skills auto-discover
+# Option 1 — Via skills.sh (needs Node — one command, zero clone)
+npx skills add lyonzin/knowledge-rag
+
+# Option 2 — Via our install.sh (no Node needed; works on Linux/macOS/WSL/Git Bash)
+curl -fsSL https://raw.githubusercontent.com/lyonzin/knowledge-rag/master/skills/install.sh | bash
 ```
 
-For Cursor, Windsurf, Cline and full installation guide → [skills/README.md](skills/README.md) · Full catalog with skill chains → [skills/CATALOG.md](skills/CATALOG.md)
+Both restart-Claude-Code and you are done. Option 2 supports `--project`, `--only rag-check-first,rag-cite-sources`, `--dry-run`, `--help`.
+
+For Cursor, Windsurf, Cline and full manual instructions → [skills/README.md](skills/README.md) · Full catalog with skill chains → [skills/CATALOG.md](skills/CATALOG.md)
 
 ---
 

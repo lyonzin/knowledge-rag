@@ -131,6 +131,6 @@ would you like to point me at your docs folder so we can index them first?"
 
 ## Related skills
 
-- **[`rag-check-first`](rag-check-first.md)** — the workhorse skill that runs on every subsequent turn, informed by what onboarding revealed.
-- **[`rag-deep-dive`](rag-deep-dive.md)** — chained after check-first when a topic needs more depth.
-- **[`rag-evaluate-quality`](rag-evaluate-quality.md)** — periodic checkup (weekly, not per-session).
+- **[`rag-check-first`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/foundation/rag-check-first/SKILL.md)** — the workhorse skill that runs on every subsequent turn, informed by what onboarding revealed.
+- **[`rag-deep-dive`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/workflow/rag-deep-dive/SKILL.md)** — chained after check-first when a topic needs more depth.
+- **[`rag-evaluate-quality`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/maintenance/rag-evaluate-quality/SKILL.md)** — periodic checkup (weekly, not per-session).

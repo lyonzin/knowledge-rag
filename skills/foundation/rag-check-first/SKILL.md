@@ -119,7 +119,7 @@ before running: [general k8s deployment steps]"
 
 ## Related skills
 
-- **[`rag-cite-sources`](rag-cite-sources.md)** — the natural follow-up: every claim carries a `path:line` citation.
-- **[`rag-deep-dive`](rag-deep-dive.md)** — if the top result needs full context, chain into `get_document` + `search_similar`.
-- **[`rag-web-fallback`](rag-web-fallback.md)** — the escape hatch when the corpus is empty.
-- **[`rag-onboard-context`](rag-onboard-context.md)** — call once at session start, then `rag-check-first` handles every subsequent request.
+- **[`rag-cite-sources`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/foundation/rag-cite-sources/SKILL.md)** — the natural follow-up: every claim carries a `path:line` citation.
+- **[`rag-deep-dive`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/workflow/rag-deep-dive/SKILL.md)** — if the top result needs full context, chain into `get_document` + `search_similar`.
+- **[`rag-web-fallback`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/workflow/rag-web-fallback/SKILL.md)** — the escape hatch when the corpus is empty.
+- **[`rag-onboard-context`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/foundation/rag-onboard-context/SKILL.md)** — call once at session start, then `rag-check-first` handles every subsequent request.
