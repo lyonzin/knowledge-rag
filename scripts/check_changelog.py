@@ -30,9 +30,21 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# Since README v5 (PR #181), the release history was migrated out of README.md
+# into a top-level CHANGELOG.md. Keep README.md as a legacy fallback so this
+# script keeps working during the migration window and on branches that
+# predate the migration.
+CHANGELOG = REPO_ROOT / "CHANGELOG.md"
 README = REPO_ROOT / "README.md"
 
-# Types whose PRs MUST update CHANGELOG (= ## Unreleased section in README)
+
+def _changelog_file() -> Path:
+    """Return the changelog source of truth: CHANGELOG.md if present, else README.md."""
+    return CHANGELOG if CHANGELOG.exists() else README
+
+
+# Types whose PRs MUST update CHANGELOG (= ## Unreleased section)
 USER_FACING_TYPES = {"feat", "fix", "perf", "refactor"}
 
 # Types that are exempt
@@ -121,17 +133,26 @@ def main() -> int:
         print(f"[OK] Type '{commit_type}' not classified as user-facing (no CHANGELOG required).")
         return 0
 
-    # User-facing change — ensure ## Unreleased gained at least one bullet
-    if not README.exists():
-        print(f"[ERROR] README.md not found at {README}", file=sys.stderr)
+    # User-facing change — ensure ## Unreleased gained at least one bullet.
+    # Read from CHANGELOG.md when present (post-README-v5), else README.md legacy.
+    changelog_file = _changelog_file()
+    if not changelog_file.exists():
+        print(f"[ERROR] neither CHANGELOG.md nor README.md found at {REPO_ROOT}", file=sys.stderr)
         return 2
 
-    current = README.read_text(encoding="utf-8")
+    current = changelog_file.read_text(encoding="utf-8")
+    rel_path = changelog_file.relative_to(REPO_ROOT).as_posix()
     try:
-        base = _git("show", f"{args.base_ref}:README.md")
+        base = _git("show", f"{args.base_ref}:{rel_path}")
     except subprocess.CalledProcessError:
-        print(f"[WARN] Could not read README.md at {args.base_ref} (first commit?). Skipping diff check.")
-        return 0
+        # File did not exist at the base ref (e.g. CHANGELOG.md is brand-new).
+        # Fall back to README.md at the base ref for the migration window.
+        try:
+            base = _git("show", f"{args.base_ref}:README.md")
+            print(f"[INFO] {rel_path} did not exist at {args.base_ref}; diffing against README.md instead.")
+        except subprocess.CalledProcessError:
+            print(f"[WARN] Could not read {rel_path} or README.md at {args.base_ref}. Skipping diff check.")
+            return 0
 
     unreleased_current = _bullet_count(_read_unreleased_section(current))
     unreleased_base = _bullet_count(_read_unreleased_section(base))
@@ -143,11 +164,12 @@ def main() -> int:
 
     if not unreleased_gained and not versioned_gained:
         print(
-            "[FAIL] User-facing PR ({type}) but README.md changelog has not gained any new bullet.\n"
+            "[FAIL] User-facing PR ({type}) but {file} changelog has not gained any new bullet.\n"
             "       Add an entry under '### Unreleased' or a versioned '### v3.X.Y' heading,\n"
             "       or apply the 'skip-changelog' label if truly not needed.\n"
             "       Unreleased: {ucur} (base {ubase}), Versioned: {vcur} (base {vbase})".format(
                 type=commit_type,
+                file=rel_path,
                 ucur=unreleased_current,
                 ubase=unreleased_base,
                 vcur=versioned_current,
