@@ -15,6 +15,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Unreleased
 
+### v4.8.5 (2026-08-13) — Enterprise observability: `/health` probes + JSON structured logging (opt-in)
+
+**Recommended for anyone deploying HTTP/SSE transport behind load balancers, container orchestrators, or centralised logging pipelines.** Two additive features, both zero-cost when unused: an HTTP `/health` and `/healthz` endpoint served in front of the MCP dispatcher (no auth required, always responds), and opt-in JSON structured logging ready for ELK / Loki / Datadog / CloudWatch Logs ingestion.
+
+**Added:**
+
+- **feat(health)** — new `mcp_server.health.HealthMiddleware` ASGI middleware exposes `GET /health` and `GET /healthz` returning `{"status":"ok","version":"4.8.5","uptime_seconds":<int>,"cache":<stats-or-null>}` on port `server.port` (same port as the MCP transport). Wired in front of the bearer auth middleware so probes always succeed regardless of the auth configuration. Cache statistics are best-effort — a failing orchestrator getter never flips the probe negative. 13 regression tests covering payload shape, delegation to the downstream app, bearer-auth interaction and custom paths.
+- **feat(logging)** — new `mcp_server.logging_config` module. Set `server.logging.format: "json"` in `config.yaml` (default `"text"`) to install a `JsonFormatter` on the `knowledge_rag` logger that emits one JSON object per record on stderr with a stable core (`timestamp`, `level`, `logger`, `message`, `module`, `line`) plus any `extra={...}` fields. Level configurable via `server.logging.level` (default `"INFO"`). Existing `print(...)` sites are intentionally untouched — migration to `get_logger(__name__)` is incremental. 16 regression tests covering opt-in gate, payload shape, handler idempotency, foreign-handler preservation, exception serialisation and coercion of non-JSON-serialisable extras.
+
+**Config schema additions** (both optional, both backwards-compatible):
+
+```yaml
+server:
+  logging:
+    format: "text"    # "text" (default, no-op) | "json"
+    level: "INFO"     # DEBUG | INFO | WARNING | ERROR | CRITICAL
+```
+
+**No breaking changes.** Backwards compat verified by `check_api_surface.py` (only additive changes: new `health` and `logging_config` modules exported). All 13 MCP tool parameter names still frozen.
+
 ### v4.8.4 (2026-08-13) — Patch: security + durability + defensive fixes
 
 **Recommended upgrade for anyone running HTTP/SSE transport with bearer auth on a non-loopback host, or relying on `reindex_documents(force=True)`.** Four independent fixes accumulated since v4.8.3: one previously blocked remote-with-auth deployments (#174), one silently corrupted durable index metadata after a failed rebuild (#173), and two defensive fixes hardened `.ipynb` ingestion (#175) and the nightly chaos suite (#164).
