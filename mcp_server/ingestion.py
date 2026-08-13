@@ -643,8 +643,14 @@ class DocumentParser:
             cell_type = cell.get("cell_type", "")
             source = cell.get("source", "")
 
+            # Per the nbformat spec `source` is str | list[str]. Anything else
+            # (a number, a dict, a list with non-string items) is the same
+            # malformed-but-parseable case handled above, so tolerate it rather
+            # than letting it reach "".join()/.strip() and raise.
             if isinstance(source, list):
-                source = "".join(source)
+                source = "".join(s for s in source if isinstance(s, str))
+            elif not isinstance(source, str):
+                continue
 
             if not source or not source.strip():
                 continue
