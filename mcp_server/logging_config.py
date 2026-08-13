@@ -170,9 +170,7 @@ def setup_logging(fmt: str = "text", level: str = "INFO") -> logging.Logger:
 
 def _remove_managed_handlers(logger: logging.Logger) -> None:
     """Drop only handlers we previously installed. Preserve foreign ones."""
-    logger.handlers = [
-        h for h in logger.handlers if not getattr(h, "_kr_managed", False)
-    ]
+    logger.handlers = [h for h in logger.handlers if not getattr(h, "_kr_managed", False)]
 
 
 def get_logger(name: str) -> logging.Logger:

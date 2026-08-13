@@ -111,9 +111,7 @@ class TestJsonPayload:
         assert payload["logger"] == f"{ROOT_LOGGER_NAME}.ingestion"
 
     def test_extras_flow_into_payload(self, monkeypatch):
-        payload = self._log_and_parse(
-            monkeypatch, "INFO", "indexed", doc_id="abc", chunks=42
-        )
+        payload = self._log_and_parse(monkeypatch, "INFO", "indexed", doc_id="abc", chunks=42)
         assert payload["doc_id"] == "abc"
         assert payload["chunks"] == 42
 

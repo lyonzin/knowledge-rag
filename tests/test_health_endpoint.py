@@ -122,9 +122,7 @@ class TestDelegation:
 
         middleware = HealthMiddleware(_downstream, get_orchestrator=None)
         scope = {"type": "lifespan"}
-        asyncio.new_event_loop().run_until_complete(
-            middleware(scope, _noop_receive, _Recorder())
-        )
+        asyncio.new_event_loop().run_until_complete(middleware(scope, _noop_receive, _Recorder()))
         assert downstream_calls == ["lifespan"]
 
     def test_websocket_scope_delegates(self):
@@ -136,9 +134,7 @@ class TestDelegation:
 
         middleware = HealthMiddleware(_downstream, get_orchestrator=None)
         scope = {"type": "websocket", "path": "/health"}
-        asyncio.new_event_loop().run_until_complete(
-            middleware(scope, _noop_receive, _Recorder())
-        )
+        asyncio.new_event_loop().run_until_complete(middleware(scope, _noop_receive, _Recorder()))
         assert downstream_calls == ["websocket"]
 
 
