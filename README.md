@@ -718,7 +718,7 @@ Built on the shoulders of amazing open-source projects:
 - [**HuggingFace**](https://huggingface.co/) — model hosting + `Xenova/ms-marco-MiniLM-L-6-v2` cross-encoder
 - [**BAAI**](https://huggingface.co/BAAI) — the `bge-small-en-v1.5` embedding model
 
-**Community contributors:** [@Hohlas](https://github.com/Hohlas) · [@eeshsaxena](https://github.com/eeshsaxena) · Sergey Khokhlov · ProScripts Dev · and everyone who filed issues or PRs.
+**Community contributors:** [@Hohlas](https://github.com/Hohlas) · [@eeshsaxena](https://github.com/eeshsaxena) · Sergey Khokhlov · and everyone who filed issues or PRs.
 
 ---
 
