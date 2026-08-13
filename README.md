@@ -467,11 +467,38 @@ flowchart TB
 
 ## 20 File Formats — parsed natively, no plugins needed
 
-Markdown · Plain Text · **PDF** · Python · C / C++ / Header · JavaScript · TypeScript · JSX · TSX · XML · JSON · CSV · **Word (DOCX)** · **Excel (XLSX)** · **PowerPoint (PPTX)** · **Jupyter Notebook (IPYNB)** · MQL4 (opt-in) · MQ4 (opt-in)
+Every parser is **chunk-aware** — Markdown splits at `##` headers, code splits at function/class boundaries, notebooks skip base64 outputs, PDFs use PyMuPDF, spreadsheets extract sheet-by-sheet. **18 formats are enabled by default**; the 2 MetaTrader formats are opt-in (add to `documents.supported_formats` in `config.yaml`).
 
-Every parser is chunk-aware — Markdown splits at `##` headers, code splits at function/class boundaries, notebooks skip base64 outputs, PDFs use PyMuPDF, spreadsheets extract sheet-by-sheet.
+| # | Format | Extension | Parser | Default | Notes |
+|---|--------|-----------|--------|:-------:|-------|
+| 1 | Markdown | `.md` | Section-aware (splits at `##`) | Yes | Headers preserved as chunk boundaries |
+| 2 | Plain Text | `.txt` | Fixed-size chunking | Yes | 1000 chars + 200 overlap |
+| 3 | PDF | `.pdf` | PyMuPDF extraction | Yes | Text-based PDFs only (no OCR) |
+| 4 | Word | `.docx` | python-docx | Yes | Headings preserved as markdown |
+| 5 | Excel | `.xlsx` | openpyxl | Yes | Sheet-by-sheet extraction |
+| 6 | PowerPoint | `.pptx` | python-pptx | Yes | Slide-by-slide extraction |
+| 7 | Jupyter Notebook | `.ipynb` | Cell-aware parser | Yes | Markdown + code cells only; skips outputs/base64 |
+| 8 | JSON | `.json` | Structure-aware | Yes | Flattened key-value extraction |
+| 9 | CSV | `.csv` | Row-based parser | Yes | Headers + rows as text |
+| 10 | XML | `.xml` | XML parser | Yes | Root element + namespace metadata |
+| 11 | Python | `.py` | Code-aware parser | Yes | Functions/classes as chunks |
+| 12 | C Source | `.c` | Code-aware parser | Yes | Functions / structs / includes extracted |
+| 13 | C/C++ Header | `.h` | Code-aware parser | Yes | Function declarations + structs extracted |
+| 14 | C++ Source | `.cpp` | Code-aware parser | Yes | Classes / structs / includes extracted |
+| 15 | JavaScript | `.js` | Code-aware parser | Yes | Functions / classes / imports (ESM + CJS) |
+| 16 | React JSX | `.jsx` | Code-aware parser | Yes | Same as JS parser |
+| 17 | TypeScript | `.ts` | Code-aware parser | Yes | Functions / classes / interfaces / enums / imports |
+| 18 | React TSX | `.tsx` | Code-aware parser | Yes | Same as TS parser |
+| 19 | MQL4 Source | `.mq4` | Code parser | **No** | MetaTrader — opt-in via `documents.supported_formats` |
+| 20 | MQL4 Header | `.mqh` | Code parser | **No** | MetaTrader — opt-in via `documents.supported_formats` |
 
-**Full parser reference with per-format notes:** [docs/CONFIGURATION.md#supported-formats →](docs/CONFIGURATION.md)
+> **Enable an opt-in format** — add the extension to `documents.supported_formats` in your `config.yaml`:
+> ```yaml
+> documents:
+>   supported_formats: [".md", ".pdf", ".mq4", ".mqh"]
+> ```
+
+**Full parser reference with per-format notes:** [docs/CONFIGURATION.md](docs/CONFIGURATION.md)
 
 ---
 
