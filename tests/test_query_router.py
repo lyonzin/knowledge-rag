@@ -9,6 +9,13 @@ import re
 from unittest.mock import MagicMock
 
 import pytest
+
+# hypothesis is an optional test dependency: some CI jobs (e.g. the nightly
+# chaos suite) install only a minimal set and run `pytest -m <marker>`, which
+# still collects the whole tests/ tree. importorskip lets pytest skip this
+# module cleanly instead of aborting collection with a ModuleNotFoundError.
+pytest.importorskip("hypothesis")
+
 from hypothesis import given, settings
 from hypothesis import strategies as st
 

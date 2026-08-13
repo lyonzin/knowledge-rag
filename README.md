@@ -1485,6 +1485,7 @@ Common issues:
 
 ### Unreleased
 
+- **fix(ci)**: the nightly chaos job (`pytest -m chaos`) aborted collection with `ModuleNotFoundError: No module named 'hypothesis'` because `tests/test_query_router.py` imported hypothesis at module top-level while the chaos job installs only `pytest psutil numpy`. Guarded the import with `pytest.importorskip("hypothesis")` so the module is skipped cleanly instead of failing the whole nightly run (#164).
 - **docs(architecture)**: sync the 4 Mermaid diagrams in `## Architecture` (System Overview, Query Processing Flow, Document Ingestion Flow, hybrid_alpha Parameter Effect) with the v4.8.2 FTS5 fast-path (ADR-002/003/006), the v4.8.3 `_write_collection` staging dispatcher (#161), and the current 8-category layout. The diagrams previously described only the pre-v4.8 hybrid pipeline and 4-category storage; they now also show FTS5 dispatch, fallback semantics, FTS5 CRUD sync (ADR-008), and the zero-downtime staging write path. `hybrid_alpha` now clarifies that the fast-path bypasses RRF entirely so the weighting only matters on the hybrid path.
 
 ### v4.8.3 (2026-08-10) — Critical hotfix: nuclear-rebuild + smart-reindex hardening
