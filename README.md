@@ -134,22 +134,6 @@ We audited **16 popular RAG frameworks and platforms** (LlamaIndex, LangChain, C
 
 > **The 5 dimensions where knowledge-rag is unique:** health probes + JSON logging + Prometheus + rate limit + bearer auth **simultaneously built-in on an OSS RAG-focused MCP server**. Zero-downtime reindex + async background reindex + nightly chaos/soak/mutation are documented on nobody else's README.
 
-**When to pick knowledge-rag vs alternatives:**
-
-| You want... | Use this |
-|---|---|
-| MCP retrieval server for Claude / Cursor / Windsurf over your local docs | **knowledge-rag** |
-| Self-hosted ChatGPT with RAG as a feature | [open-webui](https://github.com/open-webui/open-webui) |
-| No-code visual agent workflow builder | [Dify](https://github.com/langgenius/dify) · [FastGPT](https://github.com/labring/FastGPT) |
-| LLM orchestration Python library (300+ integrations) | [LangChain](https://github.com/langchain-ai/langchain) |
-| RAG framework with 160+ data connectors | [LlamaIndex](https://github.com/run-llama/llama_index) |
-| Deep OCR + layout understanding for financial / scientific PDFs | [RAGFlow](https://github.com/infiniflow/ragflow) |
-| Graph RAG for "global" reasoning queries | [GraphRAG](https://github.com/microsoft/graphrag) · [LightRAG](https://github.com/HKUDS/LightRAG) |
-| Multimodal (image + diagram + formula) end-to-end | [RAG-Anything](https://github.com/HKUDS/RAG-Anything) |
-| Polished chat-with-docs UI for end users | [kotaemon](https://github.com/Cinnamon/kotaemon) |
-| Enterprise EU framework (Apache-2.0) | [Haystack](https://github.com/deepset-ai/haystack) |
-| LM programming (prompt compilation) | [DSPy](https://github.com/stanfordnlp/dspy) |
-
 ---
 
 ## 🚀 Quick Start (3 minutes, from zero to your first query)
