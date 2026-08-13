@@ -54,7 +54,7 @@ pip install knowledge-rag   →   restart Claude Code   →   search_knowledge("
 
 ---
 
-## Star History
+## ⭐ Star History
 
 <div align="center">
 
@@ -68,7 +68,7 @@ pip install knowledge-rag   →   restart Claude Code   →   search_knowledge("
 
 ---
 
-## Why knowledge-rag
+## 🎯 Why knowledge-rag
 
 Most RAG frameworks fall into one of three traps: (1) they require you to ship your data to a cloud API, (2) they hand you 300 building blocks and 0 opinionated defaults, or (3) they bundle RAG as a 5% feature of a much bigger platform you didn't ask for.
 
@@ -78,13 +78,13 @@ Most RAG frameworks fall into one of three traps: (1) they require you to ship y
 <tr>
 <td width="50%" valign="top">
 
-### 100% local, 0% cloud
+### 🔒 100% local, 0% cloud
 Your files never leave the machine. No API keys, no vendor lock-in, no data-residency headache. **LGPD / GDPR / HIPAA compliant by architecture** — because there is nothing to comply about when nothing leaves.
 
 </td>
 <td width="50%" valign="top">
 
-### Zero-friction setup
+### 🚀 Zero-friction setup
 `pip install knowledge-rag` → restart your MCP client → done. No Docker mandatory, no Ollama required, no separate embedding server to run. **Works offline** after the first model download.
 
 </td>
@@ -92,13 +92,13 @@ Your files never leave the machine. No API keys, no vendor lock-in, no data-resi
 <tr>
 <td width="50%" valign="top">
 
-### Production-grade OSS
+### 🛡️ Production-grade OSS
 7-pillar quality gate on every PR (**35+ automated checks**), 9-cell OS×Python CI matrix (Linux + Windows + macOS × 3.11/3.12/3.13), nightly chaos + 50K-iteration soak + mutation testing. **700+ tests. 0 known regressions.**
 
 </td>
 <td width="50%" valign="top">
 
-### Zero ongoing cost
+### 💰 Zero ongoing cost
 No token bills. No SaaS tier. No paid features hidden behind a wall. **MIT license, forever.** Runs on the laptop you already have — GPU optional, CPU works fine with FastEmbed ONNX.
 
 </td>
@@ -107,7 +107,7 @@ No token bills. No SaaS tier. No paid features hidden behind a wall. **MIT licen
 
 ---
 
-## How knowledge-rag compares to other RAG frameworks
+## 📊 How knowledge-rag compares to other RAG frameworks
 
 We audited **16 popular RAG frameworks and platforms** (LlamaIndex, LangChain, ChromaDB, Weaviate, Qdrant, RAGFlow, LightRAG, DSPy, GraphRAG, Haystack, RAG-Anything, kotaemon, txtai, llmware, Dify, open-webui, FastGPT) so you can pick honestly.
 
@@ -153,7 +153,7 @@ We audited **16 popular RAG frameworks and platforms** (LlamaIndex, LangChain, C
 
 ---
 
-## Quick Start (3 minutes, from zero to your first query)
+## 🚀 Quick Start (3 minutes, from zero to your first query)
 
 Pick your integration path — knowledge-rag ships the same server through every channel.
 
@@ -211,7 +211,39 @@ docker run -v $(pwd)/documents:/app/documents -p 8179:8179 ghcr.io/lyonzin/knowl
 
 ---
 
-## The 13 MCP tools your agent gets
+## 🤖 Ready-to-use skills for AI agents
+
+Installing knowledge-rag gives your agent 13 MCP tools. It does not tell the agent **when** to use them. That is what the [`skills/`](skills/) folder solves — drop-in behavioural skills for Claude Code, Cursor, Windsurf, Cline, Zed, VS Code Copilot that turn "AI with access to RAG" into "AI that actually uses RAG first".
+
+**10 skills, MIT licensed, one file each:**
+
+| # | Skill | What it does |
+|---|---|---|
+| 1 | [`rag-check-first`](skills/rag-check-first.md) | Search the corpus **before** answering any technical claim |
+| 2 | [`rag-cite-sources`](skills/rag-cite-sources.md) | Every claim ships with `path:line` citations |
+| 3 | [`rag-onboard-context`](skills/rag-onboard-context.md) | First interaction of a session probes what is indexed |
+| 4 | [`rag-deep-dive`](skills/rag-deep-dive.md) | 3-step drill: `search` → `fetch` → `find similar` |
+| 5 | [`rag-web-fallback`](skills/rag-web-fallback.md) | Only hit the web when local RAG comes back empty |
+| 6 | [`rag-troubleshoot`](skills/rag-troubleshoot.md) | Bug / error → RAG first for prior fixes |
+| 7 | [`rag-code-review`](skills/rag-code-review.md) | Review consults ADRs / patterns before commenting |
+| 8 | [`rag-index-decisions`](skills/rag-index-decisions.md) | After a decision, index it back — close the feedback loop |
+| 9 | [`rag-security-first`](skills/rag-security-first.md) | Security tasks: MITRE / CVE / runbook first |
+| 10 | [`rag-evaluate-quality`](skills/rag-evaluate-quality.md) | Weekly checkup — MRR@5 · Recall@5 · Precision@5 |
+
+**Install in Claude Code (30 seconds):**
+
+```bash
+git clone https://github.com/lyonzin/knowledge-rag.git
+mkdir -p ~/.claude/skills
+cp knowledge-rag/skills/rag-*.md ~/.claude/skills/
+# Restart Claude Code — skills auto-discover
+```
+
+For Cursor, Windsurf, Cline and full installation guide → [skills/README.md](skills/README.md) · Full catalog with skill chains → [skills/CATALOG.md](skills/CATALOG.md)
+
+---
+
+## 🛠️ The 13 MCP tools your agent gets
 
 Once installed, your AI agent gets these 13 tools automatically:
 
@@ -235,7 +267,7 @@ Once installed, your AI agent gets these 13 tools automatically:
 
 ---
 
-## Enterprise Features (built-in, zero configuration)
+## 🏢 Enterprise Features (built-in, zero configuration)
 
 Every RAG framework claims "production-ready." Here is what knowledge-rag ships **in the OSS core, verified by regression tests, that competitors either paywall, plugin-ify, or simply don't have.**
 
@@ -297,7 +329,7 @@ Every RAG framework claims "production-ready." Here is what knowledge-rag ships 
 
 ---
 
-## Use Cases (real corpora, real teams)
+## 💼 Use Cases (real corpora, real teams)
 
 ### Security Teams — Red / Blue / CTF
 
@@ -327,7 +359,7 @@ Deploy via SSE on a single VM. 40+ users authenticated via bearer token, rate-li
 
 ---
 
-## Architecture at a glance
+## 🏗️ Architecture at a glance
 
 End-to-end view of how MCP clients, the retrieval pipeline, storage, and enterprise plumbing connect. Every arrow is a real code path — nothing pictured here is aspirational.
 
@@ -465,7 +497,7 @@ flowchart TB
 
 ---
 
-## 20 File Formats — parsed natively, no plugins needed
+## 📄 20 File Formats — parsed natively, no plugins needed
 
 Every parser is **chunk-aware** — Markdown splits at `##` headers, code splits at function/class boundaries, notebooks skip base64 outputs, PDFs use PyMuPDF, spreadsheets extract sheet-by-sheet. **18 formats are enabled by default**; the 2 MetaTrader formats are opt-in (add to `documents.supported_formats` in `config.yaml`).
 
@@ -502,7 +534,7 @@ Every parser is **chunk-aware** — Markdown splits at `##` headers, code splits
 
 ---
 
-## Choose your MCP integration
+## 🔌 Choose your MCP integration
 
 <table>
 <tr>
@@ -549,7 +581,7 @@ Native MCP
 
 ---
 
-## Configuration in 30 seconds
+## ⚙️ Configuration in 30 seconds
 
 ```yaml
 # config.yaml — everything is optional; defaults just work
@@ -587,7 +619,7 @@ server:                                 # optional — SSE / HTTP mode
 
 ---
 
-## Security & Compliance
+## 🔒 Security & Compliance
 
 knowledge-rag is designed for teams that cannot let their documents leave the perimeter.
 
@@ -610,7 +642,7 @@ knowledge-rag is designed for teams that cannot let their documents leave the pe
 
 ---
 
-## Numbers that matter
+## 📈 Numbers that matter
 
 - **26 000+** total downloads on PyPI · **250+** GitHub stars · **70+** enterprise teams (private + community)
 - **700+ tests** collected · **1.33:1** test-to-code ratio · **codecov trend gate** ±0.5pp
@@ -623,7 +655,7 @@ knowledge-rag is designed for teams that cannot let their documents leave the pe
 
 ---
 
-## Documentation
+## 📚 Documentation
 
 | Doc | What's inside |
 |---|---|
@@ -642,7 +674,7 @@ knowledge-rag is designed for teams that cannot let their documents leave the pe
 
 ---
 
-## Community & Support
+## 🤝 Community & Support
 
 - **Report a bug** → [Open an issue](https://github.com/lyonzin/knowledge-rag/issues/new/choose)
 - **Ask a question** → [GitHub Discussions](https://github.com/lyonzin/knowledge-rag/discussions)
@@ -656,7 +688,7 @@ knowledge-rag is designed for teams that cannot let their documents leave the pe
 
 ---
 
-## Recent releases
+## 🗺️ Recent releases
 
 - **v4.8.5** (2026-08-13) — Enterprise observability: `/health` endpoint + opt-in JSON structured logging
 - **v4.8.4** (2026-08-13) — Patch: security + durability + defensive fixes
@@ -668,13 +700,13 @@ knowledge-rag is designed for teams that cannot let their documents leave the pe
 
 ---
 
-## License
+## 📜 License
 
 **MIT License** — [LICENSE](LICENSE). Forever. No cloud upsell, no dual-licensing, no restrictive clauses. Fork it, sell derivatives, embed it in commercial products — the license does not care.
 
 ---
 
-## Acknowledgments
+## 🙏 Acknowledgments
 
 Built on the shoulders of amazing open-source projects:
 
