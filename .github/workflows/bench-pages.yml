@@ -52,74 +52,24 @@ jobs:
           pytest bench/ --benchmark-only --benchmark-min-rounds=5 \
             --benchmark-json=bench-current.json
 
-      - name: Build static dashboard
+      - name: Build dashboard site
         shell: bash
         run: |
           mkdir -p site
-          # Inline a minimal chart.js dashboard — keeps the workflow
-          # self-contained without external assets.
-          python - <<'PY'
-          import json
-          import datetime
-          from pathlib import Path
-
-          data = json.loads(Path("bench-current.json").read_text(encoding="utf-8"))
-          rows = []
-          for b in data.get("benchmarks", []):
-              rows.append({
-                  "name": b["name"],
-                  "median_ns": b["stats"]["median"] * 1_000_000_000,
-                  "ops": b["stats"]["ops"],
-              })
-          rows.sort(key=lambda r: r["median_ns"])
-          payload = {
-              "generated_at": datetime.datetime.utcnow().isoformat() + "Z",
-              "commit": "${{ github.sha }}"[:7],
-              "results": rows,
-          }
-          Path("site/data.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
-
-          html = """<!DOCTYPE html>
-          <html lang="en"><head><meta charset="utf-8">
-          <title>knowledge-rag — live performance dashboard</title>
-          <style>
-            body { font-family: -apple-system, sans-serif; max-width: 960px; margin: 2em auto; padding: 0 1em; color: #1a1a1a; }
-            h1 { border-bottom: 2px solid #2c5282; padding-bottom: 0.3em; }
-            table { width: 100%; border-collapse: collapse; margin-top: 1em; }
-            th, td { padding: 0.5em; border-bottom: 1px solid #e2e8f0; text-align: left; }
-            th { background: #edf2f7; }
-            tr:hover { background: #f7fafc; }
-            .meta { color: #718096; font-size: 0.9em; }
-          </style></head><body>
-          <h1>knowledge-rag — performance dashboard</h1>
-          <p class="meta">Updated automatically on every push to master. Median wall time per benchmark.</p>
-          <p class="meta" id="meta"></p>
-          <table id="results">
-            <thead><tr><th>Benchmark</th><th>Median time</th><th>Ops/sec</th></tr></thead>
-            <tbody></tbody>
-          </table>
-          <script>
-            fetch("data.json").then(r => r.json()).then(d => {
-              document.getElementById("meta").textContent =
-                "Commit " + d.commit + " — generated " + d.generated_at;
-              const tbody = document.querySelector("#results tbody");
-              for (const r of d.results) {
-                const tr = document.createElement("tr");
-                const median = r.median_ns < 1000 ? r.median_ns.toFixed(1) + " ns"
-                  : r.median_ns < 1_000_000 ? (r.median_ns/1000).toFixed(1) + " μs"
-                  : r.median_ns < 1_000_000_000 ? (r.median_ns/1_000_000).toFixed(2) + " ms"
-                  : (r.median_ns/1_000_000_000).toFixed(2) + " s";
-                tr.innerHTML = "<td>" + r.name + "</td><td>" + median +
-                  "</td><td>" + r.ops.toFixed(2) + "</td>";
-                tbody.appendChild(tr);
-              }
-            });
-          </script>
-          </body></html>
-          """
-          Path("site/index.html").write_text(html, encoding="utf-8")
-          print("Dashboard written to site/")
-          PY
+          # Copy the versioned static assets (HTML/CSS/JS) from the repo — this
+          # replaces the old inline heredoc so the design is properly reviewable
+          # in PRs and shipped with the same file layout as production.
+          cp bench/dashboard/index.html   site/index.html
+          cp bench/dashboard/styles.css   site/styles.css
+          cp bench/dashboard/dashboard.js site/dashboard.js
+          # Produce the data payload consumed by dashboard.js.
+          python bench/dashboard/build.py \
+            --input  bench-current.json \
+            --output site/data.json \
+            --commit  "${GITHUB_SHA:0:7}" \
+            --version "$(python -c 'import mcp_server; print(mcp_server.__version__)')"
+          echo "Site contents:"
+          ls -la site/
 
       - uses: actions/upload-artifact@v7
         with:

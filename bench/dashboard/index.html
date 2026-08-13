@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="auto">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="knowledge-rag live performance dashboard — public transparency updated on every commit. Median latency, throughput, memory footprint, and 30-day trend by benchmark category.">
+  <meta name="theme-color" content="#0f172a">
+
+  <title>knowledge-rag — Live Performance Dashboard</title>
+
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E⚡%3C/text%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://cdn.jsdelivr.net">
+
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <div class="hero-top">
+      <div class="brand">
+        <span class="brand-mark">⚡</span>
+        <div>
+          <h1>knowledge-rag</h1>
+          <p class="tagline">Live Performance Dashboard</p>
+        </div>
+      </div>
+      <nav class="hero-nav">
+        <a href="https://github.com/lyonzin/knowledge-rag" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://pypi.org/project/knowledge-rag/" target="_blank" rel="noopener">PyPI</a>
+        <a href="https://github.com/lyonzin/knowledge-rag/blob/master/README.md" target="_blank" rel="noopener">Docs</a>
+        <button id="theme-toggle" aria-label="Toggle theme" class="theme-toggle">🌓</button>
+      </nav>
+    </div>
+
+    <p class="hero-lede">
+      Public transparency, updated on every push to <code>master</code>. Median wall-time per benchmark, grouped by category. No cherry-picked numbers — the CI runs
+      <code>pytest bench/ --benchmark-only</code> on a clean Ubuntu runner and publishes the raw JSON alongside this page.
+    </p>
+
+    <div class="hero-meta" id="hero-meta">
+      <span class="meta-item"><span class="meta-label">Last update</span><span class="meta-value" id="meta-updated">—</span></span>
+      <span class="meta-item"><span class="meta-label">Commit</span><span class="meta-value" id="meta-commit">—</span></span>
+      <span class="meta-item"><span class="meta-label">Version</span><span class="meta-value" id="meta-version">—</span></span>
+      <span class="meta-item"><span class="meta-label">Benchmarks</span><span class="meta-value" id="meta-count">—</span></span>
+    </div>
+  </div>
+</header>
+
+<main class="container">
+
+  <!-- KPI CARDS -->
+  <section class="section" aria-labelledby="kpi-heading">
+    <h2 id="kpi-heading" class="section-title">Executive summary</h2>
+    <p class="section-lede">One-line health per category. Green = within budget. Amber = watch. Red = investigate.</p>
+    <div class="kpi-grid" id="kpi-grid">
+      <!-- filled by dashboard.js -->
+      <div class="kpi-card kpi-card--skeleton"><div class="kpi-label">Loading…</div></div>
+    </div>
+  </section>
+
+  <!-- CATEGORY LATENCY CHART -->
+  <section class="section" aria-labelledby="chart-heading">
+    <h2 id="chart-heading" class="section-title">Median latency by benchmark</h2>
+    <p class="section-lede">Horizontal bars, log-scale, shortest first. Hover to see raw ops/sec.</p>
+    <div class="chart-wrap">
+      <canvas id="latency-chart" role="img" aria-label="Bar chart of median latency per benchmark"></canvas>
+    </div>
+  </section>
+
+  <!-- CATEGORY BREAKDOWN -->
+  <section class="section" aria-labelledby="cat-heading">
+    <h2 id="cat-heading" class="section-title">Category breakdown</h2>
+    <p class="section-lede">All benchmarks grouped by subsystem. Click a category to jump to the full detail table.</p>
+    <div class="category-grid" id="category-grid">
+      <div class="category-card category-card--skeleton"><div class="cat-name">Loading…</div></div>
+    </div>
+  </section>
+
+  <!-- FULL TABLE -->
+  <section class="section" aria-labelledby="table-heading">
+    <h2 id="table-heading" class="section-title">Full benchmark table</h2>
+    <p class="section-lede">Sortable, searchable. All the raw numbers behind the summary above.</p>
+
+    <div class="table-controls">
+      <input type="search" id="table-filter" placeholder="Filter benchmarks…" aria-label="Filter benchmarks">
+      <select id="category-filter" aria-label="Filter by category">
+        <option value="all">All categories</option>
+      </select>
+    </div>
+
+    <div class="table-wrap">
+      <table id="results-table" class="results-table">
+        <thead>
+          <tr>
+            <th data-sort="category">Category</th>
+            <th data-sort="name">Benchmark</th>
+            <th data-sort="median_ns" class="numeric">Median</th>
+            <th data-sort="ops" class="numeric">Ops/sec</th>
+            <th data-sort="stddev_pct" class="numeric">σ (%)</th>
+          </tr>
+        </thead>
+        <tbody id="results-body">
+          <tr><td colspan="5" class="loading">Loading benchmark data…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- METHODOLOGY -->
+  <section class="section methodology" aria-labelledby="method-heading">
+    <h2 id="method-heading" class="section-title">Methodology &amp; disclaimers</h2>
+    <div class="methodology-grid">
+      <div>
+        <h3>How the numbers are produced</h3>
+        <ul>
+          <li>Runner: GitHub-hosted <code>ubuntu-latest</code> (2 vCPU, 7 GB RAM). Not a benchmark rig — treat as a floor, not a ceiling.</li>
+          <li>Command: <code>pytest bench/ --benchmark-only --benchmark-min-rounds=5</code> against a clean checkout.</li>
+          <li>Data: median wall-time (nanoseconds), ops/sec, standard deviation. Warm-up rounds discarded.</li>
+          <li>Cadence: every push to <code>master</code>. The <code>bench-pages.yml</code> workflow rebuilds this page automatically.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>How to read the numbers</h3>
+        <ul>
+          <li><strong>Median &lt; standard deviation</strong> means an unstable measurement — do not draw conclusions from a single run.</li>
+          <li><strong>Log-scale bars</strong> in the chart above compress the range so you can see µs and ms benchmarks side by side.</li>
+          <li><strong>Category KPIs</strong> pick the representative benchmark for that subsystem. See <a href="https://github.com/lyonzin/knowledge-rag/tree/master/bench" target="_blank" rel="noopener"><code>bench/</code></a> for the source.</li>
+          <li>Compared to your production hardware, these numbers will typically be 2–5× faster.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer class="footer">
+  <div class="container">
+    <p>
+      <a href="https://github.com/lyonzin/knowledge-rag" target="_blank" rel="noopener">knowledge-rag</a>
+      · MIT License
+      · Built by <a href="https://github.com/lyonzin" target="_blank" rel="noopener">Ailton Rocha (Lyon.)</a>
+      · Raw data: <a href="./data.json" target="_blank" rel="noopener">data.json</a>
+    </p>
+  </div>
+</footer>
+
+<!-- Chart.js from jsDelivr, pinned version -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"
+        integrity="sha384-mNJfYFuS/8u1WFq7c25gtBVJp47ynhACGmJk8jgtVIIhvKXPFq/UdyimIeSFaIiV"
+        crossorigin="anonymous"></script>
+<script src="./dashboard.js" defer></script>
+</body>
+</html>
