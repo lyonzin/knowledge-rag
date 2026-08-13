@@ -79,7 +79,7 @@ Most RAG frameworks fall into one of three traps: (1) they require you to ship y
 <td width="50%" valign="top">
 
 ### 🔒 100% local, 0% cloud
-Your files never leave the machine. No API keys, no vendor lock-in, no data-residency headache. **LGPD / GDPR / HIPAA compliant by architecture** — because there is nothing to comply about when nothing leaves.
+Your files never leave the machine. No vendor lock-in, no data-residency headache, no forced cloud dependency. **LGPD / GDPR / HIPAA compliant by architecture** — because there is nothing to comply about when nothing leaves.
 
 </td>
 <td width="50%" valign="top">
@@ -116,7 +116,6 @@ We audited **16 popular RAG frameworks and platforms** (LlamaIndex, LangChain, C
 | Dimension | 🎯 **knowledge-rag** | LlamaIndex | LangChain | Haystack | RAGFlow | txtai | open-webui | Dify | Qdrant |
 |---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | **100% local, zero cloud** | ✅ | 🟡 | ✅ | 🟡 | 🟡 | ✅ | ✅ | 🟡 | 🟡 |
-| **Zero API key required** | ✅ | ❌ | ✅ | 🟡 | ❌ | ✅ | ✅ | ❌ | ✅ |
 | **MCP native (Claude/Cursor)** | ✅ 13 tools | 🟡 pkg | 🟡 adapter | 🟡 wrapper | 🟡 add-on | ✅ | ✅ consumer | ✅ | ❌ |
 | **Hybrid BM25 + semantic** | ✅ 128× faster | 🟡 | 🟡 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Cross-encoder rerank** | ✅ builtin | ❌ | 🟡 | ✅ | ✅ fused | ❌ | ✅ | 🟡 | 🟡 |

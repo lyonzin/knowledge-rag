@@ -55,7 +55,7 @@ documents:
     chunk_size: 1000              # Max chars per chunk
     chunk_overlap: 200            # Shared chars between chunks
 
-# Models — AI models for search (all run locally, no API keys)
+# Models — AI models for search (all run locally, in-process)
 models:
   embedding:
     model: "BAAI/bge-small-en-v1.5"   # ONNX, ~33MB, auto-downloaded
