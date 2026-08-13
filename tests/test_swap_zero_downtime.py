@@ -482,3 +482,48 @@ class TestBackwardsCompat:
 
         orch._rebuild_via_swap.assert_called_once()
         orch._rebuild_destructive.assert_not_called()
+
+
+# =============================================================================
+# TestRollbackDurability (GH #173)
+# =============================================================================
+
+
+class TestRollbackDurability:
+    def test_failed_validation_rollback_restores_durable_metadata(self, tmp_path, monkeypatch):
+        """A failed staging validation must restore index_metadata.json on disk,
+        not only the in-memory _indexed_docs.
+
+        The populate path (index_all -> _finalize_reindex -> _save_metadata)
+        persists the staging map before validation runs. If validation then
+        fails, rollback restored only Python fields, leaving the file
+        describing staging while memory held production. After a restart
+        _load_metadata would trust that stale file (GH #173).
+        """
+        from mcp_server import server as srv
+
+        monkeypatch.setattr(srv.config, "collection_name", "kb", raising=False)
+
+        orch = object.__new__(KnowledgeOrchestrator)
+        orch._metadata_file = tmp_path / "index_metadata.json"
+        orch._staging_target = None
+        orch.chroma_client = MagicMock()
+
+        # 1. Production metadata persisted to disk (real _save_metadata).
+        orch._indexed_docs = {"prod_doc": {"source": "prod"}}
+        orch._save_metadata()
+        saved = {"_indexed_docs": dict(orch._indexed_docs)}
+
+        # 2. Populate rebinds _indexed_docs to the staging map and persists it
+        #    (mirrors _finalize_reindex writing metadata before validation).
+        orch._indexed_docs = {"staging_doc": {"source": "staging"}}
+        orch._save_metadata()
+        assert orch._load_metadata() == {"staging_doc": {"source": "staging"}}
+
+        # 3. Validation fails -> rollback restores the pre-staging snapshot.
+        orch._rollback_and_cleanup_staging("kb", ts=1, saved=saved)
+
+        # In-memory is back to production...
+        assert orch._indexed_docs == {"prod_doc": {"source": "prod"}}
+        # ...and the durable metadata must match it, not the staging map.
+        assert orch._load_metadata() == {"prod_doc": {"source": "prod"}}

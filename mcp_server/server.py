@@ -2420,6 +2420,12 @@ class KnowledgeOrchestrator:
         # collection we're about to delete.
         self._staging_target = None
         self._rollback_staging_state(saved)
+        # GH #173: populate persisted the staging map to index_metadata.json
+        # (index_all -> _finalize_reindex -> _save_metadata) before validation.
+        # Restoring only in-memory fields would leave the file describing
+        # staging while memory holds production; re-persist so durable metadata
+        # matches the restored state and a restart won't load stale staging.
+        self._save_metadata()
         try:
             self.chroma_client.delete_collection(f"{prod_name}__staging_{ts}")
         except Exception:
