@@ -23,14 +23,20 @@ Structured data (schema.org SoftwareApplication) — indexed by search engines, 
 
 <div align="center">
 
-[![PyPI](https://img.shields.io/pypi/v/knowledge-rag?style=flat-square&logo=pypi&logoColor=white&color=3776AB)](https://pypi.org/project/knowledge-rag/)
-[![NPM](https://img.shields.io/npm/v/knowledge-rag?style=flat-square&logo=npm&color=CB3837)](https://www.npmjs.com/package/knowledge-rag)
-[![Downloads](https://static.pepy.tech/personalized-badge/knowledge-rag?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/knowledge-rag)
-[![License MIT](https://img.shields.io/badge/license-MIT-brightgreen.svg?style=flat-square)](LICENSE)
+[![PyPI](https://img.shields.io/pypi/v/knowledge-rag)](https://pypi.org/project/knowledge-rag/)
+[![NPM](https://img.shields.io/npm/v/knowledge-rag)](https://www.npmjs.com/package/knowledge-rag)
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/knowledge-rag?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/knowledge-rag)
+![Python](https://img.shields.io/badge/python-3.11%2B-green.svg)
+![License](https://img.shields.io/badge/license-MIT-yellow.svg)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)
+![GPU](https://img.shields.io/badge/GPU-NVIDIA%20CUDA-76B900.svg?logo=nvidia)
+[![CI](https://github.com/lyonzin/knowledge-rag/actions/workflows/ci.yml/badge.svg)](https://github.com/lyonzin/knowledge-rag/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/lyonzin/knowledge-rag/actions/workflows/security.yml/badge.svg)](https://github.com/lyonzin/knowledge-rag/actions/workflows/security.yml)
 [![Quality Gate](https://github.com/lyonzin/knowledge-rag/actions/workflows/quality-gate.yml/badge.svg)](https://github.com/lyonzin/knowledge-rag/actions/workflows/quality-gate.yml)
+[![Glama Score](https://glama.ai/mcp/servers/lyonzin/knowledge-rag/badges/score.svg)](https://glama.ai/mcp/servers/lyonzin/knowledge-rag)
 [![OpenSSF Best Practices](https://bestpractices.coreinfrastructure.org/projects/13864/badge)](https://bestpractices.coreinfrastructure.org/projects/13864)
 
-# **The MCP-first local RAG server for Claude Code, Cursor, and every AI agent.**
+### The MCP-first local RAG server for Claude Code, Cursor, and every AI agent.
 
 **Hybrid search · Cross-encoder reranking · 20 file formats · 100% local · Zero cloud · Enterprise-grade plumbing built-in.**
 
@@ -38,17 +44,31 @@ Structured data (schema.org SoftwareApplication) — indexed by search engines, 
 pip install knowledge-rag   →   restart Claude Code   →   search_knowledge("your query")
 ```
 
-[**⚡ Quick Start**](#-quick-start-3-minutes-from-zero-to-your-first-query) ·
-[**🎯 Why knowledge-rag**](#-why-knowledge-rag) ·
-[**📊 Compare**](#-how-knowledge-rag-compares-to-other-rag-frameworks) ·
-[**🏢 Enterprise**](#-enterprise-features-built-in-zero-configuration) ·
-[**📚 Docs**](#-documentation)
+[Quick Start](#quick-start-3-minutes-from-zero-to-your-first-query) ·
+[Why knowledge-rag](#why-knowledge-rag) ·
+[Compare](#how-knowledge-rag-compares-to-other-rag-frameworks) ·
+[Enterprise Features](#enterprise-features-built-in-zero-configuration) ·
+[Docs](#documentation)
 
 </div>
 
 ---
 
-## 🎯 Why knowledge-rag
+## Star History
+
+<div align="center">
+
+<a href="https://www.star-history.com/?repos=lyonzin%2Fknowledge-rag&type=date&legend=top-left">
+  <img alt="knowledge-rag star history chart — GitHub star growth over time" src="./docs/star-history.svg" width="720" />
+</a>
+
+<sub>Chart updated daily by <a href="./.github/workflows/update-star-history.yml">GitHub Action</a></sub>
+
+</div>
+
+---
+
+## Why knowledge-rag
 
 Most RAG frameworks fall into one of three traps: (1) they require you to ship your data to a cloud API, (2) they hand you 300 building blocks and 0 opinionated defaults, or (3) they bundle RAG as a 5% feature of a much bigger platform you didn't ask for.
 
@@ -58,13 +78,13 @@ Most RAG frameworks fall into one of three traps: (1) they require you to ship y
 <tr>
 <td width="50%" valign="top">
 
-### 🔒 100% local, 0% cloud
+### 100% local, 0% cloud
 Your files never leave the machine. No API keys, no vendor lock-in, no data-residency headache. **LGPD / GDPR / HIPAA compliant by architecture** — because there is nothing to comply about when nothing leaves.
 
 </td>
 <td width="50%" valign="top">
 
-### 🚀 Zero-friction setup
+### Zero-friction setup
 `pip install knowledge-rag` → restart your MCP client → done. No Docker mandatory, no Ollama required, no separate embedding server to run. **Works offline** after the first model download.
 
 </td>
@@ -72,13 +92,13 @@ Your files never leave the machine. No API keys, no vendor lock-in, no data-resi
 <tr>
 <td width="50%" valign="top">
 
-### 🏢 Production-grade OSS
+### Production-grade OSS
 7-pillar quality gate on every PR (**35+ automated checks**), 9-cell OS×Python CI matrix (Linux + Windows + macOS × 3.11/3.12/3.13), nightly chaos + 50K-iteration soak + mutation testing. **700+ tests. 0 known regressions.**
 
 </td>
 <td width="50%" valign="top">
 
-### 💰 Zero ongoing cost
+### Zero ongoing cost
 No token bills. No SaaS tier. No paid features hidden behind a wall. **MIT license, forever.** Runs on the laptop you already have — GPU optional, CPU works fine with FastEmbed ONNX.
 
 </td>
@@ -87,7 +107,7 @@ No token bills. No SaaS tier. No paid features hidden behind a wall. **MIT licen
 
 ---
 
-## 📊 How knowledge-rag compares to other RAG frameworks
+## How knowledge-rag compares to other RAG frameworks
 
 We audited **16 popular RAG frameworks and platforms** (LlamaIndex, LangChain, ChromaDB, Weaviate, Qdrant, RAGFlow, LightRAG, DSPy, GraphRAG, Haystack, RAG-Anything, kotaemon, txtai, llmware, Dify, open-webui, FastGPT) so you can pick honestly.
 
@@ -133,7 +153,7 @@ We audited **16 popular RAG frameworks and platforms** (LlamaIndex, LangChain, C
 
 ---
 
-## 🚀 Quick Start (3 minutes, from zero to your first query)
+## Quick Start (3 minutes, from zero to your first query)
 
 Pick your integration path — knowledge-rag ships the same server through every channel.
 
@@ -191,31 +211,31 @@ docker run -v $(pwd)/documents:/app/documents -p 8179:8179 ghcr.io/lyonzin/knowl
 
 ---
 
-## 🎬 See it in action
+## The 13 MCP tools your agent gets
 
-Once installed, your AI agent gets these 13 MCP tools automatically:
+Once installed, your AI agent gets these 13 tools automatically:
 
-```
-📖 search_knowledge      — hybrid semantic + BM25 with cross-encoder rerank
-📄 get_document          — retrieve full content of one document
-🔗 search_similar        — find documents similar to a reference
-📊 evaluate_retrieval    — measure MRR@5 · Recall@5 · Precision@5
-➕ add_document          — index a new document via MCP
-🔄 update_document       — re-index a changed document
-🗑️ remove_document       — drop a document + all its chunks
-🌐 add_from_url          — fetch, sanitize, and index a URL
-📁 list_documents        — enumerate indexed documents
-📂 list_categories       — auto-tagged by folder path
-📈 get_index_stats       — corpus size, cache hit rate, embedding dim
-♻️ reindex_documents     — smart incremental OR nuclear rebuild
-⏳ get_reindex_status    — live progress polling (async reindex)
-```
+| Tool | Purpose |
+|---|---|
+| `search_knowledge` | Hybrid semantic + BM25 with cross-encoder rerank |
+| `get_document` | Retrieve full content of one document |
+| `search_similar` | Find documents similar to a reference |
+| `evaluate_retrieval` | Measure MRR@5 · Recall@5 · Precision@5 |
+| `add_document` | Index a new document via MCP |
+| `update_document` | Re-index a changed document |
+| `remove_document` | Drop a document + all its chunks |
+| `add_from_url` | Fetch, sanitize, and index a URL |
+| `list_documents` | Enumerate indexed documents |
+| `list_categories` | Auto-tagged by folder path |
+| `get_index_stats` | Corpus size, cache hit rate, embedding dim |
+| `reindex_documents` | Smart incremental OR nuclear rebuild |
+| `get_reindex_status` | Live progress polling (async reindex) |
 
 **Full API reference with parameter details, return schemas, examples:** [docs/API.md →](docs/API.md)
 
 ---
 
-## 🏢 Enterprise Features (built-in, zero configuration)
+## Enterprise Features (built-in, zero configuration)
 
 Every RAG framework claims "production-ready." Here is what knowledge-rag ships **in the OSS core, verified by regression tests, that competitors either paywall, plugin-ify, or simply don't have.**
 
@@ -223,7 +243,7 @@ Every RAG framework claims "production-ready." Here is what knowledge-rag ships 
 <tr>
 <td valign="top" width="50%">
 
-### 🔐 Security
+### Security
 
 - **Bearer token auth** on SSE / HTTP transports — constant-time comparison (`hmac.compare_digest`), RFC 6750 challenge, 401 fenced with `WWW-Authenticate` header
 - **Path traversal + symlink escape defenses** — `validate_path_within` guarding 6 CRUD tools (CWE-22, CWE-59)
@@ -234,7 +254,7 @@ Every RAG framework claims "production-ready." Here is what knowledge-rag ships 
 </td>
 <td valign="top" width="50%">
 
-### 👁️ Observability
+### Observability
 
 - **Prometheus `/metrics` endpoint** — custom histogram buckets tuned for RAG (p95 ≤ 10ms fast-path targets), 7 canonical metrics via `@instrument` decorator on all 13 tools
 - **Rate limiting** — thread-safe sliding-window counter, per-client RPM + burst, zero overhead when disabled
@@ -247,7 +267,7 @@ Every RAG framework claims "production-ready." Here is what knowledge-rag ships 
 <tr>
 <td valign="top" width="50%">
 
-### 📈 Scale & performance
+### Scale & performance
 
 - **SSE / streamable-http transport** — 1 server serves N MCP clients, ChromaDB WAL mode enabled automatically, shared embedding model + query cache
 - **BM25 inverted-index** — **128× faster** than linear scan (custom implementation, replaces `rank-bm25`)
@@ -261,7 +281,7 @@ Every RAG framework claims "production-ready." Here is what knowledge-rag ships 
 </td>
 <td valign="top" width="50%">
 
-### 🛡️ Reliability
+### Reliability
 
 - **Nightly chaos injection** — HuggingFace Hub offline · ONNX zero-byte replay · watchdog crash recovery (3 scenarios in `tests/chaos/`)
 - **50 000-iteration soak test** — proves no memory leak after 1h of continuous queries (`KNOWLEDGE_RAG_SOAK_ITERATIONS=50000`)
@@ -277,27 +297,27 @@ Every RAG framework claims "production-ready." Here is what knowledge-rag ships 
 
 ---
 
-## 🎯 Use Cases (real corpora, real teams)
+## Use Cases (real corpora, real teams)
 
-### 🛡️ Security Teams — Red / Blue / CTF
+### Security Teams — Red / Blue / CTF
 
 **Preset:** [`cybersecurity.yaml`](presets/cybersecurity.yaml) · 8 categories · 200+ routing keywords · 69 query expansions
 
 Ingest MITRE ATT&CK, threat reports, exploit writeups, incident reports. Search from Claude Code with `search_knowledge("privilege escalation windows")` and get instant recall across your entire corpus. Air-gapped — nothing leaves the laptop.
 
-### 👨‍💻 Development Teams — Design Docs, Runbooks, Code
+### Development Teams — Design Docs, Runbooks, Code
 
 **Preset:** [`developer.yaml`](presets/developer.yaml) · 9 categories · 150+ routing keywords · 50+ expansions
 
 Replace Confluence hunting. Ingest architecture docs, ADRs, runbooks, code, API specs. Devs ask their AI agent "how do we authenticate the payment service" and get the exact ADR + implementation file citation.
 
-### 🎓 Research Labs — Papers, Notebooks, Datasets
+### Research Labs — Papers, Notebooks, Datasets
 
 **Preset:** [`research.yaml`](presets/research.yaml) · 9 categories · 100+ routing keywords · 40+ expansions
 
 Index arXiv papers, lab notebooks, dataset documentation. Semantic search finds papers by intent, not just keywords — cross-encoder reranking surfaces the actually-relevant one instead of five that share a term.
 
-### 🏢 Enterprise Knowledge Base — Air-gapped, Auditable
+### Enterprise Knowledge Base — Air-gapped, Auditable
 
 **Preset:** [`general.yaml`](presets/general.yaml) · blank slate, pure semantic search
 
@@ -307,33 +327,145 @@ Deploy via SSE on a single VM. 40+ users authenticated via bearer token, rate-li
 
 ---
 
-## 🏗️ Architecture at a glance
+## Architecture at a glance
+
+End-to-end view of how MCP clients, the retrieval pipeline, storage, and enterprise plumbing connect. Every arrow is a real code path — nothing pictured here is aspirational.
 
 ```mermaid
-graph LR
-    Q[Query from<br/>Claude Code / Cursor] --> R[Query Router]
-    R -->|lexical| F[FTS5 Fast-Path<br/><10ms]
-    R -->|semantic| H[Hybrid Pipeline]
-    H --> B[BM25 Inverted Index<br/>128× faster]
-    H --> S[Semantic Search<br/>ChromaDB + FastEmbed ONNX]
-    B --> RRF[Reciprocal Rank Fusion]
-    S --> RRF
-    RRF --> CE[Cross-Encoder Rerank<br/>MiniLM-L-6-v2]
-    F --> OUT[Results]
-    CE --> OUT
-    OUT --> A[MCP Response<br/>via stdio / SSE / streamable-http]
+flowchart TB
+    subgraph CLIENTS["MCP Clients (any of these)"]
+        C1[Claude Code]
+        C2[Claude Desktop]
+        C3[Cursor]
+        C4[Windsurf]
+        C5[VS Code · Cline · Gemini CLI · Zed]
+    end
 
-    style Q fill:#3776AB,color:#fff
-    style A fill:#3776AB,color:#fff
-    style F fill:#00A67E,color:#fff
-    style CE fill:#00A67E,color:#fff
+    subgraph TRANSPORT["Transport Layer"]
+        T1[stdio<br/>1 process per client]
+        T2[SSE / streamable-http<br/>1 server serves N clients]
+    end
+
+    subgraph MIDDLEWARE["ASGI Middleware Chain (HTTP mode)"]
+        M1[HealthMiddleware<br/>/health · /healthz]
+        M2[BearerAuthMiddleware<br/>constant-time compare]
+        M3[Rate Limiter<br/>sliding window]
+    end
+
+    subgraph MCP["13 MCP Tools (frozen contract)"]
+        MT1[search_knowledge]
+        MT2[get_document · search_similar]
+        MT3[add_document · add_from_url · update · remove]
+        MT4[reindex_documents · get_reindex_status]
+        MT5[list_documents · list_categories · get_index_stats · evaluate_retrieval]
+    end
+
+    subgraph SEARCH["Retrieval Pipeline"]
+        R[Query Router<br/>lexical vs semantic]
+        F[FTS5 Fast-Path<br/>opt-in · lt 10ms]
+        BM[BM25 Inverted Index<br/>128x faster than baseline]
+        SE[Semantic Search<br/>FastEmbed ONNX lazy-loaded]
+        RRF[Reciprocal Rank Fusion]
+        CE[Cross-Encoder Rerank<br/>MiniLM-L-6-v2]
+        QC[Query Cache<br/>LRU + 5-min TTL]
+    end
+
+    subgraph STORAGE["Storage (100% local)"]
+        CH[ChromaDB<br/>vectors + metadata<br/>WAL mode]
+        FT[SQLite FTS5<br/>lexical index<br/>WAL + busy-timeout]
+        MD[index_metadata.json<br/>durable state]
+    end
+
+    subgraph INGEST["Document Ingestion"]
+        FS[documents/ folder]
+        WD[Watchdog<br/>10s debounce]
+        PA[20 Parsers<br/>MD · PDF · DOCX · code · IPYNB]
+        CK[Chunker<br/>markdown-aware · code-aware]
+        EM[FastEmbed ONNX<br/>384D bge-small-en-v1.5]
+        DD[SHA256 Dedup]
+        SW[Zero-downtime Staging Swap<br/>rollback on validation fail]
+    end
+
+    subgraph OBS["Enterprise Observability (opt-in)"]
+        PM[Prometheus /metrics<br/>7 canonical + histograms]
+        LG[Structured JSON logs<br/>ELK · Loki · Datadog · CloudWatch]
+        HC[Health payload<br/>version · uptime · cache stats]
+    end
+
+    subgraph CFG["Configuration"]
+        YM[config.yaml<br/>+ 5 domain presets]
+    end
+
+    C1 & C2 & C3 & C4 & C5 -->|MCP protocol| T1
+    C1 & C2 & C3 & C4 & C5 -.->|remote deploy| T2
+    T1 --> MCP
+    T2 --> M1 --> M2 --> M3 --> MCP
+
+    MT1 --> QC
+    QC -->|cache miss| R
+    R -->|lexical| F
+    R -->|semantic| SE
+    R -->|hybrid| BM
+    F --> CH
+    F --> FT
+    BM --> CH
+    SE --> CH
+    BM --> RRF
+    SE --> RRF
+    RRF --> CE
+    CE --> QC
+
+    MT2 --> CH
+    MT3 --> INGEST
+    MT4 --> SW
+    MT5 --> CH
+
+    FS --> WD --> PA
+    PA --> CK --> EM --> DD --> CH
+    SW -.->|atomic swap| CH
+    SW -.-> FT
+    CH -.-> MD
+
+    MCP -.->|instrumented| PM
+    MCP -.->|logs| LG
+    M1 --> HC
+
+    YM -.-> SEARCH
+    YM -.-> STORAGE
+    YM -.-> OBS
+    YM -.-> MIDDLEWARE
+
+    classDef client fill:#3776AB,stroke:#1e5a8a,color:#fff
+    classDef transport fill:#00A67E,stroke:#006e54,color:#fff
+    classDef middleware fill:#6b46c1,stroke:#4c1d95,color:#fff
+    classDef storage fill:#4b5563,stroke:#1f2937,color:#fff
+    classDef obs fill:#dc2626,stroke:#7f1d1d,color:#fff
+    classDef ingest fill:#f59e0b,stroke:#78350f,color:#fff
+
+    class C1,C2,C3,C4,C5 client
+    class T1,T2 transport
+    class M1,M2,M3 middleware
+    class CH,FT,MD storage
+    class PM,LG,HC obs
+    class FS,WD,PA,CK,EM,DD,SW ingest
 ```
 
-**Complete architecture — 4 detailed Mermaid diagrams (System Overview · Query Flow · Document Ingestion · hybrid_alpha effect):** [docs/ARCHITECTURE.md →](docs/ARCHITECTURE.md)
+**Reading the diagram (top → bottom):**
+
+1. **Any MCP client** — Claude Code, Cursor, Windsurf, and 5 others — connects via the transport of your choice (stdio for personal use, SSE/streamable-http for teams).
+2. **HTTP mode chains 3 ASGI middlewares in order**: health probes first (always answered), then bearer auth (fenced with `WWW-Authenticate`), then rate limiter (sliding window).
+3. **All 13 MCP tools** are decorated with `@rate_limited` + `@instrument` — Prometheus counts every call, rate limiter enforces RPM+burst, both zero-cost when disabled.
+4. **`search_knowledge` checks the query cache first**; cache miss routes through the Query Router (regex classifier) to either the FTS5 fast-path (lexical) or the hybrid pipeline (BM25 + semantic + RRF + cross-encoder rerank).
+5. **Storage is 100% local**: ChromaDB (WAL mode) for vectors + metadata, SQLite FTS5 (WAL + busy-timeout) for lexical fast-path, `index_metadata.json` for durable state.
+6. **Document ingestion runs continuously**: watchdog observes `documents/`, 20 parsers handle each format, chunker respects language boundaries, FastEmbed ONNX generates embeddings, SHA256 deduplicates, and a staging swap performs zero-downtime rebuilds with rollback-on-failure.
+7. **Enterprise observability** (opt-in) — Prometheus `/metrics`, structured JSON logs, `/health` payload — attaches to the same instrumentation points, no code changes required.
+8. **`config.yaml` (with 5 domain presets)** controls every subsystem — no environment variable spaghetti, no hardcoded paths.
+
+**Complete architecture — 4 detailed Mermaid diagrams (System Overview · Query Flow · Document Ingestion · hybrid_alpha effect):** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 
 ---
 
-## 📄 20 File Formats — parsed natively, no plugins needed
+## 20 File Formats — parsed natively, no plugins needed
 
 Markdown · Plain Text · **PDF** · Python · C / C++ / Header · JavaScript · TypeScript · JSX · TSX · XML · JSON · CSV · **Word (DOCX)** · **Excel (XLSX)** · **PowerPoint (PPTX)** · **Jupyter Notebook (IPYNB)** · MQL4 (opt-in) · MQ4 (opt-in)
 
@@ -343,7 +475,7 @@ Every parser is chunk-aware — Markdown splits at `##` headers, code splits at 
 
 ---
 
-## 🔌 Choose your MCP integration
+## Choose your MCP integration
 
 <table>
 <tr>
@@ -390,7 +522,7 @@ Native MCP
 
 ---
 
-## ⚙️ Configuration in 30 seconds
+## Configuration in 30 seconds
 
 ```yaml
 # config.yaml — everything is optional; defaults just work
@@ -428,7 +560,7 @@ server:                                 # optional — SSE / HTTP mode
 
 ---
 
-## 🔒 Security & Compliance
+## Security & Compliance
 
 knowledge-rag is designed for teams that cannot let their documents leave the perimeter.
 
@@ -451,7 +583,7 @@ knowledge-rag is designed for teams that cannot let their documents leave the pe
 
 ---
 
-## 📈 Numbers that matter
+## Numbers that matter
 
 - **26 000+** total downloads on PyPI · **250+** GitHub stars · **70+** enterprise teams (private + community)
 - **700+ tests** collected · **1.33:1** test-to-code ratio · **codecov trend gate** ±0.5pp
@@ -464,7 +596,7 @@ knowledge-rag is designed for teams that cannot let their documents leave the pe
 
 ---
 
-## 📚 Documentation
+## Documentation
 
 | Doc | What's inside |
 |---|---|
@@ -483,7 +615,7 @@ knowledge-rag is designed for teams that cannot let their documents leave the pe
 
 ---
 
-## 🤝 Community & Support
+## Community & Support
 
 - **Report a bug** → [Open an issue](https://github.com/lyonzin/knowledge-rag/issues/new/choose)
 - **Ask a question** → [GitHub Discussions](https://github.com/lyonzin/knowledge-rag/discussions)
@@ -497,7 +629,7 @@ knowledge-rag is designed for teams that cannot let their documents leave the pe
 
 ---
 
-## 🗺️ Recent releases
+## Recent releases
 
 - **v4.8.5** (2026-08-13) — Enterprise observability: `/health` endpoint + opt-in JSON structured logging
 - **v4.8.4** (2026-08-13) — Patch: security + durability + defensive fixes
@@ -509,13 +641,13 @@ knowledge-rag is designed for teams that cannot let their documents leave the pe
 
 ---
 
-## 📜 License
+## License
 
 **MIT License** — [LICENSE](LICENSE). Forever. No cloud upsell, no dual-licensing, no restrictive clauses. Fork it, sell derivatives, embed it in commercial products — the license does not care.
 
 ---
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 Built on the shoulders of amazing open-source projects:
 
