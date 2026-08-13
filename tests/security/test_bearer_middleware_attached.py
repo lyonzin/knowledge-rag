@@ -82,7 +82,7 @@ def test_streamable_http_wraps_the_app_when_a_token_is_configured(monkeypatch):
     from mcp_server import server as server_module
 
     monkeypatch.setattr(server_module.config, "auth_bearer_token", TOKEN)
-    monkeypatch.setattr(server_module.mcp, "streamable_http_app", lambda: _RecordingApp())
+    monkeypatch.setattr(server_module.mcp, "streamable_http_app", lambda **kwargs: _RecordingApp())
     monkeypatch.setattr(
         server_module.mcp,
         "run",
@@ -103,7 +103,7 @@ def test_sse_transport_also_wraps_the_app(monkeypatch):
     from mcp_server import server as server_module
 
     monkeypatch.setattr(server_module.config, "auth_bearer_token", TOKEN)
-    monkeypatch.setattr(server_module.mcp, "sse_app", lambda: _RecordingApp())
+    monkeypatch.setattr(server_module.mcp, "sse_app", lambda **kwargs: _RecordingApp())
     monkeypatch.setattr(
         server_module.mcp,
         "run",
@@ -116,6 +116,57 @@ def test_sse_transport_also_wraps_the_app(monkeypatch):
     server_module._run_transport("sse")
 
     assert isinstance(served["app"], BearerAuthMiddleware)
+
+
+def test_streamable_http_app_is_built_with_the_configured_host(monkeypatch):
+    """Regression #174: build the MCP app with the configured host.
+
+    MCP 2.0.0's app factories default to ``host="127.0.0.1"``, which enables
+    a localhost-only DNS-rebinding allowlist. If the app is created without
+    the configured non-loopback host, requests using the deployment's LAN
+    hostname are rejected with 421 before auth ever runs, even though uvicorn
+    is bound to that host.
+    """
+    from mcp_server import server as server_module
+
+    monkeypatch.setattr(server_module.config, "auth_bearer_token", TOKEN)
+    monkeypatch.setattr(server_module.config, "server_host", "192.168.1.10")
+
+    seen: Dict[str, Any] = {}
+
+    def _factory(**kwargs):
+        seen.update(kwargs)
+        return _RecordingApp()
+
+    monkeypatch.setattr(server_module.mcp, "streamable_http_app", _factory)
+    monkeypatch.setattr(server_module.mcp, "run", lambda **kw: pytest.fail("must not use unguarded path"))
+    monkeypatch.setattr("uvicorn.run", lambda app, **kwargs: None)
+
+    server_module._run_transport("streamable-http")
+
+    assert seen.get("host") == "192.168.1.10"
+
+
+def test_sse_app_is_built_with_the_configured_host(monkeypatch):
+    """Regression #174 — the SSE factory shares the same host wire."""
+    from mcp_server import server as server_module
+
+    monkeypatch.setattr(server_module.config, "auth_bearer_token", TOKEN)
+    monkeypatch.setattr(server_module.config, "server_host", "10.0.0.5")
+
+    seen: Dict[str, Any] = {}
+
+    def _factory(**kwargs):
+        seen.update(kwargs)
+        return _RecordingApp()
+
+    monkeypatch.setattr(server_module.mcp, "sse_app", _factory)
+    monkeypatch.setattr(server_module.mcp, "run", lambda **kw: pytest.fail("must not use unguarded path"))
+    monkeypatch.setattr("uvicorn.run", lambda app, **kwargs: None)
+
+    server_module._run_transport("sse")
+
+    assert seen.get("host") == "10.0.0.5"
 
 
 def test_stdio_never_installs_the_middleware(monkeypatch):
@@ -151,7 +202,7 @@ def test_wired_stack_serves_401_when_no_token_is_presented(monkeypatch):
     from mcp_server import server as server_module
 
     monkeypatch.setattr(server_module.config, "auth_bearer_token", TOKEN)
-    monkeypatch.setattr(server_module.mcp, "streamable_http_app", lambda: _RecordingApp())
+    monkeypatch.setattr(server_module.mcp, "streamable_http_app", lambda **kwargs: _RecordingApp())
     monkeypatch.setattr(server_module.mcp, "run", lambda **kw: pytest.fail("must not use unguarded path"))
 
     served: Dict[str, Any] = {}
@@ -171,7 +222,7 @@ def test_wired_stack_lets_the_correct_token_through(monkeypatch):
     from mcp_server import server as server_module
 
     monkeypatch.setattr(server_module.config, "auth_bearer_token", TOKEN)
-    monkeypatch.setattr(server_module.mcp, "streamable_http_app", lambda: _RecordingApp())
+    monkeypatch.setattr(server_module.mcp, "streamable_http_app", lambda **kwargs: _RecordingApp())
     monkeypatch.setattr(server_module.mcp, "run", lambda **kw: pytest.fail("must not use unguarded path"))
 
     served: Dict[str, Any] = {}

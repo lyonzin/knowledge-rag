@@ -4556,7 +4556,11 @@ def _run_transport(transport: str) -> None:
     import uvicorn
 
     app_factory = _http_app_factory(transport)
-    app = app_factory()
+    # Build the app with the configured host. MCP 2.0.0's factories default to
+    # host="127.0.0.1", which turns on a localhost-only DNS-rebinding allowlist;
+    # without this, a non-loopback server_host is served by uvicorn but the app
+    # rejects the configured host with 421 before auth runs (GH #174).
+    app = app_factory(host=config.server_host)
     guarded = BearerAuthMiddleware(app, token)
     print(
         f"[SECURITY] Bearer auth enforced on {transport} transport ({config.server_host}:{config.server_port})",

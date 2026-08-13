@@ -291,7 +291,7 @@ def test_http_transport_with_token_installs_the_middleware(monkeypatch):
     from mcp_server import server as server_module
 
     monkeypatch.setattr(server_module.config, "auth_bearer_token", TOKEN)
-    monkeypatch.setattr(server_module.mcp, "streamable_http_app", lambda: _SpyApp())
+    monkeypatch.setattr(server_module.mcp, "streamable_http_app", lambda **kwargs: _SpyApp())
     monkeypatch.setattr(server_module.mcp, "run", lambda transport: pytest.fail("must not use the unguarded path"))
 
     served = {}
