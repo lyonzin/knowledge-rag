@@ -191,6 +191,16 @@ Add a new document to the knowledge base from raw content. Saves the file to the
 | `filepath` | string | required | Relative path within documents dir (e.g., `security/new-technique.md`) |
 | `category` | string | "general" | Document category |
 
+**Example (cookbook):**
+
+```python
+add_document(
+    content="# Kerberoasting\n\nSteal Kerberos service tickets and crack them offline...",
+    filepath="security/redteam/kerberoasting.md",
+    category="redteam",
+)
+```
+
 ---
 
 #### `update_document`
@@ -201,6 +211,15 @@ Update an existing document. Removes old chunks from the index and re-indexes wi
 |-----------|------|-------------|
 | `filepath` | string | Full path to the document file |
 | `content` | string | New content for the document |
+
+**Example:**
+
+```python
+update_document(
+    filepath="security/redteam/kerberoasting.md",
+    content="# Kerberoasting (updated 2026-08)\n\nAdded Rubeus /aes flag detail...",
+)
+```
 
 ---
 
@@ -213,17 +232,37 @@ Remove a document from the knowledge base index. Optionally deletes the file fro
 | `filepath` | string | required | Path to the document file |
 | `delete_file` | bool | false | If true, also delete the file from disk |
 
+**Example:**
+
+```python
+# Drop from the index only — keep the file
+remove_document(filepath="security/legacy/old-runbook.md")
+
+# Drop from the index AND delete the file from disk
+remove_document(filepath="security/legacy/old-runbook.md", delete_file=True)
+```
+
 ---
 
 #### `add_from_url`
 
-Fetch content from a URL, strip HTML (scripts, styles, nav, footer, header), convert to markdown, and add to the knowledge base.
+Fetch content from a URL, strip HTML (scripts, styles, nav, footer, header), convert to markdown, and add to the knowledge base. The URL body is wrapped in a provenance fence and injection sentinels are neutralized (OWASP LLM01:2025).
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `url` | string | required | URL to fetch content from |
 | `category` | string | "general" | Document category |
 | `title` | string | null | Custom title (auto-detected from `<title>` tag if not provided) |
+
+**Example:**
+
+```python
+add_from_url(
+    url="https://attack.mitre.org/techniques/T1558/003/",
+    category="mitre",
+    title="MITRE ATT&CK T1558.003 — Kerberoasting",
+)
+```
 
 ---
 
@@ -236,19 +275,70 @@ Find documents similar to a given document using embedding similarity.
 | `filepath` | string | required | Path to the reference document |
 | `max_results` | int | 5 | Number of similar documents to return (1-20) |
 
+**Example:**
+
+```python
+# "Show me 5 docs semantically closest to my Kerberoasting note"
+search_similar(
+    filepath="security/redteam/kerberoasting.md",
+    max_results=5,
+)
+```
+
 ---
 
-#### `evaluate_retrieval`
+#### `reindex_documents` — call examples
 
-Evaluate retrieval quality with test queries. Useful for tuning `hybrid_alpha`, testing query expansion effectiveness, or validating after reindexing.
+Three common patterns:
+
+```python
+# 1. Smart incremental — detects changes via mtime/size, only reindexes what moved.
+#    Runs in the background; call get_reindex_status() to poll progress.
+reindex_documents()
+
+# 2. Force smart reindex — re-embeds even unchanged docs (use after query
+#    expansion / preset / prefix changes that require re-embedding).
+reindex_documents(force=True)
+
+# 3. Nuclear rebuild — deletes and re-embeds every document. Zero-downtime
+#    via the staging swap (v4.8.0+). Use after embedding model change.
+reindex_documents(full_rebuild=True)
+```
+
+---
+
+#### `evaluate_retrieval` — full example
+
+Measure retrieval quality against a ground-truth test set. Useful for tuning `hybrid_alpha`, testing query expansion effectiveness, or validating after reindexing.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `test_cases` | string (JSON) | Array of test cases: `[{"query": "...", "expected_filepath": "..."}, ...]` |
 
+**Complete example:**
+
+```python
+import json
+
+test_cases = json.dumps([
+    {"query": "kerberoasting", "expected_filepath": "security/redteam/kerberoasting.md"},
+    {"query": "sql injection payloads", "expected_filepath": "security/webapp/sqli-cheatsheet.md"},
+    {"query": "prometheus histogram buckets", "expected_filepath": "docs/observability/metrics.md"},
+    {"query": "how to rotate refresh tokens", "expected_filepath": "docs/adr/0018-auth.md"},
+    {"query": "chromadb sqlite variable limit", "expected_filepath": "CHANGELOG.md"},
+])
+
+evaluate_retrieval(test_cases=test_cases)
+```
+
+Returns MRR@5 · Recall@5 · Precision@5 aggregated across all test cases, plus a per-query breakdown showing which expected doc was found and at what rank.
+
 **Metrics:**
 - **MRR@5** (Mean Reciprocal Rank): Average of 1/rank for expected documents. 1.0 = always first result.
 - **Recall@5**: Fraction of expected documents found in top 5 results. 1.0 = all found.
+- **Precision@5**: Fraction of top-5 results that are relevant. Higher = less noise.
+
+Interpretation cheat-sheet: **MRR@5 ≥ 0.7 is good**, **≥ 0.8 is excellent**. Any drop of ≥ 0.05 vs prior baseline is a real regression worth investigating.
 
 ---
 

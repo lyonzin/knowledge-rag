@@ -124,9 +124,32 @@ Pre-built configurations for common use cases:
 | **Cybersecurity** | `presets/cybersecurity.yaml` | 8 | 200+ | 69 | Red/Blue Team, CTFs, threat hunting, exploit dev |
 | **Developer** | `presets/developer.yaml` | 9 | 150+ | 50+ | Full-stack dev, APIs, DevOps, cloud, databases |
 | **Research** | `presets/research.yaml` | 9 | 100+ | 40+ | Academic papers, thesis, lab notebooks, datasets |
+| **Multilingual** | `presets/multilingual.yaml` | 0 | 0 | 0 | Non-English corpora (100+ languages via `intfloat/multilingual-e5-large`, 1024D). Requires `reindex_documents(force=True)` after switching |
 | **General** | `presets/general.yaml` | 0 | 0 | 0 | Blank slate — pure semantic search, no domain logic |
 
 **Creating your own preset**: Copy `config.example.yaml`, fill in your categories/keywords/expansions, save to `presets/your-domain.yaml`.
+
+### Organizing your `documents/` folder
+
+`category_mappings` in `config.yaml` maps folder paths to category slugs. Any doc under a mapped path inherits that category automatically — no manual tagging needed. Example layout used by the **Cybersecurity** preset:
+
+```
+documents/
+├── security/
+│   ├── redteam/         # → category: redteam
+│   ├── blueteam/        # → category: blueteam
+│   ├── mitre/           # → category: mitre
+│   └── ctf/             # → category: ctf
+├── development/
+│   ├── apis/            # → category: dev
+│   ├── infra/           # → category: infra
+│   └── runbooks/        # → category: ops
+├── research/            # → category: research
+├── notes/               # → category: notes
+└── general/             # → category: general (fallback)
+```
+
+With `category_mappings` defined, a query like `search_knowledge(query="privilege escalation", category="redteam")` narrows the search to `documents/security/redteam/` only. Unmapped paths default to `general`. To disable categorization entirely, set `category_mappings: {}`.
 
 ### Configuration Reference
 
@@ -267,6 +290,34 @@ This keeps backward compatibility while allowing concise synonym groups.
 | 0.5 | Balanced | General queries |
 | 0.7 | Semantic-heavy | Conceptual queries, related topics |
 | 1.0 | Pure semantic | "How to..." questions, abstract concepts |
+
+#### `hybrid_alpha` — recipe by intent
+
+Ready-to-copy examples showing when each value fits best. Pass via the `search_knowledge` MCP tool call:
+
+```python
+# α = 0.0 → pure keyword (BM25). Best when the query IS the answer (exact
+# terminology, tool name, CVE, MITRE ID). Semantic drift is a bug here.
+search_knowledge(query="gtfobins suid", hybrid_alpha=0.0)
+
+# α = 0.3 (default) → keyword-heavy. Technical query with specific terms
+# where a synonymous document also matters, but the exact terms rank first.
+search_knowledge(query="SQL injection techniques", hybrid_alpha=0.3)
+
+# α = 0.5 → balanced. General query where you want both exact matches and
+# semantically related material (blog posts, tutorials, adjacent docs).
+search_knowledge(query="how to escalate privileges", hybrid_alpha=0.5)
+
+# α = 0.7 → semantic-heavy. Conceptual / strategic query, exact wording of
+# the query is unlikely to be in the docs verbatim.
+search_knowledge(query="lateral movement strategies", hybrid_alpha=0.7)
+
+# α = 1.0 → pure semantic. Free-form question, no expected keyword overlap.
+# Use when BM25 would obviously miss the intent.
+search_knowledge(query="mimikatz", hybrid_alpha=1.0)
+```
+
+**Rule of thumb:** start at `0.3` (the default). Slide **down** toward `0.0` when the corpus tokenizes cleanly on your query terms (identifiers, codes, filenames). Slide **up** toward `1.0` when queries are phrased as questions or use synonyms not present in the corpus verbatim.
 
 ### Search Method (v4.8.2+)
 

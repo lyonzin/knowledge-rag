@@ -85,7 +85,7 @@ Your files never leave the machine. No vendor lock-in, no data-residency headach
 <td width="50%" valign="top">
 
 ### 🚀 Zero-friction setup
-`pip install knowledge-rag` → restart your MCP client → done. No Docker mandatory, no Ollama required, no separate embedding server to run. **Works offline** after the first model download.
+`pip install knowledge-rag` → restart your MCP client → done. **No Docker mandatory. No Ollama required. No separate embedding server.** Everything runs in-process via FastEmbed ONNX. **Works offline** after the first model download.
 
 </td>
 </tr>
@@ -649,8 +649,9 @@ knowledge-rag is designed for teams that cannot let their documents leave the pe
 - **26 000+** total downloads on PyPI · **250+** GitHub stars · **70+** enterprise teams (private + community)
 - **700+ tests** collected · **1.33:1** test-to-code ratio · **codecov trend gate** ±0.5pp
 - **35+ status checks** on every PR (9-cell OS×Python matrix · 7 quality pillars)
-- **20 file formats** parsed natively · **13 MCP tools** frozen · **5 domain presets**
+- **20 file formats** parsed natively · **13 MCP tools** frozen · **5 domain presets** (cyber · dev · research · multilingual · general)
 - **BM25 128× faster** than baseline · **cross-encoder +1.88pp** Recall@10 (p<0.001) · **cache −40%** p95 latency
+- **1 800+ files / 39 K chunks indexed in < 3 min** on a modern laptop (typical developer corpus)
 - **Verified in production** on 5 889-doc / 75 016-chunk corpora
 
 **Public benchmark dashboard:** https://lyonzin.github.io/knowledge-rag/
