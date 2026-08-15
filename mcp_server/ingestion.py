@@ -582,15 +582,20 @@ class DocumentParser:
             "modified": datetime.fromtimestamp(filepath.stat().st_mtime).isoformat(),
         }
 
-        parts = []
-        reader = csv.reader(io.StringIO(raw))
-        rows = list(reader)
+        try:
+            rows = list(csv.reader(io.StringIO(raw)))
+        except csv.Error:
+            # Malformed or oversized CSV (e.g. a field larger than csv's
+            # field-size limit) raises csv.Error. Index the raw text rather
+            # than crash, mirroring _parse_json's fallback on JSONDecodeError.
+            metadata["is_valid_csv"] = False
+            return raw, metadata
+
+        metadata["is_valid_csv"] = True
         metadata["rows"] = len(rows)
         metadata["columns"] = len(rows[0]) if rows else 0
 
-        for row in rows:
-            parts.append(" | ".join(row))
-
+        parts = [" | ".join(row) for row in rows]
         content = "\n".join(parts)
         return content, metadata
 

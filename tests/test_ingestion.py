@@ -29,6 +29,23 @@ def test_parse_csv(parser, sample_csv):
     assert doc.format == ".csv"
     assert doc.metadata.get("rows") == 3
     assert doc.metadata.get("columns") == 3
+    assert doc.metadata.get("is_valid_csv") is True
+
+
+def test_parse_csv_oversized_field_falls_back(parser, tmp_path):
+    """A field larger than csv's field-size limit must not crash the parser.
+
+    csv.reader raises csv.Error on such a field; like the JSON parser's
+    JSONDecodeError fallback, the CSV parser indexes the raw text instead.
+    """
+    big_cell = "x" * 200_000  # exceeds csv's default 128 KiB field-size limit
+    f = tmp_path / "big.csv"
+    f.write_text(f"id,notes\n1,{big_cell}\n", encoding="utf-8")
+    doc = parser.parse_file(f)
+    assert doc is not None
+    assert doc.format == ".csv"
+    assert doc.metadata.get("is_valid_csv") is False
+    assert big_cell in doc.content
 
 
 def test_parse_json(parser, sample_json):
