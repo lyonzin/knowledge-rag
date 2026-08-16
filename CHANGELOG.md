@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Unreleased
 
+**Fixed:**
+
+- **fix(ingestion)** — `_parse_csv` no longer crashes with `csv.Error` when a field exceeds Python's default 128 KiB field-size limit; it falls back to indexing the raw text and sets `is_valid_csv=False`, mirroring `_parse_json`'s graceful handling of malformed input.
+
 ### v4.8.5 (2026-08-13) — Enterprise observability: `/health` probes + JSON structured logging (opt-in)
 
 **Recommended for anyone deploying HTTP/SSE transport behind load balancers, container orchestrators, or centralised logging pipelines.** Two additive features, both zero-cost when unused: an HTTP `/health` and `/healthz` endpoint served in front of the MCP dispatcher (no auth required, always responds), and opt-in JSON structured logging ready for ELK / Loki / Datadog / CloudWatch Logs ingestion.
