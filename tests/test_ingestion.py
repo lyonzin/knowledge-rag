@@ -32,18 +32,49 @@ def test_parse_csv(parser, sample_csv):
     assert doc.metadata.get("is_valid_csv") is True
 
 
-def test_parse_csv_oversized_field_falls_back(parser, tmp_path):
-    """A field larger than csv's field-size limit must not crash the parser.
+def test_parse_csv_at_field_limit_still_parses(parser, tmp_path):
+    """A field exactly at csv's limit is not 'larger than' it, so it still parses.
 
-    csv.reader raises csv.Error on such a field; like the JSON parser's
-    JSONDecodeError fallback, the CSV parser indexes the raw text instead.
+    csv's default limit is 131072; the error only fires above it. This pins the
+    boundary just below the fallback so a future off-by-one can't slip through.
     """
-    big_cell = "x" * 200_000  # exceeds csv's default 128 KiB field-size limit
+    at_limit = "x" * 131_072
+    f = tmp_path / "at_limit.csv"
+    f.write_text(f"id,notes\n1,{at_limit}\n", encoding="utf-8")
+    doc = parser.parse_file(f)
+    assert doc is not None
+    assert doc.metadata.get("is_valid_csv") is True
+
+
+@pytest.mark.parametrize("field_size", [131_073, 200_000, 1_000_000])
+def test_parse_csv_oversized_field_falls_back(parser, tmp_path, field_size):
+    """A field past csv's field-size limit must not crash the parser.
+
+    131073 is the first size over the 131072 limit. csv.reader raises csv.Error;
+    like the JSON parser's JSONDecodeError fallback, the CSV parser indexes the
+    raw text instead of propagating the crash.
+    """
+    big_cell = "x" * field_size
     f = tmp_path / "big.csv"
     f.write_text(f"id,notes\n1,{big_cell}\n", encoding="utf-8")
     doc = parser.parse_file(f)
     assert doc is not None
     assert doc.format == ".csv"
+    assert doc.metadata.get("is_valid_csv") is False
+    assert big_cell in doc.content
+
+
+def test_parse_csv_oversized_quoted_field_falls_back(parser, tmp_path):
+    """A quoted field over the limit must also fall back.
+
+    csv handles quoted fields on a separate code path from unquoted ones, so
+    cover it explicitly rather than assuming the unquoted case implies it.
+    """
+    big_cell = "x" * 200_000
+    f = tmp_path / "big_quoted.csv"
+    f.write_text('id,notes\n1,"' + big_cell + '"\n', encoding="utf-8")
+    doc = parser.parse_file(f)
+    assert doc is not None
     assert doc.metadata.get("is_valid_csv") is False
     assert big_cell in doc.content
 

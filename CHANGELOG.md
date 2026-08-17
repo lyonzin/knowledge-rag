@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Fixed:**
 
-- **fix(ingestion)** — `_parse_csv` no longer crashes with `csv.Error` when a field exceeds Python's default 128 KiB field-size limit; it falls back to indexing the raw text and sets `is_valid_csv=False`, mirroring `_parse_json`'s graceful handling of malformed input.
+- **fix(ingestion)** — `.csv` files with malformed content (a field over csv's 128 KiB size limit, broken quoting, embedded NUL bytes, or a newline in an unquoted field) no longer crash ingestion. `_parse_csv` catches `csv.Error` and falls back to indexing the raw text with `is_valid_csv=False`, mirroring `_parse_json`'s handling of malformed input. Note that `metadata["rows"]` and `metadata["columns"]` are omitted on the fallback path, so read them with `.get()`.
 
 ### v4.8.5 (2026-08-13) — Enterprise observability: `/health` probes + JSON structured logging (opt-in)
 
