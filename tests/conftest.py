@@ -457,6 +457,10 @@ func main() {
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {}
+
+func (c *Config) Addr() string {
+	return fmt.Sprintf(":%d", c.Port)
+}
 """
     f = tmp_path / "test.go"
     f.write_text(content, encoding="utf-8")
@@ -473,6 +477,7 @@ def sample_sql(tmp_path):
 
 SELECT id, email FROM users WHERE id = 1;
 INSERT INTO users (email) VALUES ('a@b.com');
+SELECT * FROM public.orders;
 """
     f = tmp_path / "test.sql"
     f.write_text(content, encoding="utf-8")

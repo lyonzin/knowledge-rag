@@ -51,8 +51,9 @@ paths:
 # Control which files get indexed and how they're processed.
 
 documents:
-  # File types to index. Only files with these extensions are processed.
-  # Remove or comment out formats you don't need.
+  # File types to index — file extensions plus exact filenames for
+  # extensionless files (Dockerfile, Makefile, Tiltfile). Only matching
+  # files are processed. Remove or comment out formats you don't need.
   supported_formats:
     - .md        # Markdown
     - .txt       # Plain text

@@ -1122,9 +1122,12 @@ class DocumentWatcher(FileSystemEventHandler):
 
     @staticmethod
     def _is_supported(path: str) -> bool:
-        """supported_formats holds suffixes (".go") and exact filenames ("Dockerfile")."""
+        """supported_formats holds suffixes (".go") and exact filenames ("Dockerfile").
+
+        Suffixes are lowercased to match DocumentParser.parse_directory().
+        """
         p = Path(path)
-        return p.suffix in config.supported_formats or p.name in config.supported_formats
+        return p.suffix.lower() in config.supported_formats or p.name in config.supported_formats
 
     def on_created(self, event):
         if not event.is_directory and self._is_supported(event.src_path):

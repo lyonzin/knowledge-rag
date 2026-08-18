@@ -1,0 +1,6 @@
+load("ext://restart_process", "docker_build_with_restart")
+
+def deploy():
+    k8s_yaml("deploy.yaml")
+
+deploy()

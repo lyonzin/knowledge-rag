@@ -41,17 +41,28 @@ EXPECTED_FORMATS = {
     ".go",
     ".rs",
     ".yaml",
+    ".yml",
     ".hujson",
+    ".cue",
     ".proto",
+    ".rego",
     ".kt",
     ".sql",
     ".sh",
+    ".jq",
+}
+
+# Extensionless files dispatched by exact filename instead of suffix
+EXPECTED_FILENAMES = {
+    "Dockerfile",
+    "Makefile",
+    "Tiltfile",
 }
 
 
 @pytest.fixture(
-    params=sorted(p for p in FIXTURES_DIR.iterdir() if p.suffix in EXPECTED_FORMATS),
-    ids=lambda p: p.suffix,
+    params=sorted(p for p in FIXTURES_DIR.iterdir() if p.suffix in EXPECTED_FORMATS or p.name in EXPECTED_FILENAMES),
+    ids=lambda p: p.suffix or p.name,
 )
 def fixture_path(request):
     """Yield each format fixture so each format gets its own test run."""
@@ -71,18 +82,21 @@ def test_format_parses_to_at_least_one_chunk(fixture_path):
 
 def test_all_text_formats_have_a_smoke_fixture():
     """Releasing without a smoke fixture for every supported text format is a regression."""
-    present = {p.suffix for p in FIXTURES_DIR.iterdir() if p.is_file()}
-    missing = EXPECTED_FORMATS - present
+    files = [p for p in FIXTURES_DIR.iterdir() if p.is_file()]
+    present_suffixes = {p.suffix for p in files}
+    present_names = {p.name for p in files}
+    missing = sorted(EXPECTED_FORMATS - present_suffixes) + sorted(EXPECTED_FILENAMES - present_names)
     assert not missing, (
-        f"Missing smoke fixture(s) under tests/fixtures/formats/ for: {sorted(missing)}. "
-        f"Add one short example file per missing extension to keep the matrix complete."
+        f"Missing smoke fixture(s) under tests/fixtures/formats/ for: {missing}. "
+        f"Add one short example file per missing format to keep the matrix complete."
     )
 
 
 def test_format_metadata_attached(fixture_path):
-    """Parsed document must carry its source path and detected format suffix."""
+    """Parsed document must carry its source path and detected format (suffix or filename)."""
     parser = DocumentParser()
     doc = parser.parse_file(fixture_path)
     assert doc is not None
     assert doc.source == fixture_path
-    assert doc.format == fixture_path.suffix, f"{fixture_path.name}: doc.format='{doc.format}' does not match suffix"
+    expected = fixture_path.suffix or fixture_path.name
+    assert doc.format == expected, f"{fixture_path.name}: doc.format='{doc.format}' != '{expected}'"

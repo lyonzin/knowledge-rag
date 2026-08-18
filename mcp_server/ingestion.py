@@ -49,6 +49,8 @@ except ImportError:
 import csv
 import io
 
+import yaml
+
 from .config import config
 
 # =============================================
@@ -158,7 +160,13 @@ def _strip_hujson(text: str) -> str:
                 i += 1
         elif c == "/" and text[i + 1 : i + 2] == "*":
             end = text.find("*/", i + 2)
-            i = n if end == -1 else end + 2
+            if end == -1:
+                # Unterminated block comment: keep it so json.loads fails
+                # instead of silently truncating the document
+                out.append(text[i:])
+                i = n
+            else:
+                i = end + 2
         elif c == ",":
             # Trailing comma: drop when the next significant character
             # (skipping whitespace and comments) closes an object/array
@@ -526,10 +534,14 @@ class DocumentParser:
             "imports": [],
         }
 
-        # Function declarations: Go `func`, Rust `fn`, Kotlin `fun`,
-        # Starlark `def` — with optional modifiers (pub, private, override, ...)
-        # and indentation (Kotlin/Rust methods live inside class/impl blocks).
-        func_pattern = re.compile(r"^\s*(?:\w+\s+)*(?:func|fn|fun|def)\s+(\w+)", re.MULTILINE)
+        # Function declarations: Go `func` (with optional method receiver),
+        # Rust `fn`, Kotlin `fun`, Starlark `def` — with optional modifiers
+        # (pub, private, override, ...) and indentation (Kotlin/Rust methods
+        # live inside class/impl blocks).
+        func_pattern = re.compile(
+            r"^\s*(?:\w+\s+)*(?:func(?:\s+\([^)]*\))?|fn|fun|def)\s+(\w+)",
+            re.MULTILINE,
+        )
         metadata["functions"] = func_pattern.findall(content)[:50]
 
         # Type declarations: Kotlin `class`/`interface`/`object`, Rust
@@ -568,21 +580,21 @@ class DocumentParser:
             "line_count": content.count("\n") + 1,
         }
 
-        # Kubernetes manifest metadata (kind / apiVersion / first name),
-        # best-effort from the leading lines of the first document
-        for line in content.split("\n")[:30]:
-            stripped = line.strip()
-            if stripped.startswith("kind:"):
-                metadata["k8s_kind"] = stripped.split(":", 1)[1].strip()
-            elif stripped.startswith("apiVersion:"):
-                metadata["k8s_api_version"] = stripped.split(":", 1)[1].strip()
-            elif stripped.startswith("name:") and "k8s_name" not in metadata:
-                metadata["k8s_name"] = stripped.split(":", 1)[1].strip().strip("\"'")
-
-        # A bare `name:` without kind/apiVersion is not a K8s manifest
-        # (e.g. GitHub Actions workflows) — don't mislabel it
-        if "k8s_kind" not in metadata and "k8s_api_version" not in metadata:
-            metadata.pop("k8s_name", None)
+        # Kubernetes manifest metadata from the first document. Requires a
+        # root-level kind or apiVersion so plain configs with a `name:` key
+        # (e.g. GitHub Actions workflows) are not mislabeled.
+        try:
+            doc = next((d for d in yaml.safe_load_all(content) if d is not None), None)
+        except yaml.YAMLError:
+            doc = None
+        if isinstance(doc, dict) and ("kind" in doc or "apiVersion" in doc):
+            if isinstance(doc.get("kind"), str):
+                metadata["k8s_kind"] = doc["kind"]
+            if isinstance(doc.get("apiVersion"), str):
+                metadata["k8s_api_version"] = doc["apiVersion"]
+            name = doc.get("metadata", {}).get("name") if isinstance(doc.get("metadata"), dict) else None
+            if isinstance(name, str):
+                metadata["k8s_name"] = name
 
         return content, metadata
 
@@ -618,7 +630,7 @@ class DocumentParser:
         }
 
         tables = re.findall(
-            r"\b(?:CREATE\s+TABLE|ALTER\s+TABLE|FROM|JOIN|INTO)\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?(\w+)",
+            r"\b(?:CREATE\s+TABLE|ALTER\s+TABLE|FROM|JOIN|INTO)\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?(\w+(?:\.\w+)*)",
             content,
             re.IGNORECASE,
         )

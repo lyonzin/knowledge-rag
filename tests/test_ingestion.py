@@ -291,6 +291,7 @@ def test_parse_go(parser, sample_go):
     assert doc.metadata.get("language") == "go"
     assert "main" in doc.metadata.get("functions", [])
     assert "handler" in doc.metadata.get("functions", [])
+    assert "Addr" in doc.metadata.get("functions", [])  # method with receiver
     assert "Config" in doc.metadata.get("classes", [])
 
 
@@ -301,6 +302,7 @@ def test_parse_sql(parser, sample_sql):
     assert doc.format == ".sql"
     assert doc.metadata.get("type") == "sql"
     assert "users" in doc.metadata.get("tables", [])
+    assert "public.orders" in doc.metadata.get("tables", [])
     assert "CREATE" in doc.metadata.get("statements", [])
 
 
@@ -363,6 +365,49 @@ def test_parse_hujson(parser, sample_hujson):
     assert "acls" in doc.metadata.get("keys", [])
     # Original text (comments included) is what gets indexed
     assert "// Access control policy" in doc.content
+
+
+def test_parse_hujson_unterminated_comment_is_invalid(parser, tmp_path):
+    """An unterminated block comment must not silently truncate into valid JSON."""
+    f = tmp_path / "bad.hujson"
+    f.write_text('{"name": "x"} /*', encoding="utf-8")
+    doc = parser.parse_file(f)
+    assert doc is not None
+    assert doc.metadata.get("is_valid_json") is False
+
+
+def test_parse_yaml_non_k8s_has_no_k8s_metadata(parser, tmp_path):
+    """A bare `name:` without kind/apiVersion (e.g. GitHub Actions) is not a manifest."""
+    f = tmp_path / "workflow.yaml"
+    f.write_text("name: CI\non: push\njobs: {}\n", encoding="utf-8")
+    doc = parser.parse_file(f)
+    assert doc is not None
+    assert "k8s_kind" not in doc.metadata
+    assert "k8s_name" not in doc.metadata
+
+
+def test_parse_yaml_multi_document_uses_first(parser, tmp_path):
+    """K8s metadata comes from the first document's metadata.name, not data or later docs."""
+    f = tmp_path / "multi.yaml"
+    f.write_text(
+        "---\n"
+        "apiVersion: v1\n"
+        "kind: ConfigMap\n"
+        "metadata:\n"
+        "  name: first\n"
+        "data:\n"
+        "  name: not-this\n"
+        "---\n"
+        "apiVersion: v1\n"
+        "kind: Secret\n"
+        "metadata:\n"
+        "  name: second\n",
+        encoding="utf-8",
+    )
+    doc = parser.parse_file(f)
+    assert doc is not None
+    assert doc.metadata.get("k8s_kind") == "ConfigMap"
+    assert doc.metadata.get("k8s_name") == "first"
 
 
 def test_parse_dockerfile(parser, sample_dockerfile):
