@@ -1,4 +1,4 @@
-# Changelog
+successfully downloaded text file (SHA: bf3039601aff729e487a1178c6abd69c4dc61a9b)[Resource from github at repo://lyonzin/knowledge-rag/sha/6ef97ce3bab9e8d05f904e5d68f42b52cf2cab98/contents/CHANGELOG.md] # Changelog
 
 All notable changes to **knowledge-rag** are documented in this file.
 
@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Fixed:**
 
-- **fix(ingestion)** — `.csv` files with malformed content (a field over csv's 128 KiB size limit, broken quoting, embedded NUL bytes, or a newline in an unquoted field) no longer crash ingestion. `_parse_csv` catches `csv.Error` and falls back to indexing the raw text with `is_valid_csv=False`, mirroring `_parse_json`'s handling of malformed input. Note that `metadata["rows"]` and `metadata["columns"]` are omitted on the fallback path, so read them with `.get()`.
+- **fix(ingestion)** — `.csv` files with a field over csv's 128 KiB size limit no longer crash ingestion. `_parse_csv` catches `csv.Error` and falls back to indexing the raw text with `is_valid_csv=False`, mirroring `_parse_json`'s handling of malformed input. Note that `metadata["rows"]` and `metadata["columns"]` are omitted on the fallback path, so read them with `.get()`.
 
 ### v4.8.5 (2026-08-13) — Enterprise observability: `/health` probes + JSON structured logging (opt-in)
 
