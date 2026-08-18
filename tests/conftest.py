@@ -418,3 +418,106 @@ def sample_xml(tmp_path):
     f = tmp_path / "test.xml"
     f.write_text(content, encoding="utf-8")
     return f
+
+
+@pytest.fixture
+def sample_yaml(tmp_path):
+    """Create a sample YAML file."""
+    content = """apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth-service
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: auth
+"""
+    f = tmp_path / "test.yaml"
+    f.write_text(content, encoding="utf-8")
+    return f
+
+
+@pytest.fixture
+def sample_go(tmp_path):
+    """Create a sample Go source file."""
+    content = """package main
+
+import (
+	"fmt"
+	"net/http"
+)
+
+type Config struct {
+	Port int
+}
+
+func main() {
+	fmt.Println("hello")
+}
+
+func handler(w http.ResponseWriter, r *http.Request) {}
+"""
+    f = tmp_path / "test.go"
+    f.write_text(content, encoding="utf-8")
+    return f
+
+
+@pytest.fixture
+def sample_sql(tmp_path):
+    """Create a sample SQL file."""
+    content = """CREATE TABLE users (
+    id SERIAL PRIMARY KEY,
+    email TEXT NOT NULL
+);
+
+SELECT id, email FROM users WHERE id = 1;
+INSERT INTO users (email) VALUES ('a@b.com');
+"""
+    f = tmp_path / "test.sql"
+    f.write_text(content, encoding="utf-8")
+    return f
+
+
+@pytest.fixture
+def sample_proto(tmp_path):
+    """Create a sample Protocol Buffer file."""
+    content = """syntax = "proto3";
+
+package auth.v1;
+
+service AuthService {
+    rpc ValidateAccess (ValidateRequest) returns (ValidateResponse);
+}
+
+message ValidateRequest {
+    string token = 1;
+}
+
+message ValidateResponse {
+    bool valid = 1;
+}
+"""
+    f = tmp_path / "test.proto"
+    f.write_text(content, encoding="utf-8")
+    return f
+
+
+@pytest.fixture
+def sample_shell(tmp_path):
+    """Create a sample shell script."""
+    content = """#!/bin/bash
+
+deploy() {
+    echo "deploying"
+}
+
+function cleanup() {
+    echo "cleaning"
+}
+
+deploy
+"""
+    f = tmp_path / "test.sh"
+    f.write_text(content, encoding="utf-8")
+    return f

@@ -272,6 +272,59 @@ def test_parse_javascript(parser, sample_js):
     assert len(doc.metadata.get("imports", [])) >= 2
 
 
+def test_parse_yaml(parser, sample_yaml):
+    """YAML parser extracts K8s metadata."""
+    doc = parser.parse_file(sample_yaml)
+    assert doc is not None
+    assert doc.format == ".yaml"
+    assert doc.metadata.get("type") == "yaml"
+    assert doc.metadata.get("k8s_kind") == "Deployment"
+    assert doc.metadata.get("k8s_api_version") == "apps/v1"
+    assert doc.metadata.get("k8s_name") == "auth-service"
+
+
+def test_parse_go(parser, sample_go):
+    """Go parser extracts functions and structs."""
+    doc = parser.parse_file(sample_go)
+    assert doc is not None
+    assert doc.format == ".go"
+    assert doc.metadata.get("language") == "go"
+    assert "main" in doc.metadata.get("functions", [])
+    assert "handler" in doc.metadata.get("functions", [])
+    assert "Config" in doc.metadata.get("classes", [])
+
+
+def test_parse_sql(parser, sample_sql):
+    """SQL parser extracts tables and statements."""
+    doc = parser.parse_file(sample_sql)
+    assert doc is not None
+    assert doc.format == ".sql"
+    assert doc.metadata.get("type") == "sql"
+    assert "users" in doc.metadata.get("tables", [])
+    assert "CREATE" in doc.metadata.get("statements", [])
+
+
+def test_parse_proto(parser, sample_proto):
+    """Proto parser extracts services, messages, and rpcs."""
+    doc = parser.parse_file(sample_proto)
+    assert doc is not None
+    assert doc.format == ".proto"
+    assert doc.metadata.get("type") == "protobuf"
+    assert "AuthService" in doc.metadata.get("services", [])
+    assert "ValidateRequest" in doc.metadata.get("messages", [])
+    assert "ValidateAccess" in doc.metadata.get("rpcs", [])
+
+
+def test_parse_shell(parser, sample_shell):
+    """Shell parser extracts functions."""
+    doc = parser.parse_file(sample_shell)
+    assert doc is not None
+    assert doc.format == ".sh"
+    assert doc.metadata.get("type") == "shell"
+    assert "deploy" in doc.metadata.get("functions", [])
+    assert "cleanup" in doc.metadata.get("functions", [])
+
+
 def test_parse_typescript(parser, sample_ts):
     """TypeScript parser extracts functions, interfaces, enums, and imports."""
     doc = parser.parse_file(sample_ts)

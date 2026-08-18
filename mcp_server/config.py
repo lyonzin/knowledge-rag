@@ -36,6 +36,17 @@ _SUPPORTED_SUFFIXES = frozenset(
         ".pptx",
         ".csv",
         ".ipynb",
+        ".go",
+        ".yaml",
+        ".yml",
+        ".hujson",
+        ".cue",
+        ".proto",
+        ".rego",
+        ".kt",
+        ".sql",
+        ".sh",
+        ".jq",
     ]
 )
 
