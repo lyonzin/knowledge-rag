@@ -325,6 +325,66 @@ def test_parse_shell(parser, sample_shell):
     assert "cleanup" in doc.metadata.get("functions", [])
 
 
+def test_parse_kotlin(parser, sample_kotlin):
+    """Kotlin parser extracts fun declarations (top-level and class members) and classes."""
+    doc = parser.parse_file(sample_kotlin)
+    assert doc is not None
+    assert doc.format == ".kt"
+    assert doc.metadata.get("language") == "kotlin"
+    assert "validate" in doc.metadata.get("functions", [])
+    assert "helper" in doc.metadata.get("functions", [])
+    assert "AuthService" in doc.metadata.get("classes", [])
+    assert "Session" in doc.metadata.get("classes", [])
+
+
+def test_parse_rust(parser, sample_rust):
+    """Rust parser extracts fn declarations, structs, enums, traits, and use imports."""
+    doc = parser.parse_file(sample_rust)
+    assert doc is not None
+    assert doc.format == ".rs"
+    assert doc.metadata.get("language") == "rust"
+    assert "main" in doc.metadata.get("functions", [])
+    assert "serve" in doc.metadata.get("functions", [])
+    assert "handle" in doc.metadata.get("functions", [])
+    assert "Config" in doc.metadata.get("classes", [])
+    assert "State" in doc.metadata.get("classes", [])
+    assert "Handler" in doc.metadata.get("classes", [])
+    assert any(i.startswith("use ") for i in doc.metadata.get("imports", []))
+
+
+def test_parse_hujson(parser, sample_hujson):
+    """HuJSON parser tolerates comments and trailing commas, keeps original text."""
+    doc = parser.parse_file(sample_hujson)
+    assert doc is not None
+    assert doc.format == ".hujson"
+    assert doc.metadata.get("type") == "hujson"
+    assert doc.metadata.get("is_valid_json") is True
+    assert doc.metadata.get("structure") == "object"
+    assert "acls" in doc.metadata.get("keys", [])
+    # Original text (comments included) is what gets indexed
+    assert "// Access control policy" in doc.content
+
+
+def test_parse_dockerfile(parser, sample_dockerfile):
+    """Extensionless Dockerfile is dispatched by exact filename."""
+    doc = parser.parse_file(sample_dockerfile)
+    assert doc is not None
+    assert doc.format == "Dockerfile"
+    assert doc.metadata.get("type") == "text"
+    assert "FROM python:3.12-slim" in doc.content
+
+
+def test_parse_directory_includes_new_formats(parser, tmp_path):
+    """Directory ingestion picks up infra formats with the default config."""
+    (tmp_path / "main.go").write_text("package main\n\nfunc main() {}\n", encoding="utf-8")
+    (tmp_path / "deploy.yaml").write_text("apiVersion: v1\nkind: Service\n", encoding="utf-8")
+    (tmp_path / "Dockerfile").write_text("FROM python:3.12-slim\n", encoding="utf-8")
+
+    docs = parser.parse_directory(tmp_path)
+
+    assert {d.filename for d in docs} == {"main.go", "deploy.yaml", "Dockerfile"}
+
+
 def test_parse_typescript(parser, sample_ts):
     """TypeScript parser extracts functions, interfaces, enums, and imports."""
     doc = parser.parse_file(sample_ts)

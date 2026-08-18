@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Unreleased
 
+**Added:**
+
+- **feat(ingestion)** — 15 new indexable formats: Go, Rust, Kotlin, YAML (with Kubernetes `kind`/`apiVersion`/`name` metadata), HuJSON (comment- and trailing-comma-tolerant), CUE, Protocol Buffers (services/messages/RPCs), Rego, SQL (tables + statement types), shell (function names), jq, plus extensionless `Dockerfile` / `Makefile` / `Tiltfile` matched by exact filename. `documents.supported_formats` now accepts exact filenames alongside suffixes; all new formats are enabled by default and picked up by directory indexing and the file watcher.
+
 **Fixed:**
 
 - **fix(ingestion)** — `.csv` files with a field over csv's 128 KiB size limit no longer crash ingestion. `_parse_csv` catches `csv.Error` and falls back to indexing the raw text with `is_valid_csv=False`, mirroring `_parse_json`'s handling of malformed input. Note that `metadata["rows"]` and `metadata["columns"]` are omitted on the fallback path, so read them with `.get()`.

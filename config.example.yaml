@@ -68,6 +68,21 @@ documents:
     - .tsx       # React TypeScript TSX
     - .json      # JSON files
     - .xml       # XML files
+    - .go        # Go source code
+    - .rs        # Rust source code
+    - .kt        # Kotlin source code
+    - .yaml      # YAML (Kubernetes manifests, configs)
+    - .yml       # YAML (alternate extension)
+    - .hujson    # HuJSON (JSON with comments and trailing commas)
+    - .cue       # CUE configuration
+    - .proto     # Protocol Buffers
+    - .rego      # Open Policy Agent Rego
+    - .sql       # SQL schemas and queries
+    - .sh        # Shell scripts
+    - .jq        # jq filters
+    - Dockerfile # matched by exact filename (no extension)
+    - Makefile   # matched by exact filename (no extension)
+    - Tiltfile   # matched by exact filename (no extension)
     # - .xlsx    # Excel spreadsheets
     # - .pptx    # PowerPoint presentations
     # - .csv     # CSV data files

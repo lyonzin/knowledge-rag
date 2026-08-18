@@ -1120,24 +1120,28 @@ class DocumentWatcher(FileSystemEventHandler):
         finally:
             self._reindex_lock.release()
 
+    @staticmethod
+    def _is_supported(path: str) -> bool:
+        """supported_formats holds suffixes (".go") and exact filenames ("Dockerfile")."""
+        p = Path(path)
+        return p.suffix in config.supported_formats or p.name in config.supported_formats
+
     def on_created(self, event):
-        if not event.is_directory and Path(event.src_path).suffix in config.supported_formats:
+        if not event.is_directory and self._is_supported(event.src_path):
             self._schedule_reindex(event.src_path)
 
     def on_modified(self, event):
-        if not event.is_directory and Path(event.src_path).suffix in config.supported_formats:
+        if not event.is_directory and self._is_supported(event.src_path):
             self._schedule_reindex(event.src_path)
 
     def on_deleted(self, event):
-        if not event.is_directory and Path(event.src_path).suffix in config.supported_formats:
+        if not event.is_directory and self._is_supported(event.src_path):
             self._schedule_reindex(event.src_path)
 
     def on_moved(self, event):
         if event.is_directory:
             return
-        src_supported = Path(event.src_path).suffix in config.supported_formats
-        dest_supported = Path(event.dest_path).suffix in config.supported_formats
-        if src_supported or dest_supported:
+        if self._is_supported(event.src_path) or self._is_supported(event.dest_path):
             self._schedule_reindex(event.dest_path)
 
 

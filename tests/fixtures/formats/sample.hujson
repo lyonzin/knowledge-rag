@@ -1,0 +1,11 @@
+{
+    // Access control policy
+    "acls": [
+        {
+            "action": "accept",
+            "users": ["*"], // everyone
+        },
+    ],
+    /* trailing commas above are valid HuJSON */
+    "groups": {},
+}

@@ -1,6 +1,6 @@
 """Format smoke matrix — every supported parser produces at least one chunk.
 
-Pillar 4: Versatility — guarantee that the 12 text-based formats we
+Pillar 4: Versatility — guarantee that the text-based formats we
 ship parsers for keep producing chunks across every release.
 
 Binary formats (PDF, DOCX, XLSX, PPTX) are exercised by their dedicated
@@ -38,6 +38,14 @@ EXPECTED_FORMATS = {
     ".tsx",
     ".xml",
     ".ipynb",
+    ".go",
+    ".rs",
+    ".yaml",
+    ".hujson",
+    ".proto",
+    ".kt",
+    ".sql",
+    ".sh",
 }
 
 

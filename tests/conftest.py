@@ -521,3 +521,90 @@ deploy
     f = tmp_path / "test.sh"
     f.write_text(content, encoding="utf-8")
     return f
+
+
+@pytest.fixture
+def sample_kotlin(tmp_path):
+    """Create a sample Kotlin source file."""
+    content = """package com.example.auth
+
+import java.time.Instant
+
+data class Session(val token: String)
+
+class AuthService {
+    fun validate(token: String): Boolean {
+        return token.isNotEmpty()
+    }
+}
+
+private fun helper(): Instant = Instant.now()
+"""
+    f = tmp_path / "test.kt"
+    f.write_text(content, encoding="utf-8")
+    return f
+
+
+@pytest.fixture
+def sample_rust(tmp_path):
+    """Create a sample Rust source file."""
+    content = """use std::collections::HashMap;
+
+pub struct Config {
+    port: u16,
+}
+
+enum State {
+    Idle,
+    Running,
+}
+
+trait Handler {
+    fn handle(&self) -> bool;
+}
+
+pub fn main() {
+    println!("hello");
+}
+
+async fn serve(config: Config) {}
+"""
+    f = tmp_path / "test.rs"
+    f.write_text(content, encoding="utf-8")
+    return f
+
+
+@pytest.fixture
+def sample_hujson(tmp_path):
+    """Create a sample HuJSON file (comments + trailing commas)."""
+    content = """{
+    // Access control policy
+    "acls": [
+        {
+            "action": "accept",
+            "users": ["*"], // everyone
+        },
+    ],
+    /* trailing commas above are valid HuJSON */
+    "groups": {},
+}
+"""
+    f = tmp_path / "test.hujson"
+    f.write_text(content, encoding="utf-8")
+    return f
+
+
+@pytest.fixture
+def sample_dockerfile(tmp_path):
+    """Create a sample Dockerfile (extensionless, matched by filename)."""
+    content = """FROM python:3.12-slim
+
+WORKDIR /app
+COPY . .
+RUN pip install .
+
+CMD ["knowledge-rag"]
+"""
+    f = tmp_path / "Dockerfile"
+    f.write_text(content, encoding="utf-8")
+    return f

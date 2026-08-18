@@ -1,7 +1,9 @@
 """Document Ingestion System for Knowledge RAG
 
 Multi-format document parsing, chunking, and metadata extraction.
-Supports: MD, PDF, TXT, PY, C, H, CPP, JS, JSX, TS, TSX, JSON, XML, DOCX, XLSX, PPTX, CSV, IPYNB, MQH, MQ4
+Supports: MD, PDF, TXT, PY, C, H, CPP, JS, JSX, TS, TSX, JSON, XML, DOCX, XLSX,
+PPTX, CSV, IPYNB, MQH, MQ4, GO, RS, YAML, HUJSON, CUE, PROTO, REGO, KT, SQL, SH,
+JQ, plus extensionless Dockerfile / Makefile / Tiltfile
 """
 
 import fnmatch
@@ -127,6 +129,60 @@ LANGUAGE_PROFILES = {
 }
 
 
+def _strip_hujson(text: str) -> str:
+    """Convert HuJSON to strict JSON by dropping comments and trailing commas.
+
+    Single-pass scanner that tracks string literals, so quoted "//", "/*",
+    or "," sequences are left untouched.
+    """
+    out = []
+    i, n = 0, len(text)
+    in_string = False
+    while i < n:
+        c = text[i]
+        if in_string:
+            out.append(c)
+            if c == "\\" and i + 1 < n:
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if c == '"':
+                in_string = False
+            i += 1
+        elif c == '"':
+            in_string = True
+            out.append(c)
+            i += 1
+        elif c == "/" and text[i + 1 : i + 2] == "/":
+            while i < n and text[i] != "\n":
+                i += 1
+        elif c == "/" and text[i + 1 : i + 2] == "*":
+            end = text.find("*/", i + 2)
+            i = n if end == -1 else end + 2
+        elif c == ",":
+            # Trailing comma: drop when the next significant character
+            # (skipping whitespace and comments) closes an object/array
+            j = i + 1
+            while j < n:
+                if text[j] in " \t\r\n":
+                    j += 1
+                elif text[j : j + 2] == "//":
+                    nl = text.find("\n", j)
+                    j = n if nl == -1 else nl + 1
+                elif text[j : j + 2] == "/*":
+                    end = text.find("*/", j + 2)
+                    j = n if end == -1 else end + 2
+                else:
+                    break
+            if not (j < n and text[j] in "}]"):
+                out.append(c)
+            i += 1
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
 @dataclass
 class Chunk:
     """A chunk of text from a document"""
@@ -193,9 +249,10 @@ class DocumentParser:
             ".mqh": self._parse_code,
             ".mq4": self._parse_code,
             ".go": self._parse_code_generic,
+            ".rs": self._parse_code_generic,
             ".yaml": self._parse_yaml,
             ".yml": self._parse_yaml,
-            ".hujson": self._parse_json,
+            ".hujson": self._parse_hujson,
             ".cue": self._parse_code_generic,
             ".proto": self._parse_proto,
             ".rego": self._parse_code_generic,
@@ -224,7 +281,7 @@ class DocumentParser:
         elif name in self._parsers:
             key = name
         else:
-            raise ValueError(f"Unsupported format: {suffix}")
+            raise ValueError(f"Unsupported format: {suffix or name}")
 
         # Generate unique ID
         doc_id = self._generate_id(filepath)
@@ -247,7 +304,7 @@ class DocumentParser:
             id=doc_id,
             content=content,
             source=filepath,
-            format=suffix,
+            format=key,
             category=category,
             metadata=metadata,
             keywords=keywords,
@@ -310,7 +367,8 @@ class DocumentParser:
 
             for fname in files:
                 filepath = Path(root) / fname
-                if filepath.suffix.lower() not in supported:
+                # supported_formats holds suffixes (".go") and exact filenames ("Dockerfile")
+                if filepath.suffix.lower() not in supported and fname not in supported:
                     continue
                 if exclude and self._should_exclude(filepath, directory, exclude):
                     continue
@@ -442,21 +500,20 @@ class DocumentParser:
         return content, metadata
 
     def _parse_code_generic(self, filepath: Path) -> tuple[str, Dict]:
-        """Parse code files (Go, TypeScript, JS, CUE, Rego, Kotlin, etc.)"""
+        """Parse code files without a dedicated LANGUAGE_PROFILES entry.
+
+        Covers Go, Rust, CUE, Rego, Kotlin, and Starlark (Tiltfile).
+        """
         content = filepath.read_text(encoding="utf-8", errors="ignore")
-        suffix = filepath.suffix.lower()
         lang_map = {
             ".go": "go",
-            ".ts": "typescript",
-            ".js": "javascript",
-            ".jsx": "javascript",
-            ".tsx": "typescript",
+            ".rs": "rust",
             ".cue": "cue",
             ".rego": "rego",
             ".kt": "kotlin",
             "Tiltfile": "starlark",
         }
-        language = lang_map.get(suffix, lang_map.get(filepath.name, "unknown"))
+        language = lang_map.get(filepath.suffix.lower(), lang_map.get(filepath.name, "unknown"))
 
         metadata = {
             "type": "code",
@@ -469,33 +526,32 @@ class DocumentParser:
             "imports": [],
         }
 
-        # Language-agnostic: extract function and class definitions.
-        # Handles optional export/async prefixes and both JS/TS (class Name)
-        # and Go (Name struct) declaration styles.
-        func_pattern = re.compile(
-            r"^(?:export\s+)?(?:async\s+)?(?:func|function|def)\s+(\w+)"
-            r"|^(?:export\s+)?const\s+(\w+)\s*=\s*(?:async\s+)?(?:function|\()",
-            re.MULTILINE,
-        )
-        metadata["functions"] = [
-            g for g in func_pattern.findall(content) for g in g if g
-        ][:50]
+        # Function declarations: Go `func`, Rust `fn`, Kotlin `fun`,
+        # Starlark `def` — with optional modifiers (pub, private, override, ...)
+        # and indentation (Kotlin/Rust methods live inside class/impl blocks).
+        func_pattern = re.compile(r"^\s*(?:\w+\s+)*(?:func|fn|fun|def)\s+(\w+)", re.MULTILINE)
+        metadata["functions"] = func_pattern.findall(content)[:50]
 
+        # Type declarations: Kotlin `class`/`interface`/`object`, Rust
+        # `struct`/`enum`/`trait`, Go `type Name struct/interface` — each
+        # with optional modifiers. Branch order matters: the class branch
+        # must consume Kotlin's `enum class Name` before the struct branch
+        # can mistake `class` for the type name.
         class_pattern = re.compile(
-            r"^(?:export\s+)?(?:class|interface|enum)\s+(\w+)"
-            r"|^(?:type\s+)?(\w+)\s+(?:struct|interface)\b",
+            r"^\s*(?:\w+\s+)*(?:class|interface|object)\s+(\w+)"
+            r"|^\s*(?:\w+\s+)*(?:struct|enum|trait)\s+(\w+)"
+            r"|^type\s+(\w+)\s+(?:struct|interface)\b",
             re.MULTILINE,
         )
-        metadata["classes"] = [
-            g for g in class_pattern.findall(content) for g in g if g
-        ][:50]
+        metadata["classes"] = [g for groups in class_pattern.findall(content) for g in groups if g][:50]
 
-        # Extract import statements (language-agnostic)
+        # Import statements: `import` (Go/Kotlin/CUE/Rego), `package`,
+        # Rust `use`, Starlark `load(...)`
+        import_pattern = re.compile(r"(?:import|package|use)\b|load\(")
         import_lines = []
         for line in content.split("\n")[:100]:
             line = line.strip()
-            if line.startswith(("import ", "import(", "from ", "require(", "package ")) or \
-               re.match(r'^(import|require|include)\b', line):
+            if import_pattern.match(line):
                 import_lines.append(line)
         metadata["imports"] = import_lines[:20]
 
@@ -510,20 +566,23 @@ class DocumentParser:
             "file_size": filepath.stat().st_size,
             "modified": datetime.fromtimestamp(filepath.stat().st_mtime).isoformat(),
             "line_count": content.count("\n") + 1,
-            "k8s_kind": None,
-            "k8s_api_version": None,
-            "k8s_name": None,
         }
 
-        # Extract K8s metadata if present
+        # Kubernetes manifest metadata (kind / apiVersion / first name),
+        # best-effort from the leading lines of the first document
         for line in content.split("\n")[:30]:
             stripped = line.strip()
             if stripped.startswith("kind:"):
                 metadata["k8s_kind"] = stripped.split(":", 1)[1].strip()
             elif stripped.startswith("apiVersion:"):
                 metadata["k8s_api_version"] = stripped.split(":", 1)[1].strip()
-            elif stripped.startswith("name:") and metadata.get("k8s_name") is None:
-                metadata["k8s_name"] = stripped.split(":", 1)[1].strip().strip('"').strip("'")
+            elif stripped.startswith("name:") and "k8s_name" not in metadata:
+                metadata["k8s_name"] = stripped.split(":", 1)[1].strip().strip("\"'")
+
+        # A bare `name:` without kind/apiVersion is not a K8s manifest
+        # (e.g. GitHub Actions workflows) — don't mislabel it
+        if "k8s_kind" not in metadata and "k8s_api_version" not in metadata:
+            metadata.pop("k8s_name", None)
 
         return content, metadata
 
@@ -558,8 +617,14 @@ class DocumentParser:
             "statements": [],
         }
 
-        metadata["tables"] = re.findall(r"(?:CREATE\s+TABLE|ALTER\s+TABLE|FROM|JOIN|INTO)\s+(\w+)", content, re.IGNORECASE)
-        metadata["statements"] = re.findall(r"(CREATE|ALTER|DROP|SELECT|INSERT|UPDATE|DELETE)\b", content, re.IGNORECASE)
+        tables = re.findall(
+            r"\b(?:CREATE\s+TABLE|ALTER\s+TABLE|FROM|JOIN|INTO)\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?(\w+)",
+            content,
+            re.IGNORECASE,
+        )
+        metadata["tables"] = list(dict.fromkeys(tables))[:50]
+        statements = re.findall(r"\b(CREATE|ALTER|DROP|SELECT|INSERT|UPDATE|DELETE)\b", content, re.IGNORECASE)
+        metadata["statements"] = list(dict.fromkeys(s.upper() for s in statements))
 
         return content, metadata
 
@@ -632,6 +697,34 @@ class DocumentParser:
             content = raw_content
 
         return content, metadata
+
+    def _parse_hujson(self, filepath: Path) -> tuple[str, Dict]:
+        """Parse HuJSON file (JSON with comments and trailing commas).
+
+        Structural metadata comes from the stripped-down strict JSON;
+        the original text (comments included) is what gets indexed.
+        """
+        raw_content = filepath.read_text(encoding="utf-8", errors="ignore")
+        metadata = {
+            "type": "hujson",
+            "title": filepath.stem,
+            "file_size": filepath.stat().st_size,
+            "modified": datetime.fromtimestamp(filepath.stat().st_mtime).isoformat(),
+        }
+
+        try:
+            data = json.loads(_strip_hujson(raw_content))
+            metadata["is_valid_json"] = True
+            if isinstance(data, dict):
+                metadata["keys"] = list(data.keys())[:20]
+                metadata["structure"] = "object"
+            elif isinstance(data, list):
+                metadata["length"] = len(data)
+                metadata["structure"] = "array"
+        except json.JSONDecodeError:
+            metadata["is_valid_json"] = False
+
+        return raw_content, metadata
 
     def _parse_docx(self, filepath: Path) -> tuple[str, Dict]:
         """Parse DOCX file extracting paragraphs and tables."""

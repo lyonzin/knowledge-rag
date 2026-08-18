@@ -113,6 +113,26 @@ def test_new_code_formats_default_enabled():
         assert ext in config.supported_formats, f"{ext} missing from supported_formats defaults"
 
 
+INFRA_SUFFIXES = [".go", ".rs", ".yaml", ".yml", ".hujson", ".cue", ".proto", ".rego", ".kt", ".sql", ".sh", ".jq"]
+INFRA_FILENAMES = ["Dockerfile", "Makefile", "Tiltfile"]
+
+
+def test_infra_formats_in_supported_suffixes():
+    """Infra formats must be in _SUPPORTED_SUFFIXES / _SUPPORTED_FILENAMES for directory detection."""
+    from mcp_server.config import _SUPPORTED_FILENAMES, _SUPPORTED_SUFFIXES
+
+    for ext in INFRA_SUFFIXES:
+        assert ext in _SUPPORTED_SUFFIXES, f"{ext} missing from _SUPPORTED_SUFFIXES"
+    for name in INFRA_FILENAMES:
+        assert name in _SUPPORTED_FILENAMES, f"{name} missing from _SUPPORTED_FILENAMES"
+
+
+def test_infra_formats_default_enabled():
+    """Infra formats (including extensionless filenames) must be default-enabled, not opt-in."""
+    for fmt in INFRA_SUFFIXES + INFRA_FILENAMES:
+        assert fmt in config.supported_formats, f"{fmt} missing from supported_formats defaults"
+
+
 def test_query_expansion_groups_are_symmetric():
     """A synonym group must generate reciprocal expansions for every member."""
     merged = _merge_query_expansion_sources({}, [["metatrader 4", "mt4", "mql4"]])

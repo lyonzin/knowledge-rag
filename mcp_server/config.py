@@ -37,6 +37,7 @@ _SUPPORTED_SUFFIXES = frozenset(
         ".csv",
         ".ipynb",
         ".go",
+        ".rs",
         ".yaml",
         ".yml",
         ".hujson",
@@ -50,6 +51,18 @@ _SUPPORTED_SUFFIXES = frozenset(
     ]
 )
 
+# Extensionless files matched by exact filename instead of suffix
+_SUPPORTED_FILENAMES = frozenset(
+    [
+        "Dockerfile",
+        "Makefile",
+        "Tiltfile",
+    ]
+)
+
+# Canonical default for Config.supported_formats — suffixes plus exact filenames
+_DEFAULT_SUPPORTED_FORMATS = sorted(_SUPPORTED_SUFFIXES) + sorted(_SUPPORTED_FILENAMES)
+
 
 def _has_documents(path: Path) -> bool:
     """Check if path has a documents/ dir with actual supported files (follows symlinks)."""
@@ -58,7 +71,7 @@ def _has_documents(path: Path) -> bool:
         return False
     for root, _, files in os.walk(docs_dir, followlinks=True):
         for f in files:
-            if Path(f).suffix.lower() in _SUPPORTED_SUFFIXES:
+            if Path(f).suffix.lower() in _SUPPORTED_SUFFIXES or f in _SUPPORTED_FILENAMES:
                 return True
     return False
 
@@ -690,32 +703,9 @@ class Config:
     # ChromaDB
     collection_name: str = field(default_factory=lambda: _get("search", "collection_name", "knowledge_base"))
 
-    # Supported formats
+    # Supported formats — suffixes (".md") and exact filenames ("Dockerfile")
     supported_formats: List[str] = field(
-        default_factory=lambda: _get(
-            "documents",
-            "supported_formats",
-            [
-                ".md",
-                ".txt",
-                ".pdf",
-                ".py",
-                ".c",
-                ".h",
-                ".cpp",
-                ".js",
-                ".jsx",
-                ".ts",
-                ".tsx",
-                ".json",
-                ".xml",
-                ".docx",
-                ".xlsx",
-                ".pptx",
-                ".csv",
-                ".ipynb",
-            ],
-        )
+        default_factory=lambda: _get("documents", "supported_formats", list(_DEFAULT_SUPPORTED_FORMATS))
     )
 
     # Exclude patterns for directory traversal
@@ -979,26 +969,7 @@ class Config:
         if isinstance(self.supported_formats, list) and self.supported_formats:
             return
         print("[WARN] supported_formats is empty or invalid, using defaults")
-        self.supported_formats = [
-            ".md",
-            ".txt",
-            ".pdf",
-            ".py",
-            ".c",
-            ".h",
-            ".cpp",
-            ".js",
-            ".jsx",
-            ".ts",
-            ".tsx",
-            ".json",
-            ".xml",
-            ".docx",
-            ".xlsx",
-            ".pptx",
-            ".csv",
-            ".ipynb",
-        ]
+        self.supported_formats = list(_DEFAULT_SUPPORTED_FORMATS)
 
     def _validate_lists_and_maps(self) -> None:
         """Type-check exclude_patterns + keyword_routes + query_expansions in order."""

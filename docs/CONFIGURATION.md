@@ -183,7 +183,7 @@ Relative paths resolve from the project root. Absolute paths work too.
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `documents.supported_formats` | .md .txt .pdf .py .json .docx .xlsx .pptx .csv .ipynb | File extensions to index |
+| `documents.supported_formats` | All 33 non-MetaTrader formats (see README table) | File extensions to index; also accepts exact filenames (`Dockerfile`, `Makefile`, `Tiltfile`) |
 | `documents.exclude_patterns` | `[]` (empty) | Glob patterns for files/dirs to skip during indexing |
 | `documents.chunking.chunk_size` | 1000 | Max characters per chunk |
 | `documents.chunking.chunk_overlap` | 200 | Characters shared between consecutive chunks |

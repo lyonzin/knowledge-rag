@@ -483,9 +483,9 @@ flowchart TB
 
 ---
 
-## 📄 20 File Formats — parsed natively, no plugins needed
+## 📄 35 File Formats — parsed natively, no plugins needed
 
-Every parser is **chunk-aware** — Markdown splits at `##` headers, code splits at function/class boundaries, notebooks skip base64 outputs, PDFs use PyMuPDF, spreadsheets extract sheet-by-sheet. **18 formats are enabled by default**; the 2 MetaTrader formats are opt-in (add to `documents.supported_formats` in `config.yaml`).
+Every parser is **chunk-aware** — Markdown splits at `##` headers, code splits at function/class boundaries, notebooks skip base64 outputs, PDFs use PyMuPDF, spreadsheets extract sheet-by-sheet. **33 formats are enabled by default**; the 2 MetaTrader formats are opt-in (add to `documents.supported_formats` in `config.yaml`).
 
 | # | Format | Extension | Parser | Default | Notes |
 |---|--------|-----------|--------|:-------:|-------|
@@ -507,8 +507,23 @@ Every parser is **chunk-aware** — Markdown splits at `##` headers, code splits
 | 16 | React JSX | `.jsx` | Code-aware parser | Yes | Same as JS parser |
 | 17 | TypeScript | `.ts` | Code-aware parser | Yes | Functions / classes / interfaces / enums / imports |
 | 18 | React TSX | `.tsx` | Code-aware parser | Yes | Same as TS parser |
-| 19 | MQL4 Source | `.mq4` | Code parser | **No** | MetaTrader — opt-in via `documents.supported_formats` |
-| 20 | MQL4 Header | `.mqh` | Code parser | **No** | MetaTrader — opt-in via `documents.supported_formats` |
+| 19 | Go | `.go` | Code-aware parser | Yes | Functions / structs / imports extracted |
+| 20 | Rust | `.rs` | Code-aware parser | Yes | Functions / structs / enums / traits / `use` imports |
+| 21 | Kotlin | `.kt` | Code-aware parser | Yes | Functions (incl. class members) / classes extracted |
+| 22 | YAML | `.yaml` | YAML parser | Yes | Kubernetes kind / apiVersion / name extracted |
+| 23 | YAML | `.yml` | YAML parser | Yes | Same as YAML parser |
+| 24 | HuJSON | `.hujson` | HuJSON parser | Yes | JSON with comments + trailing commas (e.g. Tailscale ACLs) |
+| 25 | CUE | `.cue` | Code-aware parser | Yes | Imports / package extracted |
+| 26 | Protocol Buffers | `.proto` | Proto parser | Yes | Services / messages / RPCs extracted |
+| 27 | Rego | `.rego` | Code-aware parser | Yes | OPA policies — imports / package extracted |
+| 28 | SQL | `.sql` | SQL parser | Yes | Table names + statement types extracted |
+| 29 | Shell | `.sh` | Shell parser | Yes | Function names extracted |
+| 30 | jq | `.jq` | Shell parser | Yes | Indexed as shell-style script |
+| 31 | Dockerfile | `Dockerfile` | Text parser | Yes | Matched by exact filename (no extension) |
+| 32 | Makefile | `Makefile` | Text parser | Yes | Matched by exact filename (no extension) |
+| 33 | Tiltfile | `Tiltfile` | Code-aware parser | Yes | Starlark — `def` functions / `load()` extracted |
+| 34 | MQL4 Source | `.mq4` | Code parser | **No** | MetaTrader — opt-in via `documents.supported_formats` |
+| 35 | MQL4 Header | `.mqh` | Code parser | **No** | MetaTrader — opt-in via `documents.supported_formats` |
 
 > **Enable an opt-in format** — add the extension to `documents.supported_formats` in your `config.yaml`:
 > ```yaml
