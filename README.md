@@ -19,6 +19,14 @@ Structured data (schema.org SoftwareApplication) — indexed by search engines, 
 }
 -->
 
+<p align="center">
+  <img
+    src="./assets/knowledge-rag-banner.png"
+    alt="knowledge-rag — Local Hybrid RAG for MCP"
+    width="100%"
+  />
+</p>
+
 # knowledge-rag
 
 <div align="center">
