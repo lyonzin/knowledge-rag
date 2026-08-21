@@ -1046,19 +1046,123 @@ class BM25Index:
 # =============================================================================
 
 
+# Network filesystems where SQLite WAL is unsafe. WAL coordinates writers via a
+# shared-memory (-shm) segment that NFS/SMB/CIFS either emulate poorly or forbid,
+# so enabling WAL there risks silent corruption (chroma-core/chroma#7040 caveat).
+_NETWORK_FSTYPES = frozenset(
+    {
+        "nfs",
+        "nfs4",
+        "cifs",
+        "smbfs",
+        "smb",
+        "smb2",
+        "smb3",
+        "9p",
+        "ncpfs",
+        "afs",
+        "afpfs",
+        "fuse.sshfs",
+        "fuse.glusterfs",
+        "glusterfs",
+        "lustre",
+        "ceph",
+        "beegfs",
+    }
+)
+
+
+def _unescape_mount(field: str) -> str:
+    """Decode the four octal escapes util-linux writes into ``/proc/mounts``.
+
+    Only space (``\\040``), tab (``\\011``), newline (``\\012``) and backslash
+    (``\\134``) are escaped; every other byte — including UTF-8 — is literal.
+    ``codecs`` ``unicode_escape`` would mangle non-ASCII mountpoints (e.g.
+    ``/mnt/données``), so it must not be used here. Backslash is decoded last
+    so a real backslash cannot re-trigger the other rules.
+    """
+    return field.replace("\\040", " ").replace("\\011", "\t").replace("\\012", "\n").replace("\\134", "\\")
+
+
+def _network_fstype_match(target: str, mounts_text: str) -> bool:
+    """Return True when ``target`` sits under a network mount in ``mounts_text``.
+
+    ``mounts_text`` is the raw content of ``/proc/mounts`` (field 2 = mountpoint,
+    field 3 = fstype). The longest mountpoint that prefixes ``target`` wins, so a
+    network mount nested under a local root is still detected. Pure string logic,
+    no I/O, so it is unit-testable without a real filesystem.
+    """
+    best_mount = ""
+    best_fstype = ""
+    for line in mounts_text.splitlines():
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        mountpoint = _unescape_mount(parts[1])
+        fstype = parts[2]
+        under_mount = target == mountpoint or target.startswith(mountpoint.rstrip("/") + "/")
+        if under_mount and len(mountpoint) > len(best_mount):
+            best_mount = mountpoint
+            best_fstype = fstype
+    return best_fstype.lower() in _NETWORK_FSTYPES
+
+
+def _is_network_filesystem(path: Path) -> bool:
+    """Best-effort, dependency-free detection of a network filesystem.
+
+    Windows UNC paths (``\\\\server\\share``) are always network. On Linux we
+    parse ``/proc/mounts``. Anything undetectable (macOS, no ``/proc``) falls
+    through as local so local-disk behaviour is never regressed (fail-open).
+    """
+    raw = str(path)
+    if raw.startswith("\\\\") or raw.startswith("//"):
+        return True
+    mounts = Path("/proc/mounts")
+    if not mounts.exists():
+        return False
+    try:
+        target = os.path.realpath(raw)
+        return _network_fstype_match(target, mounts.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return False
+
+
 def _enable_wal_mode(chroma_dir: Path) -> None:
-    """Enable WAL journal mode on ChromaDB's SQLite for concurrent reads."""
+    """Switch ChromaDB's SQLite to WAL for concurrent reads — safely.
+
+    GH #200: this MUST run *before* any ``chromadb.PersistentClient`` opens
+    ``chroma_dir``. The Chroma Rust binding keeps a live sqlx connection pool,
+    and toggling ``journal_mode`` through a second sqlite3 connection *after*
+    that pool exists leaves stale ``-wal``/``-shm`` handles — the first
+    ``Collection.add()`` then fails during compaction with SQLITE_NOTADB
+    (error 26, "file is not a database"). ``journal_mode`` is sticky in the DB
+    header, so one successful switch persists across restarts.
+
+    Skips the switch on network filesystems (NFS/SMB/CIFS) where WAL is unsafe,
+    and is idempotent: a database already in WAL is left untouched. When the DB
+    does not exist yet it is pre-created as an empty WAL database so a brand-new
+    install runs in WAL from its first process (Chroma opens it and runs its
+    migrations over the empty WAL file — verified against chromadb 1.5.9).
+    """
     import sqlite3
 
-    sqlite_path = chroma_dir / "chroma.sqlite3"
-    if not sqlite_path.exists():
+    if _is_network_filesystem(chroma_dir):
+        print("[INFO] ChromaDB SQLite: network filesystem detected — keeping default journal mode (WAL unsafe)")
         return
+    sqlite_path = chroma_dir / "chroma.sqlite3"
+    fresh = not sqlite_path.exists()
+    if fresh:
+        chroma_dir.mkdir(parents=True, exist_ok=True)
     try:
         conn = sqlite3.connect(str(sqlite_path))
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA busy_timeout=5000;")
-        conn.close()
-        print("[INFO] ChromaDB SQLite: WAL mode enabled")
+        try:
+            current = conn.execute("PRAGMA journal_mode;").fetchone()
+            if not fresh and current and str(current[0]).lower() == "wal":
+                return  # already WAL (sticky header) — nothing to re-toggle
+            conn.execute("PRAGMA journal_mode=WAL;")
+            print("[INFO] ChromaDB SQLite: WAL mode enabled")
+        finally:
+            conn.close()
     except Exception as e:
         print(f"[WARN] Could not enable WAL mode: {e}")
 
@@ -1180,10 +1284,10 @@ class KnowledgeOrchestrator:
         self.parser = DocumentParser()
         self.embed_fn = FastEmbedEmbeddings()
 
-        # Initialize ChromaDB with persistent storage (new API v1.4.0+)
-        self.chroma_client = chromadb.PersistentClient(path=str(config.chroma_dir))
-        if config.transport != "stdio":
-            _enable_wal_mode(config.chroma_dir)
+        # Initialize ChromaDB with persistent storage (new API v1.4.0+).
+        # GH #200: WAL is toggled inside _init_chroma_client BEFORE the client
+        # opens the DB — never through a second connection afterwards.
+        self.chroma_client = self._init_chroma_client()
 
         # Get or create collection (with auto-recovery from corruption)
         self.collection = self._safe_get_collection()
@@ -1235,6 +1339,19 @@ class KnowledgeOrchestrator:
             self._cleanup_stale_staging_collections()
         except Exception as e:
             print(f"[STAGING] Startup cleanup skipped (non-fatal): {e}")
+
+    def _init_chroma_client(self):
+        """Create the Chroma PersistentClient, switching SQLite to WAL first.
+
+        GH #200: WAL must be toggled while no Rust sqlx handle is live. Doing it
+        here — before ``chromadb.PersistentClient`` opens the DB — is the whole
+        fix; see ``_enable_wal_mode`` for the SQLITE_NOTADB failure it prevents.
+        ``stdio`` transport is single-process, so it keeps Chroma's default
+        journal mode.
+        """
+        if config.transport != "stdio":
+            _enable_wal_mode(config.chroma_dir)
+        return chromadb.PersistentClient(path=str(config.chroma_dir))
 
     def _safe_get_collection(self):
         """
