@@ -1051,9 +1051,23 @@ class BM25Index:
 # so enabling WAL there risks silent corruption (chroma-core/chroma#7040 caveat).
 _NETWORK_FSTYPES = frozenset(
     {
-        "nfs", "nfs4", "cifs", "smbfs", "smb", "smb2", "smb3",
-        "9p", "ncpfs", "afs", "afpfs", "fuse.sshfs", "fuse.glusterfs",
-        "glusterfs", "lustre", "ceph", "beegfs",
+        "nfs",
+        "nfs4",
+        "cifs",
+        "smbfs",
+        "smb",
+        "smb2",
+        "smb3",
+        "9p",
+        "ncpfs",
+        "afs",
+        "afpfs",
+        "fuse.sshfs",
+        "fuse.glusterfs",
+        "glusterfs",
+        "lustre",
+        "ceph",
+        "beegfs",
     }
 )
 

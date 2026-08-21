@@ -82,9 +82,7 @@ def test_gh200_stdio_keeps_default_journal_mode(monkeypatch):
     order: list[str] = []
     monkeypatch.setattr(server_module.config, "transport", "stdio")
     monkeypatch.setattr(server_module, "_enable_wal_mode", lambda d: order.append("wal"))
-    monkeypatch.setattr(
-        server_module.chromadb, "PersistentClient", lambda path: order.append("client") or object()
-    )
+    monkeypatch.setattr(server_module.chromadb, "PersistentClient", lambda path: order.append("client") or object())
 
     _new_orch()._init_chroma_client()
 
