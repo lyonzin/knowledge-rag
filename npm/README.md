@@ -2,7 +2,7 @@
 
 # Knowledge RAG
 
-Local RAG system for Claude Code. Hybrid BM25 + semantic search with cross-encoder reranking. 12 MCP tools, 20 format parsers. Zero external servers. Everything runs on your machine.
+Local RAG system for Claude Code. Hybrid BM25 + semantic search with cross-encoder reranking. 13 MCP tools, 35 format parsers. Zero external servers. Everything runs on your machine.
 
 ## Quick Start
 

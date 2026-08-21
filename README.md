@@ -38,7 +38,7 @@ Structured data (schema.org SoftwareApplication) — indexed by search engines, 
 
 ### The MCP-first local RAG server for Claude Code, Cursor, and every AI agent.
 
-**Hybrid search · Cross-encoder reranking · 20 file formats · 100% local · Zero cloud · Enterprise-grade plumbing built-in.**
+**Hybrid search · Cross-encoder reranking · 35 file formats · 100% local · Zero cloud · Enterprise-grade plumbing built-in.**
 
 ```bash
 pip install knowledge-rag   →   restart Claude Code   →   search_knowledge("your query")
@@ -397,7 +397,7 @@ flowchart TB
     subgraph INGEST["Document Ingestion"]
         FS[documents/ folder]
         WD[Watchdog<br/>10s debounce]
-        PA[20 Parsers<br/>MD · PDF · DOCX · code · IPYNB]
+        PA[35 Parsers<br/>MD · PDF · DOCX · code · IaC · IPYNB]
         CK[Chunker<br/>markdown-aware · code-aware]
         EM[FastEmbed ONNX<br/>384D bge-small-en-v1.5]
         DD[SHA256 Dedup]
@@ -475,7 +475,7 @@ flowchart TB
 3. **All 13 MCP tools** are decorated with `@rate_limited` + `@instrument` — Prometheus counts every call, rate limiter enforces RPM+burst, both zero-cost when disabled.
 4. **`search_knowledge` checks the query cache first**; cache miss routes through the Query Router (regex classifier) to either the FTS5 fast-path (lexical) or the hybrid pipeline (BM25 + semantic + RRF + cross-encoder rerank).
 5. **Storage is 100% local**: ChromaDB (WAL mode) for vectors + metadata, SQLite FTS5 (WAL + busy-timeout) for lexical fast-path, `index_metadata.json` for durable state.
-6. **Document ingestion runs continuously**: watchdog observes `documents/`, 20 parsers handle each format, chunker respects language boundaries, FastEmbed ONNX generates embeddings, SHA256 deduplicates, and a staging swap performs zero-downtime rebuilds with rollback-on-failure.
+6. **Document ingestion runs continuously**: watchdog observes `documents/`, 35 parsers handle each format, chunker respects language boundaries, FastEmbed ONNX generates embeddings, SHA256 deduplicates, and a staging swap performs zero-downtime rebuilds with rollback-on-failure.
 7. **Enterprise observability** (opt-in) — Prometheus `/metrics`, structured JSON logs, `/health` payload — attaches to the same instrumentation points, no code changes required.
 8. **`config.yaml` (with 5 domain presets)** controls every subsystem — no environment variable spaghetti, no hardcoded paths.
 
@@ -648,7 +648,7 @@ knowledge-rag is designed for teams that cannot let their documents leave the pe
 - **26 000+** total downloads on PyPI · **250+** GitHub stars · **70+** enterprise teams (private + community)
 - **700+ tests** collected · **1.33:1** test-to-code ratio · **codecov trend gate** ±0.5pp
 - **35+ status checks** on every PR (9-cell OS×Python matrix · 7 quality pillars)
-- **20 file formats** parsed natively · **13 MCP tools** frozen · **5 domain presets** (cyber · dev · research · multilingual · general)
+- **35 file formats** parsed natively · **13 MCP tools** frozen · **5 domain presets** (cyber · dev · research · multilingual · general)
 - **BM25 128× faster** than baseline · **cross-encoder +1.88pp** Recall@10 (p<0.001) · **cache −40%** p95 latency
 - **1 800+ files / 39 K chunks indexed in < 3 min** on a modern laptop (typical developer corpus)
 - **Verified in production** on 5 889-doc / 75 016-chunk corpora

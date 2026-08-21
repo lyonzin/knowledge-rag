@@ -59,27 +59,35 @@ documents:
     - .txt       # Plain text
     - .pdf       # PDF documents
     - .docx      # Word documents
+    - .py        # Python source code
+    - .c         # C source code
+    - .h         # C/C++ header files
+    - .cpp       # C++ source code
+    - .js        # JavaScript
+    - .jsx       # React JSX
+    - .ts        # TypeScript
+    - .tsx       # React TypeScript TSX
+    - .json      # JSON files
+    - .xml       # XML files
+    - .go        # Go source code
+    - .rs        # Rust source code
+    - .kt        # Kotlin source code
+    - .yaml      # YAML (Kubernetes manifests, configs)
+    - .yml       # YAML (alternate extension)
+    - .hujson    # HuJSON (JSON with comments and trailing commas)
+    - .cue       # CUE configuration
+    - .proto     # Protocol Buffers
+    - .rego      # Open Policy Agent Rego
+    - .sql       # SQL schemas and queries
+    - .sh        # Shell scripts
+    - .jq        # jq filters
+    - Dockerfile # matched by exact filename (no extension)
+    - Makefile   # matched by exact filename (no extension)
+    - Tiltfile   # matched by exact filename (no extension)
     # - .xlsx    # Excel spreadsheets
     # - .pptx    # PowerPoint presentations
     # - .csv     # CSV data files
-    # - .py      # Python source code
-    # - .json    # JSON files
     # - .ipynb   # Jupyter Notebooks (extracts markdown + code cells)
-    # - .go      # Go source code
-    # - .rs      # Rust source code
-    # - .kt      # Kotlin source code
-    # - .yaml    # YAML (Kubernetes manifests, configs)
-    # - .yml     # YAML (alternate extension)
-    # - .hujson  # HuJSON (JSON with comments and trailing commas)
-    # - .cue     # CUE configuration
-    # - .proto   # Protocol Buffers
-    # - .rego    # Open Policy Agent Rego
-    # - .sql     # SQL schemas and queries
-    # - .sh      # Shell scripts
-    # - .jq      # jq filters
-    # - Dockerfile # matched by exact filename (no extension)
-    # - Makefile   # matched by exact filename (no extension)
-    # - Tiltfile   # matched by exact filename (no extension)
     # - .mq4     # MetaTrader MQL4 source (opt-in, add to enable)
     # - .mqh     # MetaTrader MQL4/5 headers (opt-in, add to enable)
 
