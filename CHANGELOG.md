@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 **Fixed:**
 
 - **fix(ingestion)** — `.csv` files with a field over csv's 128 KiB size limit no longer crash ingestion. `_parse_csv` catches `csv.Error` and falls back to indexing the raw text with `is_valid_csv=False`, mirroring `_parse_json`'s handling of malformed input. Note that `metadata["rows"]` and `metadata["columns"]` are omitted on the fallback path, so read them with `.get()`.
+- **fix(chroma)** — GH #200: stop toggling SQLite `journal_mode=WAL` through a second `sqlite3` connection *after* `chromadb.PersistentClient` is already live. In HTTP/SSE mode the Chroma Rust binding holds a live sqlx pool, so the post-client switch left stale `-wal`/`-shm` handles and the first `Collection.add()` failed during compaction with `SQLITE_NOTADB` (error 26, "file is not a database"). WAL is now switched inside `_init_chroma_client` **before** the client opens the DB, is idempotent (a DB already in WAL is left untouched), and is skipped on network filesystems (NFS/SMB/CIFS) where WAL is unsafe (chroma-core/chroma#7040 caveat). Read-only startups were unaffected; only incremental writes hit the failure. Reported by @admincheg with an isolated A/B reproduction. 15 regression tests lock the ordering, idempotency and network-FS guard.
 
 ### v4.8.5 (2026-08-13) — Enterprise observability: `/health` probes + JSON structured logging (opt-in)
 
