@@ -137,18 +137,26 @@ def test_gh200_enable_wal_is_idempotent(tmp_path, monkeypatch, capsys):
     assert "WAL mode enabled" not in (second.out + second.err), "second call must be a no-op"
 
 
-def test_gh200_enable_wal_noop_when_db_absent(tmp_path, monkeypatch):
-    """Missing chroma.sqlite3 returns before probing the filesystem — no crash."""
-    probed = {"net": False}
+def test_gh200_fresh_local_db_is_precreated_in_wal(tmp_path, monkeypatch):
+    """A fresh local install gets an empty WAL DB so run #1 is already WAL (GH #200 review)."""
+    monkeypatch.setattr(server_module, "_is_network_filesystem", lambda p: False)
+    chroma_dir = tmp_path / "chromadb"  # does not exist yet
 
-    def spy(_path):
-        probed["net"] = True
-        return False
+    server_module._enable_wal_mode(chroma_dir)
 
-    monkeypatch.setattr(server_module, "_is_network_filesystem", spy)
-    server_module._enable_wal_mode(tmp_path)  # no DB created
+    db = chroma_dir / "chroma.sqlite3"
+    assert db.exists(), "fresh local DB must be pre-created so WAL is set before the client opens"
+    assert _journal_mode(db) == "wal"
 
-    assert probed["net"] is False, "absent DB must early-return before the FS probe"
+
+def test_gh200_fresh_db_on_network_fs_is_not_created(tmp_path, monkeypatch):
+    """On a network FS a fresh DB must NOT be pre-created — WAL there risks corruption."""
+    monkeypatch.setattr(server_module, "_is_network_filesystem", lambda p: True)
+    chroma_dir = tmp_path / "chromadb"
+
+    server_module._enable_wal_mode(chroma_dir)
+
+    assert not (chroma_dir / "chroma.sqlite3").exists(), "must not pre-create a WAL DB on a network FS"
 
 
 def test_gh200_wal_skipped_on_network_filesystem(tmp_path, monkeypatch, capsys):
@@ -207,6 +215,22 @@ def test_gh200_network_match_longest_mount_wins():
     """A network mount nested under the local root must win for paths under it."""
     assert server_module._network_fstype_match("/home/user/.kr/data", _MOUNTS) is True
     assert server_module._network_fstype_match("/var/lib/x", _MOUNTS) is False
+
+
+def test_gh200_network_match_handles_unicode_mountpoint():
+    """UTF-8 mountpoints must not be mangled by escape decoding (GH #200 review).
+
+    A non-ASCII network mount was misclassified as local under the old
+    ``unicode_escape`` decode, silently enabling WAL on unsafe storage.
+    """
+    mounts = "server:/export /mnt/données nfs4 rw 0 0\n/dev/sda1 / ext4 rw 0 0\n"
+    assert server_module._network_fstype_match("/mnt/données/kr", mounts) is True
+
+
+def test_gh200_mount_field_octal_escapes_are_decoded():
+    """Spaces in a mountpoint (\\040) decode so a path with a space still matches."""
+    mounts = "server:/x /mnt/my\\040share nfs4 rw 0 0\n"
+    assert server_module._network_fstype_match("/mnt/my share/db", mounts) is True
 
 
 def test_gh200_windows_unc_path_is_network():

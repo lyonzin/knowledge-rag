@@ -1072,6 +1072,18 @@ _NETWORK_FSTYPES = frozenset(
 )
 
 
+def _unescape_mount(field: str) -> str:
+    """Decode the four octal escapes util-linux writes into ``/proc/mounts``.
+
+    Only space (``\\040``), tab (``\\011``), newline (``\\012``) and backslash
+    (``\\134``) are escaped; every other byte — including UTF-8 — is literal.
+    ``codecs`` ``unicode_escape`` would mangle non-ASCII mountpoints (e.g.
+    ``/mnt/données``), so it must not be used here. Backslash is decoded last
+    so a real backslash cannot re-trigger the other rules.
+    """
+    return field.replace("\\040", " ").replace("\\011", "\t").replace("\\012", "\n").replace("\\134", "\\")
+
+
 def _network_fstype_match(target: str, mounts_text: str) -> bool:
     """Return True when ``target`` sits under a network mount in ``mounts_text``.
 
@@ -1086,8 +1098,7 @@ def _network_fstype_match(target: str, mounts_text: str) -> bool:
         parts = line.split()
         if len(parts) < 3:
             continue
-        # /proc/mounts octal-escapes spaces and friends as \040 — decode them.
-        mountpoint = parts[1].encode().decode("unicode_escape")
+        mountpoint = _unescape_mount(parts[1])
         fstype = parts[2]
         under_mount = target == mountpoint or target.startswith(mountpoint.rstrip("/") + "/")
         if under_mount and len(mountpoint) > len(best_mount):
@@ -1128,21 +1139,25 @@ def _enable_wal_mode(chroma_dir: Path) -> None:
     header, so one successful switch persists across restarts.
 
     Skips the switch on network filesystems (NFS/SMB/CIFS) where WAL is unsafe,
-    and is idempotent: a database already in WAL is left untouched.
+    and is idempotent: a database already in WAL is left untouched. When the DB
+    does not exist yet it is pre-created as an empty WAL database so a brand-new
+    install runs in WAL from its first process (Chroma opens it and runs its
+    migrations over the empty WAL file — verified against chromadb 1.5.9).
     """
     import sqlite3
 
-    sqlite_path = chroma_dir / "chroma.sqlite3"
-    if not sqlite_path.exists():
-        return
     if _is_network_filesystem(chroma_dir):
         print("[INFO] ChromaDB SQLite: network filesystem detected — keeping default journal mode (WAL unsafe)")
         return
+    sqlite_path = chroma_dir / "chroma.sqlite3"
+    fresh = not sqlite_path.exists()
+    if fresh:
+        chroma_dir.mkdir(parents=True, exist_ok=True)
     try:
         conn = sqlite3.connect(str(sqlite_path))
         try:
             current = conn.execute("PRAGMA journal_mode;").fetchone()
-            if current and str(current[0]).lower() == "wal":
+            if not fresh and current and str(current[0]).lower() == "wal":
                 return  # already WAL (sticky header) — nothing to re-toggle
             conn.execute("PRAGMA journal_mode=WAL;")
             print("[INFO] ChromaDB SQLite: WAL mode enabled")
