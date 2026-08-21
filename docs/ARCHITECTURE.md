@@ -68,7 +68,7 @@ flowchart TB
     end
 
     subgraph INGEST["DOCUMENT INGESTION"]
-        PARSERS["20 Parsers<br/>MD | PDF | TXT | PY | C | H | CPP | JS | JSX | TS | TSX | JSON | XML | CSV<br/>DOCX | XLSX | PPTX | IPYNB | MQH | MQ4"]
+        PARSERS["35 Parsers<br/>MD | PDF | TXT | PY | C | H | CPP | JS | JSX | TS | TSX | JSON | XML | CSV<br/>DOCX | XLSX | PPTX | IPYNB | MQH | MQ4<br/>Go | Rust | Kotlin | YAML | HuJSON | CUE | Proto | Rego | SQL | Shell | jq | Dockerfile | Makefile | Tiltfile"]
         CHUNKER["Chunking<br/>MD: section-aware<br/>Other: 1000 chars + 200 overlap"]
         FTS5SYNC["FTS5 CRUD sync<br/>(v4.8.2 task 05)"]
         PARSERS --> CHUNKER --> FTS5SYNC
@@ -163,7 +163,7 @@ flowchart LR
         FILES["documents/<br/>├── security/<br/>│   ├── redteam/<br/>│   ├── blueteam/<br/>│   └── ctf/<br/>├── aar/<br/>├── logscale/<br/>├── development/<br/>└── general/"]
     end
 
-    subgraph PARSE["Parse (20 formats)"]
+    subgraph PARSE["Parse (35 formats)"]
         MD["Markdown"]
         PDF["PDF<br/>(PyMuPDF)"]
         OFFICE["DOCX | XLSX<br/>PPTX | CSV"]
