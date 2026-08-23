@@ -27,8 +27,6 @@ Structured data (schema.org SoftwareApplication) — indexed by search engines, 
   />
 </p>
 
-# knowledge-rag
-
 <div align="center">
 
 [![PyPI](https://img.shields.io/pypi/v/knowledge-rag)](https://pypi.org/project/knowledge-rag/)
