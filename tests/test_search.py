@@ -184,6 +184,52 @@ class TestHybridCategoryFilter:
         assert {result["category"] for result in results} == {"reports"}
 
 
+class TestQueryCacheHitsOnRepeatedQuery:
+    """The per-result ``search_method`` label (hybrid/semantic/keyword) must not
+    clobber the ``search_method`` dispatch parameter before it reaches the cache
+    write. If it does, ``get()`` and ``put()`` hash different keys for the same
+    call and the cache never hits.
+    """
+
+    def test_identical_query_hits_cache_on_second_call(self, monkeypatch):
+        monkeypatch.setattr("mcp_server.server.config.reranker_enabled", False)
+
+        class FakeBM25:
+            def search(self, query, top_k):
+                return [("chunk_report", 10.0)]
+
+        class FakeCollection:
+            def get(self, ids, include):
+                return {
+                    "ids": ids,
+                    "documents": ["report content"] if "documents" in include else None,
+                    "metadatas": [
+                        {
+                            "source": "/docs/report.md",
+                            "filename": "report.md",
+                            "category": "reports",
+                            "chunk_index": 0,
+                            "keywords": "",
+                        }
+                    ]
+                    if "metadatas" in include
+                    else None,
+                }
+
+        orchestrator = object.__new__(KnowledgeOrchestrator)
+        orchestrator.query_cache = QueryCache(max_size=32, ttl_seconds=300)
+        orchestrator.bm25_index = FakeBM25()
+        orchestrator.collection = FakeCollection()
+        orchestrator._ensure_bm25_index = lambda: None
+        orchestrator._route_by_keywords = lambda query: None
+        orchestrator._expand_with_adjacent_chunks = lambda results: results
+
+        orchestrator.query("anything", max_results=5, category_filter=None, hybrid_alpha=0.0, search_method="auto")
+        orchestrator.query("anything", max_results=5, category_filter=None, hybrid_alpha=0.0, search_method="auto")
+
+        assert orchestrator.query_cache.stats()["hits"] == 1
+
+
 class TestKeywordRoutingBehavior:
     """When the user omits an explicit category_filter, keyword auto-routing must NOT
     restrict the search to a single category. The router is informational only:

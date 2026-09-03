@@ -3183,11 +3183,11 @@ class KnowledgeOrchestrator:
             b_rank = data.get("bm25_rank")
 
             if s_rank and b_rank:
-                search_method = "hybrid"
+                result_source = "hybrid"
             elif s_rank:
-                search_method = "semantic"
+                result_source = "semantic"
             else:
-                search_method = "keyword"
+                result_source = "keyword"
 
             raw = data.get("reranker_score", data.get("rrf_score", 0))
             normalized_score = (raw - min_score) / score_range if score_range > 0 else 1.0
@@ -3204,7 +3204,7 @@ class KnowledgeOrchestrator:
                     "reranker_score": round(data.get("reranker_score", 0), 6) if "reranker_score" in data else None,
                     "semantic_rank": s_rank,
                     "bm25_rank": b_rank,
-                    "search_method": search_method,
+                    "search_method": result_source,
                     "keywords": metadata.get("keywords", "").split(","),
                     "routed_by": routed_category if routed_category else "none",
                 }
