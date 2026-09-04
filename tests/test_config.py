@@ -172,8 +172,11 @@ class TestKnowledgeRagDirResolution:
     def _run_probe(self, env, cwd=None):
         result = subprocess.run(
             [sys.executable, "-c", self._PROBE],
-            env=env, cwd=cwd,
-            capture_output=True, text=True, check=True,
+            env=env,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=True,
         )
         return result.stderr.strip().splitlines()
 
