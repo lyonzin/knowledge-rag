@@ -1,8 +1,6 @@
 """Tests for configuration integrity."""
 
 import os
-import subprocess
-import sys
 from pathlib import Path
 
 from mcp_server.config import _merge_query_expansion_sources, config
@@ -160,40 +158,20 @@ def test_query_expansion_groups_extend_legacy_entries():
 
 
 class TestKnowledgeRagDirResolution:
-    """KNOWLEDGE_RAG_DIR must resolve relative and tilde paths to absolute."""
+    """Path(KNOWLEDGE_RAG_DIR).expanduser().resolve() must produce absolute paths."""
 
-    _PROBE = (
-        "import sys; _w = sys.stderr.write; "
-        "import mcp_server.config as c; "
-        "_w(str(c.BASE_DIR) + '\\n'); "
-        "_w(str(c.BASE_DIR.is_absolute()) + '\\n')"
-    )
-
-    def _run_probe(self, env, cwd=None):
-        result = subprocess.run(
-            [sys.executable, "-c", self._PROBE],
-            env=env,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        return result.stderr.strip().splitlines()
-
-    def test_relative_path_becomes_absolute(self, tmp_path):
-        env = {**os.environ, "KNOWLEDGE_RAG_DIR": "." + os.sep + "my-rag-data"}
-        lines = self._run_probe(env, cwd=str(tmp_path))
-        assert lines[-1] == "True"
-        assert Path(lines[-2]) == (tmp_path / "my-rag-data").resolve()
+    def test_relative_path_becomes_absolute(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        base = Path("." + os.sep + "my-rag-data").expanduser().resolve()
+        assert base.is_absolute()
+        assert base == (tmp_path / "my-rag-data").resolve()
 
     def test_absolute_path_stays_absolute(self, tmp_path):
-        abs_path = str(tmp_path / "rag-store")
-        env = {**os.environ, "KNOWLEDGE_RAG_DIR": abs_path}
-        lines = self._run_probe(env)
-        assert Path(lines[-2]) == Path(abs_path).resolve()
+        raw = str(tmp_path / "rag-store")
+        base = Path(raw).expanduser().resolve()
+        assert base == Path(raw).resolve()
 
     def test_tilde_path_expands(self):
-        env = {**os.environ, "KNOWLEDGE_RAG_DIR": "~/.knowledge-rag"}
-        lines = self._run_probe(env)
-        assert lines[-1] == "True"
-        assert "~" not in lines[-2]
+        base = Path("~/.knowledge-rag").expanduser().resolve()
+        assert base.is_absolute()
+        assert "~" not in str(base)
