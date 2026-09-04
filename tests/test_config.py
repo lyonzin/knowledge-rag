@@ -1,5 +1,8 @@
 """Tests for configuration integrity."""
 
+import os
+from pathlib import Path
+
 from mcp_server.config import _merge_query_expansion_sources, config
 
 
@@ -152,3 +155,42 @@ def test_query_expansion_groups_extend_legacy_entries():
     assert merged["tb"] == ["triple barrier", "trip_barr", "legacy_alias"]
     assert "tb" in merged["triple barrier"]
     assert "trip_barr" in merged["triple barrier"]
+
+
+class TestKnowledgeRagDirResolution:
+    """KNOWLEDGE_RAG_DIR must resolve relative and tilde paths to absolute."""
+
+    def test_relative_path_becomes_absolute(self, monkeypatch, tmp_path):
+        import importlib
+
+        import mcp_server.config as config_module
+
+        rel = "." + os.sep + "my-rag-data"
+        monkeypatch.setenv("KNOWLEDGE_RAG_DIR", rel)
+        monkeypatch.chdir(tmp_path)
+        importlib.reload(config_module)
+
+        assert config_module.BASE_DIR.is_absolute()
+        assert config_module.BASE_DIR == (tmp_path / "my-rag-data").resolve()
+
+    def test_absolute_path_stays_absolute(self, monkeypatch, tmp_path):
+        import importlib
+
+        import mcp_server.config as config_module
+
+        abs_path = str(tmp_path / "rag-store")
+        monkeypatch.setenv("KNOWLEDGE_RAG_DIR", abs_path)
+        importlib.reload(config_module)
+
+        assert config_module.BASE_DIR == Path(abs_path).resolve()
+
+    def test_tilde_path_expands(self, monkeypatch, tmp_path):
+        import importlib
+
+        import mcp_server.config as config_module
+
+        monkeypatch.setenv("KNOWLEDGE_RAG_DIR", "~/.knowledge-rag")
+        importlib.reload(config_module)
+
+        assert config_module.BASE_DIR.is_absolute()
+        assert "~" not in str(config_module.BASE_DIR)
