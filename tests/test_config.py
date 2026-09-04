@@ -1,10 +1,9 @@
 """Tests for configuration integrity."""
 
 import os
-from pathlib import Path
-
 import subprocess
 import sys
+from pathlib import Path
 
 from mcp_server.config import _merge_query_expansion_sources, config
 
