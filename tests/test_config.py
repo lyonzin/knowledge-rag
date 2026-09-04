@@ -3,6 +3,9 @@
 import os
 from pathlib import Path
 
+import subprocess
+import sys
+
 from mcp_server.config import _merge_query_expansion_sources, config
 
 
@@ -160,37 +163,35 @@ def test_query_expansion_groups_extend_legacy_entries():
 class TestKnowledgeRagDirResolution:
     """KNOWLEDGE_RAG_DIR must resolve relative and tilde paths to absolute."""
 
-    def test_relative_path_becomes_absolute(self, monkeypatch, tmp_path):
-        import importlib
+    _PROBE = (
+        "import sys; _w = sys.stderr.write; "
+        "import mcp_server.config as c; "
+        "_w(str(c.BASE_DIR) + '\\n'); "
+        "_w(str(c.BASE_DIR.is_absolute()) + '\\n')"
+    )
 
-        import mcp_server.config as config_module
+    def _run_probe(self, env, cwd=None):
+        result = subprocess.run(
+            [sys.executable, "-c", self._PROBE],
+            env=env, cwd=cwd,
+            capture_output=True, text=True, check=True,
+        )
+        return result.stderr.strip().splitlines()
 
-        rel = "." + os.sep + "my-rag-data"
-        monkeypatch.setenv("KNOWLEDGE_RAG_DIR", rel)
-        monkeypatch.chdir(tmp_path)
-        importlib.reload(config_module)
+    def test_relative_path_becomes_absolute(self, tmp_path):
+        env = {**os.environ, "KNOWLEDGE_RAG_DIR": "." + os.sep + "my-rag-data"}
+        lines = self._run_probe(env, cwd=str(tmp_path))
+        assert lines[-1] == "True"
+        assert Path(lines[-2]) == (tmp_path / "my-rag-data").resolve()
 
-        assert config_module.BASE_DIR.is_absolute()
-        assert config_module.BASE_DIR == (tmp_path / "my-rag-data").resolve()
-
-    def test_absolute_path_stays_absolute(self, monkeypatch, tmp_path):
-        import importlib
-
-        import mcp_server.config as config_module
-
+    def test_absolute_path_stays_absolute(self, tmp_path):
         abs_path = str(tmp_path / "rag-store")
-        monkeypatch.setenv("KNOWLEDGE_RAG_DIR", abs_path)
-        importlib.reload(config_module)
+        env = {**os.environ, "KNOWLEDGE_RAG_DIR": abs_path}
+        lines = self._run_probe(env)
+        assert Path(lines[-2]) == Path(abs_path).resolve()
 
-        assert config_module.BASE_DIR == Path(abs_path).resolve()
-
-    def test_tilde_path_expands(self, monkeypatch, tmp_path):
-        import importlib
-
-        import mcp_server.config as config_module
-
-        monkeypatch.setenv("KNOWLEDGE_RAG_DIR", "~/.knowledge-rag")
-        importlib.reload(config_module)
-
-        assert config_module.BASE_DIR.is_absolute()
-        assert "~" not in str(config_module.BASE_DIR)
+    def test_tilde_path_expands(self):
+        env = {**os.environ, "KNOWLEDGE_RAG_DIR": "~/.knowledge-rag"}
+        lines = self._run_probe(env)
+        assert lines[-1] == "True"
+        assert "~" not in lines[-2]
