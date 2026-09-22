@@ -1233,13 +1233,54 @@ class DocumentWatcher(FileSystemEventHandler):
         p = Path(path)
         return p.suffix.lower() in config.supported_formats or p.name in config.supported_formats
 
+    def _is_real_change(self, src_path: str) -> bool:
+        """Drop ATTRIB-only events by comparing on-disk (mtime, size) to last-indexed state.
+
+        GH #214: watchdog fires ``on_modified`` for every filesystem event that
+        touches metadata — chmod, xattr, ``utimensat`` that keeps mtime, and
+        the constant attribute-refresh chatter of cloud sync clients, backup
+        agents, antivirus scans, and OS file indexers. Without this guard each
+        such event enqueued a full incremental reindex whose only outcome was
+        ``0 new, N skipped`` — the exact loop reported in #214.
+
+        Returns True when the event might represent a real content change (unknown
+        path, size drift, mtime drift, or stat failure) so the reindex still runs.
+        Returns False only when the on-disk mtime + size still match what the
+        index recorded — meaning any watchdog event we just observed carried no
+        content diff and enqueuing it would only waste a scan cycle.
+        """
+        try:
+            orch = self._get_orchestrator()
+        except Exception:
+            return True  # orch not ready yet — be conservative, enqueue
+        try:
+            resolved = str(Path(src_path).resolve())
+        except OSError:
+            return True
+        docid = orch._source_to_docid.get(resolved)
+        if docid is None:
+            return True  # unknown file — treat as fresh create/rename
+        meta = orch._indexed_docs.get(docid, {})
+        try:
+            st = Path(src_path).stat()
+        except OSError:
+            return True  # can't stat — let index_all handle delete detection
+        current_mtime = datetime.fromtimestamp(st.st_mtime).isoformat()
+        return meta.get("file_mtime") != current_mtime or meta.get("file_size") != st.st_size
+
     def on_created(self, event):
         if not event.is_directory and self._is_supported(event.src_path):
             self._schedule_reindex(event.src_path)
 
     def on_modified(self, event):
-        if not event.is_directory and self._is_supported(event.src_path):
-            self._schedule_reindex(event.src_path)
+        if event.is_directory or not self._is_supported(event.src_path):
+            return
+        # GH #214: drop ATTRIB-only chatter (chmod, xattr, utime-same-mtime).
+        # on_created / on_deleted / on_moved always signal real change and skip
+        # this check on purpose.
+        if not self._is_real_change(event.src_path):
+            return
+        self._schedule_reindex(event.src_path)
 
     def on_deleted(self, event):
         if not event.is_directory and self._is_supported(event.src_path):
