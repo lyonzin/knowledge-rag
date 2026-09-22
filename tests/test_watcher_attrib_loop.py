@@ -30,8 +30,7 @@ def _make_orch(known_files: dict[str, tuple[str, int]]) -> MagicMock:
     orch = MagicMock()
     orch._source_to_docid = {path: f"docid-{i}" for i, path in enumerate(known_files)}
     orch._indexed_docs = {
-        f"docid-{i}": {"file_mtime": mtime, "file_size": size}
-        for i, (mtime, size) in enumerate(known_files.values())
+        f"docid-{i}": {"file_mtime": mtime, "file_size": size} for i, (mtime, size) in enumerate(known_files.values())
     }
     return orch
 
