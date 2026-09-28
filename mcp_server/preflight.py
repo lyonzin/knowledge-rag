@@ -124,8 +124,7 @@ def run_preflight(timeout_seconds: int = PROBE_TIMEOUT_SECONDS) -> bool:
             return False
         stderr_tail = (result.stderr or "").strip()[-1500:]
         _log(
-            f"[PREFLIGHT] attempt {attempt}/{PROBE_ATTEMPTS}: probe failed with code "
-            f"{result.returncode}\n{stderr_tail}"
+            f"[PREFLIGHT] attempt {attempt}/{PROBE_ATTEMPTS}: probe failed with code {result.returncode}\n{stderr_tail}"
         )
         last_result = result
         if attempt < PROBE_ATTEMPTS:
@@ -133,10 +132,7 @@ def run_preflight(timeout_seconds: int = PROBE_TIMEOUT_SECONDS) -> bool:
 
     assert last_result is not None
     reason = "segfault" if last_result.returncode in (-11, 139) else "failed"
-    _log(
-        f"[RECOVERY] preflight failed {PROBE_ATTEMPTS}x "
-        f"(last exit code {last_result.returncode}); moving index aside"
-    )
+    _log(f"[RECOVERY] preflight failed {PROBE_ATTEMPTS}x (last exit code {last_result.returncode}); moving index aside")
     try:
         backup_dir = _backup_active_index(reason)
     except OSError as exc:
