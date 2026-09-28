@@ -15,10 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Unreleased
 
+### v4.9.1 (2026-09-28) — Critical hotfix: reindex loop on Windows stdio MCP clients
+
 **Fixed:**
 
 - **fix(preflight)** — GH #216: startup preflight no longer quarantines the entire index after a single transient failure. The pre-v4.9.1 `run_preflight` ran one probe and moved `chroma_db/` to `data/backups/auto-repair-*` on any non-zero exit — a lingering file lock from the previous PID, a cold GPU init, or a slow disk was enough to trigger a full-corpus reindex. `run_preflight` now retries `PROBE_ATTEMPTS=3` times with `PROBE_RETRY_DELAY_SECONDS=5` between attempts, treats `subprocess.TimeoutExpired` as inconclusive (keeps the index — user debugs from `data/preflight.log`), and only quarantines after `PROBE_ATTEMPTS` consecutive non-zero exits. The quarantine itself now uses `os.rename` (atomic on same volume) instead of `shutil.move` (whose copy-tree + rmtree fallback left partial copies in `backups/` AND a partially deleted live `chroma_db/` when another process held a segment file open — WinError 32); if `os.rename` fails, the index is left untouched and the process exits with EX_TEMPFAIL (75) instead of crashing halfway. Every probe attempt is appended to `data/preflight.log` (stderr-only logs were hidden by stdio MCP clients). 4 new regression tests cover transient recovery, timeout inconclusive, rename failure exit-code, and the `PROBE_ATTEMPTS` count guard.
 - **fix(server)** — GH #216: initial indexing no longer blocks the MCP `initialize` handshake. `main()` previously called `orchestrator.index_all()` synchronously before `_run_transport()`; on a 5k+ document corpus (~150k chunks, minutes) the MCP client timed out `initialize`, killed the process, restarted it against an empty index, and looped indefinitely — the exact behaviour that #216 reported with tens of GB of `auto-repair-*` backups. `main()` now calls the existing `orchestrator.start_reindex_background("incremental")` (v4.3.0+) instead, so the transport starts serving immediately and the client polls `get_reindex_status` for progress. Migration path (`nuclear_rebuild` after embedding-model change) is intentionally left synchronous in this release to avoid query results with mixed embedding models; a follow-up will add a guarded async path with a "reindex in progress" error envelope. 3 new regression tests trap sync calls into `main()` — future refactors that swap `start_reindex_background` back for `index_all()` fail before merging.
+
+**Diagnosis and validated patch by @HillsCloud in the GH #216 comment thread — thank you for the forensic-level reproduction and the working diffs.**
 
 ### v4.9.0 (2026-09-22) — Expanded parser coverage + watcher/index resilience
 
