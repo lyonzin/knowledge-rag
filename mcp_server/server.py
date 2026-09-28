@@ -4793,9 +4793,15 @@ def main():
                     print("[FALLBACK] Attempting regular index instead...")
                     stats = orchestrator.index_all(force=True)
             elif orchestrator.collection.count() == 0:
-                print("[INFO] No documents indexed. Running initial indexing...")
-                stats = orchestrator.index_all()
-                print(f"[INFO] Indexed {stats['indexed']} documents with {stats['chunks_added']} chunks")
+                # GH #216: initial indexing runs in a background thread so it
+                # does not block the MCP `initialize` handshake. Blocking here
+                # for a large corpus (~150k chunks takes minutes) caused stdio
+                # clients to timeout, kill the process, and restart into an
+                # empty index — an endless full-reindex loop. Users poll
+                # get_reindex_status() to track progress.
+                print("[INFO] No documents indexed. Starting initial indexing in background...")
+                orchestrator.start_reindex_background("incremental")
+                print("[INFO] Initial indexing runs in background. Track progress with get_reindex_status.")
 
             # Start file watcher for auto-reindex on document changes
             if os.environ.get("KNOWLEDGE_RAG_WATCHER_DISABLED", "").strip() == "1":
