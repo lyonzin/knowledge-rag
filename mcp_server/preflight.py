@@ -49,17 +49,43 @@ def _backup_active_index(reason: str) -> Path:
     fallback copy+rmtree path in shutil.move leaks a partial copy in
     backups/ AND a partially deleted live chroma_db/ when another process
     holds a segment file open (WinError 32).
+
+    The two moves (metadata JSON + chroma_db dir) must be all-or-nothing.
+    If we moved chroma_db first and metadata failed (antivirus scanning
+    the JSON, brief file lock), restart would find `chroma_db` gone but
+    `index_metadata.json` still live — incremental reindex would then
+    read the orphan metadata, mark every doc as "already indexed", and
+    silently produce an empty collection. To prevent that, metadata is
+    moved first (small file, low lock probability) and chroma_db is
+    wrapped in try/except that rolls the metadata rename back before
+    re-raising. Restart then sees the pristine pre-quarantine state
+    and re-runs preflight cleanly.
     """
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     backup_dir = config.data_dir / "backups" / f"auto-repair-{stamp}"
     backup_dir.mkdir(parents=True, exist_ok=False)
 
-    if config.chroma_dir.exists():
-        os.rename(str(config.chroma_dir), str(backup_dir / f"chroma_db.{reason}"))
-
     metadata_file = config.data_dir / "index_metadata.json"
+    metadata_backup = backup_dir / f"index_metadata.{reason}.json"
+    metadata_moved = False
     if metadata_file.exists():
-        os.rename(str(metadata_file), str(backup_dir / f"index_metadata.{reason}.json"))
+        os.rename(str(metadata_file), str(metadata_backup))
+        metadata_moved = True
+
+    if config.chroma_dir.exists():
+        try:
+            os.rename(str(config.chroma_dir), str(backup_dir / f"chroma_db.{reason}"))
+        except OSError:
+            if metadata_moved:
+                # Rollback the metadata move so the two files stay consistent.
+                # If the rollback itself fails (unlikely — dst dir is fresh)
+                # we still re-raise the original OSError so the caller can
+                # exit cleanly instead of leaving the system in a wedged state.
+                try:
+                    os.rename(str(metadata_backup), str(metadata_file))
+                except OSError:
+                    pass
+            raise
 
     return backup_dir
 

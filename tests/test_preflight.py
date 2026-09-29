@@ -179,3 +179,62 @@ def test_all_attempts_fail_calls_probe_three_times(tmp_path, monkeypatch):
     assert call_count["n"] == preflight.PROBE_ATTEMPTS
     assert not chroma_dir.exists()
     assert (data_dir / "preflight.log").exists()
+
+
+def test_chroma_rename_failure_rolls_back_metadata(tmp_path, monkeypatch):
+    """GH #216 (PR #217 CodeRabbit + Greptile review): two-step quarantine
+    must be all-or-nothing.
+
+    Before this fix `_backup_active_index` moved `chroma_db/` first and
+    `index_metadata.json` second; if the second failed with OSError, the
+    process exited (75) with chroma_db gone and metadata still live. On
+    the next startup the probe reported "missing" (returncode 0), main()
+    saw an empty collection, incremental reindex loaded the orphan
+    metadata and marked every doc as already indexed — silently
+    producing zero results.
+
+    The fix moves metadata first (small, low lock probability), then
+    chroma_db inside a try/except that rolls the metadata rename back
+    on failure. This test wires os.rename so metadata (call 1) succeeds
+    and chroma_db (call 2) fails with WinError 32, then verifies both
+    files are back at their original paths after SystemExit(75).
+    """
+    from mcp_server import preflight
+
+    data_dir = tmp_path / "data"
+    chroma_dir = data_dir / "chroma_db"
+    metadata_file = data_dir / "index_metadata.json"
+    chroma_dir.mkdir(parents=True)
+    (chroma_dir / "chroma.sqlite3").write_text("bad", encoding="utf-8")
+    metadata_file.write_text('{"docs": []}', encoding="utf-8")
+
+    monkeypatch.setattr(preflight.config, "data_dir", data_dir)
+    monkeypatch.setattr(preflight.config, "chroma_dir", chroma_dir)
+    monkeypatch.setattr(preflight, "PROBE_RETRY_DELAY_SECONDS", 0)
+
+    result = subprocess.CompletedProcess(args=[], returncode=-11, stdout="", stderr="segfault")
+    monkeypatch.setattr(preflight, "_probe_chroma", lambda timeout_seconds=30: result)
+
+    # os.rename call order: 1) metadata → backup (OK), 2) chroma_db → backup
+    # (FAIL, simulated WinError 32), 3) metadata rollback (OK).
+    real_rename = preflight.os.rename
+    call_count = {"n": 0}
+
+    def selective_rename(src, dst):
+        call_count["n"] += 1
+        if call_count["n"] == 2:
+            raise OSError(32, "chroma_db still locked by previous PID")
+        return real_rename(src, dst)
+
+    monkeypatch.setattr(preflight.os, "rename", selective_rename)
+
+    with pytest.raises(SystemExit) as exc_info:
+        preflight.run_preflight()
+
+    assert exc_info.value.code == 75
+    # Rollback contract: both files at their pre-preflight paths.
+    assert metadata_file.exists(), "metadata rollback failed — orphan state on restart"
+    assert metadata_file.read_text(encoding="utf-8") == '{"docs": []}', "metadata content changed"
+    assert chroma_dir.exists(), "chroma_db moved despite the OSError on its rename"
+    # Rename call sequence: metadata-forward, chroma_db-forward (raises), metadata-rollback.
+    assert call_count["n"] == 3
