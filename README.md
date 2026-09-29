@@ -588,6 +588,8 @@ Native MCP
 
 **Complete client configuration guide with JSON schemas per client:** [docs/INSTALLATION.md#use-with-other-mcp-clients →](docs/INSTALLATION.md#use-with-other-mcp-clients)
 
+> ⚠️ **Operating model — read once.** Your MCP client (Claude Desktop, Code, Cursor, etc.) **spawns and owns the knowledge-rag server process**. Do **NOT** also run `knowledge-rag` in a terminal while your MCP client is open — two writer processes against the same `data_dir` corrupt the ChromaDB HNSW segment on Windows (see [issue #216](https://github.com/lyonzin/knowledge-rag/issues/216)). Recommended baseline: add `"KNOWLEDGE_RAG_SINGLE_INSTANCE": "1"` to the `env` block of your MCP config as a safety net. Full explanation + how to run CLI commands safely: [docs/single-instance.md](docs/single-instance.md).
+
 ---
 
 ## ⚙️ Configuration in 30 seconds
