@@ -15,10 +15,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Unreleased
 
+### v4.9.2 (2026-09-29) — Post-review hotfix: rename atomicity, real-thread test guard, operating-model docs
+
+Ships the review findings from PR #217 (CodeRabbit + Greptile) plus the doc gap @HillsCloud flagged when they asked which of three MCP setups to use. Two runtime fixes are strictly follow-ups to v4.9.1 (data-integrity rollback + a hardened test) and one is a docs-only rewrite that closes the "should I run knowledge-rag in a terminal too?" question at the source.
+
 **Fixed:**
 
 - **fix(preflight)** — GH #216 follow-up (PR #217 CodeRabbit + Greptile review): `_backup_active_index` no longer leaves the metadata JSON orphaned when the chroma_db rename fails. The v4.9.1 implementation moved `chroma_db/` first and `index_metadata.json` second; if the second `os.rename` raised OSError (a Windows antivirus scanning the JSON at exactly the wrong moment, or a brief lock), the process exited (75) with `chroma_db` already in `backups/` and metadata still live. Restart would then find `chroma_db` gone (probe reported "missing", exit 0), main() saw an empty collection, incremental reindex loaded the orphan metadata and marked every doc as already indexed — producing an empty collection silently, with no error. The order is now inverted (metadata first, small file with low lock probability), and the chroma_db rename is wrapped in try/except that rolls the metadata rename back on failure. Restart sees the pristine pre-quarantine state and re-runs preflight cleanly. New `test_chroma_rename_failure_rolls_back_metadata` locks the invariant.
+
+**Tests:**
+
 - **test(main_startup)** — GH #216 follow-up (PR #217 Greptile review P2): the handshake-ordering test previously mocked `start_reindex_background` with a lambda that returned instantly, so a hypothetical refactor collapsing the wrapper to synchronous would still pass the call-order assertion. The shared `_mock_orchestrator_empty` helper now spawns a real 2 s daemon thread on every call (matching the v4.9.1 contract), and a new `test_main_reaches_transport_under_deadline` asserts main() completes in < 0.5 s. If `start_reindex_background` ever regresses to synchronous, main() blocks on the daemon and the timing assertion fails.
+
+**Docs:**
+
+- **docs(operating-model)** — GH #216 doc gap flagged by @HillsCloud ("I had assumed a terminal instance was required for real-time indexing"). Rewrote `docs/single-instance.md` with a new "The operating model — who runs the server" top section explaining MCP stdio = 1-process-per-client (spawned/killed by the client, watcher runs inside the child), corrected the previous guidance that told setups with Claude Desktop + IDE + terminal to leave the single-instance flag off (safe for read-only consumers, unsafe for writers on Windows because HNSW segments are not safe under concurrent writes — the actual failure mode is `chroma preflight failed with code 3221225477`), and added an "Administrative commands (manual operations)" section documenting the correct sequence: close MCP client → run CLI → reopen. Added a warning callout in the README right below the MCP integration table so new users see the constraint before their first launch.
 
 ### v4.9.1 (2026-09-28) — Critical hotfix: reindex loop on Windows stdio MCP clients
 
