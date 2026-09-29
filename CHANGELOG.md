@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Unreleased
 
+**Fixed:**
+
+- **fix(preflight)** — GH #216 follow-up (PR #217 CodeRabbit + Greptile review): `_backup_active_index` no longer leaves the metadata JSON orphaned when the chroma_db rename fails. The v4.9.1 implementation moved `chroma_db/` first and `index_metadata.json` second; if the second `os.rename` raised OSError (a Windows antivirus scanning the JSON at exactly the wrong moment, or a brief lock), the process exited (75) with `chroma_db` already in `backups/` and metadata still live. Restart would then find `chroma_db` gone (probe reported "missing", exit 0), main() saw an empty collection, incremental reindex loaded the orphan metadata and marked every doc as already indexed — producing an empty collection silently, with no error. The order is now inverted (metadata first, small file with low lock probability), and the chroma_db rename is wrapped in try/except that rolls the metadata rename back on failure. Restart sees the pristine pre-quarantine state and re-runs preflight cleanly. New `test_chroma_rename_failure_rolls_back_metadata` locks the invariant.
+- **test(main_startup)** — GH #216 follow-up (PR #217 Greptile review P2): the handshake-ordering test previously mocked `start_reindex_background` with a lambda that returned instantly, so a hypothetical refactor collapsing the wrapper to synchronous would still pass the call-order assertion. The shared `_mock_orchestrator_empty` helper now spawns a real 2 s daemon thread on every call (matching the v4.9.1 contract), and a new `test_main_reaches_transport_under_deadline` asserts main() completes in < 0.5 s. If `start_reindex_background` ever regresses to synchronous, main() blocks on the daemon and the timing assertion fails.
+
 ### v4.9.1 (2026-09-28) — Critical hotfix: reindex loop on Windows stdio MCP clients
 
 **Fixed:**
