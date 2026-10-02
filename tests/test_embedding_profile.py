@@ -184,7 +184,7 @@ def _prepared_embedder(monkeypatch: pytest.MonkeyPatch) -> tuple[FastEmbedEmbedd
     embedder = FastEmbedEmbeddings()
     embedder._dim = 4  # match the fake output
     spy = MagicMock()
-    spy.embed.side_effect = lambda texts: _fake_embed_output(texts)
+    spy.embed.side_effect = lambda texts, batch_size=256: _fake_embed_output(texts)
     embedder._model = spy
     # Bypass the lazy loader (model is already "loaded")
     monkeypatch.setattr(embedder, "_load_model", lambda: None)

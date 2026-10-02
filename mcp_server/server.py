@@ -526,6 +526,10 @@ class FastEmbedEmbeddings:
         # Sticky failure flag: once load fails, subsequent calls re-raise immediately
         # instead of looping through download/retry. Same pattern as CrossEncoderReranker.
         self._load_failed: Optional[Exception] = None
+        # v4.9.3 (GH #224): the active ONNX provider is captured when the model
+        # loads so `_embed` can dispatch the right batch_size (CPU=32 avoids a
+        # ~500MB BFC arena allocation; CUDA=256 keeps VRAM throughput).
+        self._active_provider: Optional[str] = None
 
     def _load_model(self) -> None:
         """Load the ONNX model on demand. Idempotent and thread-safe.
@@ -612,6 +616,10 @@ class FastEmbedEmbeddings:
         kwargs["providers"] = providers
         print(f"[INFO] Loading embedding model: {self.model_name} ({self._dim}D) [{label}]...")
         self._model = TextEmbedding(**kwargs)
+        # v4.9.3 (GH #224): remember the provider that actually loaded so
+        # `_embed` can pick a safe batch_size. CUDA = contiguous VRAM, 256 OK;
+        # CPU = BFC arena on fragmented Windows heap, cap at 32.
+        self._active_provider = "CUDA" if "CUDAExecutionProvider" in providers else "CPU"
         print(f"[INFO] Embedding model loaded successfully [{label}]")
 
     @staticmethod
@@ -651,8 +659,17 @@ class FastEmbedEmbeddings:
             return []
 
         self._load_model()  # may raise EmbeddingModelLoadError
+        # v4.9.3 (GH #224): FastEmbed TextEmbedding.embed() default batch_size=256
+        # allocates ~500MB intermediate buffers under CPU execution with bge-small
+        # at seq_len=512. On fragmented Windows heaps this triggers ONNXRuntime
+        # BAD_ALLOC during ingestion of minified JS or large JSON. GPU VRAM is
+        # contiguous so 256 is safe. Env + YAML overrides let ops tune per workload.
+        default_batch = 32 if self._active_provider == "CPU" else 256
+        embed_batch = int(os.environ.get("KNOWLEDGE_RAG_EMBED_BATCH_SIZE", default_batch))
+        if config.embed_batch_size is not None and "KNOWLEDGE_RAG_EMBED_BATCH_SIZE" not in os.environ:
+            embed_batch = config.embed_batch_size
         try:
-            embeddings = list(self._model.embed(texts))
+            embeddings = list(self._model.embed(texts, batch_size=embed_batch))
         except Exception as exc:
             print(f"[ERROR] Embedding generation FAILED: {exc}", file=sys.stderr)
             raise EmbeddingError(f"Embedding generation failed: {exc}") from exc

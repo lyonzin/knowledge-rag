@@ -4,7 +4,7 @@ import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import yaml
 
@@ -752,6 +752,15 @@ class Config:
     # Default 1 = single-threaded = safe on all platforms.
     parallel_workers: int = field(default_factory=lambda: _get("documents", "parallel_workers", 1))
 
+    # v4.9.3 (GH #224): FastEmbed `TextEmbedding.embed()` internal micro-batch.
+    # None = provider heuristic in BGESmallEmbedder._embed (CPU=32, CUDA=256).
+    # Set explicitly to override per workload. CPU default avoids a ~500MB BFC
+    # arena allocation that crashes with BAD_ALLOC on fragmented Windows heaps
+    # when indexing minified JS or large JSON. GPU VRAM is contiguous so 256
+    # is safe. Env var KNOWLEDGE_RAG_EMBED_BATCH_SIZE takes precedence over
+    # this YAML key at runtime.
+    embed_batch_size: Optional[int] = field(default_factory=lambda: _get("documents", "embed_batch_size", None))
+
     # Server (new in v4.0.0)
     transport: str = field(default_factory=lambda: _get("server", "transport", "stdio"))
     server_host: str = field(default_factory=lambda: _get("server", "host", "127.0.0.1"))
@@ -843,13 +852,24 @@ class Config:
             self.max_results = 100
 
     def _validate_indexing(self) -> None:
-        """v4.8.0 Fase 3 — clamp batch_size [1,5000] and parallel_workers [1,16]."""
+        """v4.8.0 Fase 3 — clamp batch_size [1,5000] and parallel_workers [1,16].
+
+        v4.9.3 (GH #224): also clamp embed_batch_size [1,512] when set. None is
+        kept as "use provider heuristic" (CPU=32, CUDA=256) in BGESmallEmbedder.
+        """
         if not isinstance(self.batch_size, int) or self.batch_size < 1:
             print(f"[WARN] batch_size={self.batch_size!r} invalid, clamping to 1")
             self.batch_size = 1
         elif self.batch_size > 5000:
             print(f"[WARN] batch_size={self.batch_size} exceeds 5000, clamping to 5000")
             self.batch_size = 5000
+        if self.embed_batch_size is not None:
+            if not isinstance(self.embed_batch_size, int) or self.embed_batch_size < 1:
+                print(f"[WARN] embed_batch_size={self.embed_batch_size!r} invalid, falling back to provider heuristic")
+                self.embed_batch_size = None
+            elif self.embed_batch_size > 512:
+                print(f"[WARN] embed_batch_size={self.embed_batch_size} exceeds 512, clamping to 512")
+                self.embed_batch_size = 512
 
         if not isinstance(self.parallel_workers, int) or self.parallel_workers < 1:
             print(f"[WARN] parallel_workers={self.parallel_workers!r} invalid, clamping to 1")

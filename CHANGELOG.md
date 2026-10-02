@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Unreleased
 
+### v4.9.3 (2026-10-01) — Hotfix: cap FastEmbed batch_size at 32 under CPU execution
+
+**Fixed:**
+
+- **fix(embeddings)** — GH #224: `FastEmbedEmbeddings._embed` now caps FastEmbed's internal `batch_size` at 32 when the active ONNX provider is CPU (previously used FastEmbed's default of 256). ONNXRuntime's BFC arena allocates `batch_size * seq_len * hidden * layers * 4` for intermediate reshape tensors — the worst-case ~500MB allocation (`Failed to allocate memory for requested buffer of size 503316480`) ran out of contiguous heap during ingestion of minified JS and large JSON on Windows, crashing CPU indexing while GPU runs on the same corpus completed cleanly (VRAM is contiguous). The new path dispatches `batch_size=32` for CPU and `batch_size=256` for CUDA, with env var `KNOWLEDGE_RAG_EMBED_BATCH_SIZE` and YAML key `documents.embed_batch_size` as per-workload overrides. Public MCP tool surface unchanged (12 tools, same signatures). CPU throughput reduced ~20–30% in exchange for unblocking users who previously saw 100% ingestion failure on affected corpora; GPU users see no change. 3 new regression tests pin CPU default, CUDA default, and env override behavior.
+
 ### v4.9.2 (2026-09-29) — Post-review hotfix: rename atomicity, real-thread test guard, operating-model docs
 
 Ships the review findings from PR #217 (CodeRabbit + Greptile) plus the doc gap @HillsCloud flagged when they asked which of three MCP setups to use. Two runtime fixes are strictly follow-ups to v4.9.1 (data-integrity rollback + a hardened test) and one is a docs-only rewrite that closes the "should I run knowledge-rag in a terminal too?" question at the source.

@@ -44,7 +44,7 @@ def fake_text_embedding():
     the production model, but without the ~200MB ONNX runtime load.
     """
     fake = MagicMock()
-    fake.embed.side_effect = lambda texts: iter([np.zeros(384, dtype=np.float32) for _ in texts])
+    fake.embed.side_effect = lambda texts, batch_size=256: iter([np.zeros(384, dtype=np.float32) for _ in texts])
     with patch("mcp_server.server.TextEmbedding", return_value=fake):
         yield fake
 
@@ -67,7 +67,7 @@ def test_lazy_load_only_loads_once_under_pressure():
     inflating RSS linearly with iteration count.
     """
     fake = MagicMock()
-    fake.embed.side_effect = lambda texts: iter([np.zeros(384, dtype=np.float32) for _ in texts])
+    fake.embed.side_effect = lambda texts, batch_size=256: iter([np.zeros(384, dtype=np.float32) for _ in texts])
 
     with patch("mcp_server.server.TextEmbedding", return_value=fake) as mock_te:
         from mcp_server.server import FastEmbedEmbeddings
