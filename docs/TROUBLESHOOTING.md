@@ -117,7 +117,19 @@ MCP stdio is one process per client by protocol — multiple Claude Code windows
 export KNOWLEDGE_RAG_SINGLE_INSTANCE=1
 ```
 
-A second instance exits immediately with code 75. Default is OFF (multi-client friendly). Full guide: [docs/single-instance.md](docs/single-instance.md). Sample MCP config: [examples/mcp-config-single-instance.json](examples/mcp-config-single-instance.json).
+A second instance exits immediately with code 75. Default is OFF (multi-client friendly). Full guide: [docs/single-instance.md](single-instance.md). Sample MCP config: [examples/mcp-config-single-instance.json](../examples/mcp-config-single-instance.json).
+
+### Second MCP client disconnects / exits with code 75
+
+If two clients both launch `knowledge-rag` over `stdio` against the same `data_dir`, the single-instance guard (`KNOWLEDGE_RAG_SINGLE_INSTANCE=1`) can reject the second process to prevent ChromaDB index corruption.
+
+To share a single index across multiple clients concurrently, run one shared server instead:
+
+```bash
+knowledge-rag --transport streamable-http
+```
+
+Then connect every HTTP-capable client to `http://127.0.0.1:8179/mcp` (or add via **Settings → Connectors** in Claude Desktop). See the [Multi-client setup](../README.md#multi-client-setup-shared-server-via-streamable-http) section in the README.
 
 ### SSE server won't start
 

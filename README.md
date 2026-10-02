@@ -181,6 +181,28 @@ knowledge-rag --transport sse
 - Prometheus scrape: `http://your-host:9179/metrics`
 - MCP dispatcher: authenticated via `Authorization: Bearer your-secret-token`
 
+### Multi-client setup (Shared Server via Streamable HTTP)
+
+`stdio` is ideal when one MCP client owns one `knowledge-rag` process. If several clients (e.g. Claude Desktop, Cursor, LM Studio, or multiple terminal windows) should share one index and one running process, run `knowledge-rag` once with Streamable HTTP and point each HTTP-capable client at the same endpoint:
+
+```bash
+knowledge-rag --transport streamable-http
+# MCP endpoint: http://127.0.0.1:8179/mcp
+```
+
+- **Claude Desktop:** Add the URL through **Settings → Connectors → Add custom connector** (`http://127.0.0.1:8179/mcp`). Do not put a remote URL in `claude_desktop_config.json`; that file is for local process-based servers.
+- **Other MCP clients (Cursor, LM Studio, etc.):** Configure their remote-server URL as `http://127.0.0.1:8179/mcp`.
+
+| Transport | Clients per server | Shared index / process | Startup model | Best fit |
+|---|:---:|:---:|---|---|
+| `stdio` | 1 | No | Client launches process | Simplest local setup (single client) |
+| `sse` | Many | Yes | Start server once | Legacy HTTP clients |
+| `streamable-http` | Many | Yes | Start server once | **Preferred** shared-server setup |
+
+When an HTTP transport is selected, `knowledge-rag` automatically enables its single-instance lock (`KNOWLEDGE_RAG_SINGLE_INSTANCE=1`) to prevent multiple servers from binding the same data directory or port.
+
+> **Security note:** The default host is `127.0.0.1`. If you bind to `0.0.0.0` or another network interface, configure `server.auth.bearer_token` in `config.yaml`; otherwise the server warns that the HTTP endpoint is unauthenticated.
+
 ### Path 3 — Docker (models pre-downloaded, air-gapped ready)
 
 ```bash
