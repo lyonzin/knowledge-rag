@@ -190,8 +190,8 @@ knowledge-rag --transport streamable-http
 # MCP endpoint: http://127.0.0.1:8179/mcp
 ```
 
-- **Claude Desktop:** Add the URL through **Settings → Connectors → Add custom connector** (`http://127.0.0.1:8179/mcp`). Do not put a remote URL in `claude_desktop_config.json`; that file is for local process-based servers.
-- **Other MCP clients (Cursor, LM Studio, etc.):** Configure their remote-server URL as `http://127.0.0.1:8179/mcp`.
+- **Local MCP clients (Cursor, LM Studio, etc.):** Point their remote-server URL directly at `http://127.0.0.1:8179/mcp`.
+- **Claude Desktop / Remote Connectors:** If connecting from cloud-based or remote connectors (**Settings → Connectors → Add custom connector**), expose the endpoint with a public URL (e.g. via Cloudflare Tunnel, ngrok, or reverse proxy) since Anthropic's cloud cannot reach local `127.0.0.1`. Note: Do not configure remote HTTP endpoints inside `claude_desktop_config.json`; that file is reserved for local process execution.
 
 | Transport | Clients per server | Shared index / process | Startup model | Best fit |
 |---|:---:|:---:|---|---|
@@ -201,7 +201,7 @@ knowledge-rag --transport streamable-http
 
 When an HTTP transport is selected, `knowledge-rag` automatically enables its single-instance lock (`KNOWLEDGE_RAG_SINGLE_INSTANCE=1`) to prevent multiple servers from binding the same data directory or port.
 
-> **Security note:** The default host is `127.0.0.1`. If you bind to `0.0.0.0` or another network interface, configure `server.auth.bearer_token` in `config.yaml`; otherwise the server warns that the HTTP endpoint is unauthenticated.
+> **Security note:** The default host is `127.0.0.1`. If you bind to `0.0.0.0` or deploy across a network, configure `server.auth.bearer_token` in `config.yaml` and terminate TLS (HTTPS) via a reverse proxy (e.g. Caddy, Nginx) to protect bearer tokens in transit; otherwise the server warns that the HTTP endpoint is unauthenticated.
 
 ### Path 3 — Docker (models pre-downloaded, air-gapped ready)
 

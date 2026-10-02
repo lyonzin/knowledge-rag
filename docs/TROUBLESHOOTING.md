@@ -129,7 +129,7 @@ To share a single index across multiple clients concurrently, run one shared ser
 knowledge-rag --transport streamable-http
 ```
 
-Then connect every HTTP-capable client to `http://127.0.0.1:8179/mcp` (or add via **Settings → Connectors** in Claude Desktop). See the [Multi-client setup](../README.md#multi-client-setup-shared-server-via-streamable-http) section in the README.
+Then connect every local HTTP-capable client (Cursor, LM Studio, etc.) to `http://127.0.0.1:8179/mcp`. For Claude Desktop remote connectors, use a public/tunneled HTTPS URL. See the [Multi-client setup](../README.md#multi-client-setup-shared-server-via-streamable-http) section in the README.
 
 ### SSE server won't start
 
