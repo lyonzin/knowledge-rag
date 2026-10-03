@@ -110,7 +110,7 @@ class TestBM25StaleChunkIdSkipped:
 
         o.collection = MagicMock()
         # Semantic search returns no hits — forces BM25-only path through
-        # the branch that calls collection.get() per chunk_id.
+        # the branch that hydrates BM25-only IDs in one collection.get().
         o.collection.query.return_value = {
             "ids": [[]],
             "documents": [[]],
@@ -119,14 +119,12 @@ class TestBM25StaleChunkIdSkipped:
         }
 
         def fake_get(ids, include):
-            # Note: collection.get() returns flat lists (one entry per id),
-            # NOT nested like collection.query(). The server code at
-            # server.py:1545-1551 indexes with [0] — matches Chroma 1.4+ shape.
-            if ids == ["stale_chunk_id"]:
-                # Real Chroma 1.4+ behavior for unknown ids: empty lists,
-                # no exception.
-                return {"documents": [], "metadatas": []}
+            # Chroma returns only found IDs; a missing first requested ID
+            # must not shift the valid document onto the stale ID.
+            if "valid_chunk_id" not in ids:
+                return {"ids": [], "documents": [], "metadatas": []}
             return {
+                "ids": ["valid_chunk_id"],
                 "documents": ["valid content"],
                 "metadatas": [
                     {
@@ -178,6 +176,8 @@ class TestBM25StaleChunkIdSkipped:
         assert len(results) == 1, f"expected only valid chunk to survive, got {results}"
         assert results[0]["content"] == "valid content"
         assert results[0]["source"] == "valid.md"
+        orch.collection.get.assert_called_once()
+        assert set(orch.collection.get.call_args.kwargs["ids"]) == {"stale_chunk_id", "valid_chunk_id"}
         # Hard contract: no empty-content entries may ever leak through.
         assert all(r["content"] for r in results), "stale BM25 chunk_id must be skipped, not emitted with empty content"
 

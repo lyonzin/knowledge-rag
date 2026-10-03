@@ -231,19 +231,15 @@ def test_add_document_rejects_escape(orch, corpus, tmp_path):
     orch._index_new_file.assert_not_called()
 
 
-@pytest.mark.xfail(
-    reason="integration with MCP tools pending v4.6.0 (library shipped standalone in v4.5.1)", strict=False
-)
-def test_add_document_from_file_rejects_escape(orch, corpus, tmp_path):
-    """The CLI ingest path shares the same guard."""
+def test_add_document_from_content_rejects_absolute_escape(orch, corpus, tmp_path):
+    """The actual write API rejects absolute escapes as well as traversal."""
     from mcp_server.server import KnowledgeOrchestrator
 
-    source = tmp_path / "payload.md"
-    source.write_text("payload", encoding="utf-8")
-
-    result = KnowledgeOrchestrator.add_document_from_file(orch, source, ESCAPE, "general")
+    destination = tmp_path / "outside" / "new.md"
+    result = KnowledgeOrchestrator.add_document_from_content(orch, "payload", str(destination), "general")
 
     assert "error" in result
+    assert not destination.exists()
     orch._index_new_file.assert_not_called()
 
 

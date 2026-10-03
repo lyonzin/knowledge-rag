@@ -6,8 +6,8 @@
 # Run on the whole repo manually:
 #     pre-commit run --all-files
 #
-# CI runs the same hooks via .github/workflows/quality-gate.yml so contributors
-# can never bypass them by skipping pre-commit locally.
+# CI independently runs its configured lint, security and project gates.
+# Run these local hooks too; CI does not execute every hook in this file.
 
 default_install_hook_types: [pre-commit, commit-msg]
 default_stages: [pre-commit]

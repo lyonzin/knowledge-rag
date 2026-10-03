@@ -136,6 +136,13 @@ documents:
   # Valid range: 1 to 5000 (values outside are clamped with a WARN).
   batch_size: 500
 
+  # ONNX inference micro-batch, separate from the ChromaDB write batch above.
+  # null selects CPU=32, CUDA=256, or DirectML=8 from the loaded session.
+  # A positive KNOWLEDGE_RAG_EMBED_BATCH_SIZE overrides this value; invalid
+  # environment values are ignored. Values above 512 are clamped.
+  # Lower this value if indexing consumes too much RAM/VRAM.
+  embed_batch_size: null
+
   # parallel_workers — Opt-in threading around ChromaDB batch adds.
   # Default 1 = single-threaded = safe on all platforms.
   #
@@ -210,23 +217,21 @@ models:
     passage_prefix: ""
 
     # GPU acceleration mode (v4.8.0+):
-    #   "auto"  → probe CUDA at startup; use if ready, fall back to CPU (default)
+    #   "auto"  → probe CUDA at first embedding; use if ready, fall back to CPU (default)
     #   "true"  → force CUDA; if not ready, log WARN and fall back to CPU
     #   "false" → never probe; runs on CPU with zero startup overhead
     #
     # Legacy bool `gpu: true/false` continues to work — it is normalized to the
     # string form internally, so old configs keep behaving exactly the same.
     #
-    # GPU dependency chain (all installed via pip in the same venv):
-    #   1. onnxruntime-gpu, CUDA 12 variant (CUDA 13 is NOT supported by FastEmbed):
-    #        pip install onnxruntime-gpu \
-    #          --extra-index-url \
-    #          https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/
-    #   2. NVIDIA runtime libs (pulled by pip, no system driver rewrite):
-    #        pip install nvidia-cudnn-cu12 nvidia-cublas-cu12 nvidia-cuda-runtime-cu12 \
-    #          nvidia-cufft-cu12 nvidia-curand-cu12 nvidia-cusolver-cu12 \
-    #          nvidia-cusparse-cu12 nvidia-nvjitlink-cu12 nvidia-cuda-nvrtc-cu12
-    #   3. Host: NVIDIA driver >= 525 (for CUDA 12). cuDNN 9 comes with nvidia-cudnn-cu12.
+    # CUDA requires a matching ONNX Runtime build, NVIDIA runtime libraries,
+    # and host driver. Validate these in an isolated environment first.
+    # Keep only one ONNX Runtime distribution in that environment; CPU/GPU
+    # wheels share an import namespace. A provider being listed does not prove
+    # the embedding model executes on the GPU. See docs/gpu-setup.md.
+    # "directml" opts into experimental Windows DirectML on an explicit
+    # DXGI device_id. Runtime safety options are checked and Run is serialized.
+    # auto still selects only CUDA/CPU. Linux MIGraphX/macOS CoreML are not selected.
     #
     # Verify readiness manually without loading the embedding model:
     #   python -c "from mcp_server.server import FastEmbedEmbeddings; \
@@ -235,6 +240,9 @@ models:
     #
     # Full setup guide + troubleshooting: docs/gpu-setup.md
     gpu: "auto"
+    # Required only for DirectML. Use the verified DXGI EnumAdapters ordinal;
+    # do not assume 0 or 1 is AMD. Missing/invalid values fall back to CPU.
+    device_id: null
 
   # Reranker — re-scores search results for better accuracy.
   # Adds ~50-100ms per query but significantly improves result quality.

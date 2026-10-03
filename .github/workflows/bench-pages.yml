@@ -71,6 +71,14 @@ jobs:
           echo "Site contents:"
           ls -la site/
 
+      - name: Preserve raw timings and RSS byte samples
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: benchmark-raw-measurements
+          path: bench-current.json
+          if-no-files-found: warn
+
       - uses: actions/upload-artifact@v7
         with:
           name: bench-dashboard

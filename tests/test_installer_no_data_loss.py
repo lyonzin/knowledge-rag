@@ -296,31 +296,52 @@ def test_empty_config_creates_only_target_key(tmp_path):
     assert install.SERVER_NAME in data["mcpServers"]
 
 
-def test_invalid_json_leaves_target_untouched(tmp_path):
+@pytest.mark.parametrize("broken_content", ["{ this is not valid json", "", "[]", "null", '{"mcpServers": []}'])
+def test_invalid_json_leaves_target_untouched(tmp_path, broken_content):
     """If the target contains invalid JSON, we refuse to write over it."""
     client = next(c for c in install.CLIENTS if c.key == "claude-code")
     target = tmp_path / "broken.json"
-    broken_content = "{ this is not valid json"
     target.write_text(broken_content, encoding="utf-8")
     client.path_fn = lambda t=target: t
 
-    # `_read_json` returns None on JSONDecodeError, so the register call
-    # treats the file as empty and writes a fresh dict. That's the current
-    # documented behavior; here we lock it in so a future refactor can't
-    # silently start clobbering user data without an intentional decision.
-    #
-    # We ALSO verify no backup is created for a file we couldn't read
-    # (there was nothing safe to back up).
-    install.register_client(
+    before = target.read_bytes()
+    changed, message = install.register_client(
         client,
         install_path=tmp_path / "install",
         venv_python=tmp_path / "install" / "venv" / "bin" / "python",
         dry_run=False,
     )
-    # After the write, the file must be valid JSON containing only the target key.
-    reloaded = json.loads(target.read_text(encoding="utf-8"))
-    assert set(reloaded.keys()) == {"mcpServers"}
-    assert install.SERVER_NAME in reloaded["mcpServers"]
+    assert changed is False
+    assert "untouched" in message
+    assert target.read_bytes() == before
+    assert not target.with_suffix(target.suffix + install.BACKUP_SUFFIX).exists()
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_windows_utf8_bom_config_preserves_siblings(tmp_path):
+    """Windows editors can add a UTF-8 BOM to otherwise valid JSON."""
+    client, target = _prepare(tmp_path, "claude-code", {"theme": "dark"})
+    target.write_text('{"theme": "dark"}', encoding="utf-8-sig")
+    before = target.read_bytes()
+    changed, _ = install.register_client(client, tmp_path, tmp_path / "python", dry_run=False)
+    assert changed is True
+    assert json.loads(target.read_text(encoding="utf-8"))["theme"] == "dark"
+    assert target.with_suffix(target.suffix + install.BACKUP_SUFFIX).read_bytes() == before
+
+
+def test_failed_replace_preserves_target_and_cleans_temporary_file(tmp_path, monkeypatch):
+    """A denied atomic rename must not leak client credentials in a temp file."""
+    client, target = _prepare(tmp_path, "claude-code", _mcp_servers_fixture())
+    before = target.read_bytes()
+
+    def deny_replace(*args):
+        raise PermissionError("file busy")
+
+    monkeypatch.setattr(install.os, "replace", deny_replace)
+    with pytest.raises(PermissionError, match="file busy"):
+        install.register_client(client, tmp_path, tmp_path / "python", dry_run=False)
+    assert target.read_bytes() == before
+    assert list(tmp_path.glob("*.tmp")) == []
 
 
 def test_atomic_write_replaces_target(tmp_path, monkeypatch):

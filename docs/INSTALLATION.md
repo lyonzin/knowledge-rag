@@ -15,7 +15,7 @@
 
 ### Prerequisites
 
-- Python 3.11+
+- Python 3.11–3.13, the versions covered by the release CI matrix
 - Claude Code CLI
 - *…or any other MCP client (Claude Desktop, Cursor, VS Code, Antigravity, opencode, Windsurf) — see [Use with other MCP clients](#use-with-other-mcp-clients)*
 - ~200MB disk for model cache (auto-downloaded on first run)
@@ -23,49 +23,15 @@
 
 ### GPU Acceleration
 
-GPU mode accelerates embedding generation during indexing and search. It requires an NVIDIA GPU with CUDA 12 support. No GPU? No problem — the server runs on CPU by default and GPU is entirely optional.
+The default `models.embedding.gpu: "auto"` tries NVIDIA CUDA on the **first embedding request**, then falls back to CPU if the probe or CUDA model load fails. Set `gpu: "false"` to skip GPU probing. CPU works on Windows, Linux, and macOS. Windows AMD users can opt into experimental `gpu: "directml"` with an explicit DXGI `device_id`; see the [tested setup and safety checks](gpu-setup.md#amd-and-apple-gpu-status). Linux AMD and Apple GPU providers are not selected.
 
-**Requirements:**
+Use the [GPU setup guide](gpu-setup.md) before installing GPU packages. As verified on **2026-10-03**, ONNX Runtime 1.27+ wheels from PyPI default to CUDA 13, while this project's `[gpu]` extra targets CUDA 12 with `onnxruntime-gpu>=1.21,<1.27`, matching runtime libraries, and cuDNN 9. Create an isolated GPU environment and check its driver/runtime compatibility.
 
-| Component | Minimum | How to check / get it |
-|-----------|---------|----------------------|
-| NVIDIA GPU (Turing+) | RTX 20xx / 30xx / 40xx / 50xx, or Tesla T4+ | `nvidia-smi` |
-| NVIDIA Driver | ≥ 525 | `nvidia-smi` — [nvidia.com/drivers](https://www.nvidia.com/drivers) |
-| CUDA 12 runtime | Provided by pip packages below | Automatic |
+The extra includes eight NVIDIA CUDA 12 packages. It can also pull in the CPU `onnxruntime` distribution through transitive dependencies; CPU/GPU wheels share a module namespace. The guide documents this packaging limitation and the controlled runtime substitution needed in a separate environment. Installing the extra alone or seeing CUDA in `get_available_providers()` does not prove GPU inference works.
 
-**Setup (2 steps):**
+After an actual embedding, look for the stderr banner and inspect the loaded session's providers. The automatic ONNX micro-batch is CPU=32, CUDA=256, or DirectML=8 based on the actual session; override with `documents.embed_batch_size` or a positive `KNOWLEDGE_RAG_EMBED_BATCH_SIZE` (maximum 512). This is independent of ChromaDB's write batch.
 
-```bash
-# 1. Install GPU dependencies (onnxruntime-gpu + all CUDA 12 runtime DLLs)
-pip install knowledge-rag[gpu]
-
-# 2. Enable in config.yaml
-# models:
-#   embedding:
-#     gpu: true
-```
-
-The `[gpu]` extra installs `onnxruntime-gpu` plus 7 NVIDIA CUDA 12 packages (`cublas`, `cudnn`, `cuda-runtime`, `cufft`, `cusparse`, `cusolver`, `curand`, `nvjitlink`) so you don't need a full CUDA Toolkit install.
-
-**Verify GPU is active:**
-
-On server startup, look for the GPU status banner:
-```
-============================================================
-  GPU STATUS: ACTIVE
-  Provider:   CUDAExecutionProvider
-  Device:     NVIDIA GeForce RTX 3080 Ti
-  VRAM:       12.0 GB
-============================================================
-```
-
-Or programmatically:
-```bash
-python -c "import onnxruntime; print(onnxruntime.get_available_providers())"
-# Should include: 'CUDAExecutionProvider'
-```
-
-> **Fallback**: If CUDA is unavailable at runtime (wrong driver, missing DLLs, no GPU), the server falls back to CPU automatically with a `[WARN]` log — it never crashes. The `gpu: true` config is a preference, not a requirement.
+GPU selection here controls embeddings. Reranking uses a separate FastEmbed session with upstream defaults. If CUDA fails, CPU fallback keeps the same embedding model; if CPU loading or inference also fails, the server reports the error rather than manufacturing vectors. See the guide for real-hardware validation limits and AMD/CoreML status.
 
 ### Install Methods
 
@@ -81,17 +47,29 @@ claude mcp add knowledge-rag -s user -- npx -y knowledge-rag
 
 That's it. On first run, `npx` creates a venv at `~/.knowledge-rag/`, installs the PyPI package, and starts the MCP server. Subsequent runs reuse the cached venv.
 
-#### Option B: One-line installer
+#### Option B: Installer from a source checkout
+
+The shell wrappers delegate to the adjacent `install.py`; downloading only a
+wrapper and piping it into a shell does not provide that file. Clone the
+repository first:
 
 ```bash
 # Linux/macOS:
-curl -fsSL https://raw.githubusercontent.com/lyonzin/knowledge-rag/master/install.sh | bash
-
-# Windows (PowerShell):
-irm https://raw.githubusercontent.com/lyonzin/knowledge-rag/master/install.ps1 | iex
+git clone https://github.com/lyonzin/knowledge-rag.git ~/knowledge-rag
+cd ~/knowledge-rag
+bash install.sh --from-source
 ```
 
-Then configure Claude Code:
+```powershell
+# Windows:
+git clone https://github.com/lyonzin/knowledge-rag.git "$HOME/knowledge-rag"
+Set-Location "$HOME/knowledge-rag"
+.\install.ps1 -SkipPython --from-source
+```
+
+The installer detects clients and prepares their configurations. Use
+`python install.py --help` to select clients or inspect dry-run options.
+If configuring Claude Code manually:
 
 ```bash
 claude mcp add knowledge-rag -s user -- ~/knowledge-rag/venv/bin/python -m mcp_server.server

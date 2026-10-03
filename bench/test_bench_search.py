@@ -38,7 +38,7 @@ def test_bench_bm25_query_1k_corpus(benchmark, bm25_index):
         return bm25_index.search("kerberoast escalation", top_k=10)
 
     result = benchmark(query)
-    assert isinstance(result, list)
+    assert len(result) == 10
 
 
 def test_bench_query_cache_hot(benchmark):
@@ -52,7 +52,7 @@ def test_bench_query_cache_hot(benchmark):
         return cache.get("hot-key", 5, None, 0.3)
 
     result = benchmark(hit)
-    assert result is not None
+    assert result == [{"content": "cached"}]
 
 
 def test_bench_query_cache_miss(benchmark):

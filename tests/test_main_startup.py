@@ -13,6 +13,8 @@ import time
 from contextlib import contextmanager
 from unittest.mock import MagicMock
 
+import pytest
+
 from mcp_server import server
 
 
@@ -154,3 +156,39 @@ def test_main_reaches_transport_under_deadline(monkeypatch):
         f"main() took {elapsed:.2f}s to reach _run_transport — expected < 0.5s. "
         f"start_reindex_background likely became synchronous and blocked the handshake."
     )
+
+
+@pytest.mark.parametrize("args", [["--transport", "streamable-http"], ["--transport=sse"]])
+def test_cli_transport_reaches_config_before_startup_components(monkeypatch, args):
+    from mcp_server import metrics, preflight
+
+    _patch_startup_side_effects(monkeypatch)
+    monkeypatch.setattr(server.sys, "argv", ["knowledge-rag", *args])
+    monkeypatch.setattr(server.config, "transport", "stdio")
+    monkeypatch.setattr(server.config, "metrics_enabled", True)
+    monkeypatch.delenv("KNOWLEDGE_RAG_SINGLE_INSTANCE", raising=False)
+    observed = []
+    expected = "sse" if "=" in args[0] else "streamable-http"
+    monkeypatch.setattr(preflight, "run_preflight", lambda: observed.append(("preflight", server.config.transport)))
+
+    def get_orchestrator():
+        observed.append(("orchestrator", server.config.transport))
+        return _mock_orchestrator_populated()
+
+    monkeypatch.setattr(server, "get_orchestrator", get_orchestrator)
+    monkeypatch.setattr(
+        metrics, "start_metrics_server", lambda port: observed.append(("metrics", server.config.transport))
+    )
+    monkeypatch.setattr(server, "_run_transport", lambda transport: observed.append(("transport", transport)))
+    server.main()
+    assert observed == [(component, expected) for component in ("preflight", "orchestrator", "metrics", "transport")]
+
+
+def test_invalid_cli_transport_fails_before_opening_database(monkeypatch):
+    _patch_startup_side_effects(monkeypatch)
+    monkeypatch.setattr(server.sys, "argv", ["knowledge-rag", "--transport", "invalid"])
+    orchestrator = MagicMock()
+    monkeypatch.setattr(server, "get_orchestrator", orchestrator)
+    with pytest.raises(ValueError, match="Unknown transport"):
+        server.main()
+    orchestrator.assert_not_called()

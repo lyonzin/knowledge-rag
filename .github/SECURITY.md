@@ -9,7 +9,7 @@ This file exists so GitHub's automatic "Report a vulnerability" link — which s
 ## Quick links
 
 - **Report privately (preferred):** https://github.com/lyonzin/knowledge-rag/security/advisories/new
-- **Email:** lyonzin@users.noreply.github.com
+- GitHub's `users.noreply.github.com` address is not a security-report mailbox; use the private reporting link above.
 - **Response SLA:** 48 hours acknowledgement, 90-day coordinated disclosure — see [SECURITY.md § What to expect](../SECURITY.md#what-to-expect)
 - **Threat model:** [SECURITY.md § Threat Model](../SECURITY.md#threat-model)
 - **OpenSSF Best Practices self-assessment:** [openssf-best-practices.md](openssf-best-practices.md)

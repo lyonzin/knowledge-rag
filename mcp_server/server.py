@@ -34,9 +34,10 @@ import sys
 import threading
 import time
 from collections import OrderedDict, deque
+from copy import copy, deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 # ChromaDB
@@ -60,8 +61,10 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 # Local imports
+from . import __version__
 from .config import config
-from .fts5_index import Fts5LexicalIndex, Fts5NotReadyError
+from .file_transaction import staged_text_file
+from .fts5_index import Fts5LexicalIndex, Fts5MigrationError, Fts5NotReadyError
 from .ingestion import Document, DocumentParser
 from .metrics import (
     FAST_PATH_ERRORS_TOTAL,
@@ -74,6 +77,7 @@ from .metrics import (
     get_metrics,
     instrument,
 )
+from .publication import PublicationLock, collection_publication, collection_reader
 from .query_router import QueryRouter
 from .ratelimit import rate_limited
 from .security import (
@@ -101,13 +105,69 @@ class QueryCache:
         ttl_seconds: Time-to-live for cache entries in seconds (default: 300)
     """
 
+    _ATOMIC_TYPES = frozenset((str, int, float, bool, bytes, type(None), complex, range))
+
     def __init__(self, max_size: int = 100, ttl_seconds: int = 300):
         self.max_size = max_size
         self.ttl_seconds = ttl_seconds
-        self._cache: OrderedDict[str, Tuple[float, Any]] = OrderedDict()
+        self._cache: OrderedDict[Tuple[str, int, Optional[str], float, str], Tuple[float, Any, bool]] = OrderedDict()
         self._lock = threading.Lock()
         self._hits = 0
         self._misses = 0
+        self._generation = 0
+
+    @property
+    def generation(self) -> int:
+        """Capture invalidation state before a query reads or computes results."""
+        with self._lock:
+            return self._generation
+
+    @staticmethod
+    def _clone_result(value: Any, memo: Optional[Dict[int, Any]] = None) -> Any:
+        """Copy mutable result containers while sharing immutable document text."""
+        kind = type(value)
+        atomic = QueryCache._ATOMIC_TYPES
+        if kind in atomic:
+            return value
+        if kind is not list and kind is not dict:
+            return deepcopy(value, memo)
+        if memo is None:
+            memo = {}
+        value_id = id(value)
+        cached = memo.get(value_id)
+        if cached is not None:
+            return cached
+        cloned = value.copy() if kind is list else {}
+        memo[value_id] = cloned
+        if kind is list:
+            for index, child in enumerate(value):
+                if type(child) not in atomic:
+                    cloned[index] = QueryCache._clone_result(child, memo)
+        else:
+            for key, child in value.items():
+                copied_key = key if type(key) in atomic else deepcopy(key, memo)
+                cloned[copied_key] = child if type(child) in atomic else QueryCache._clone_result(child, memo)
+        return cloned
+
+    @staticmethod
+    def _has_flat_rows(value: Any) -> bool:
+        """Prove once that shallow row copies fully isolate a private snapshot."""
+        if type(value) is not list:
+            return False
+        seen = set()
+        atomic = QueryCache._ATOMIC_TYPES
+        for row in value:
+            if type(row) is not dict or id(row) in seen:
+                return False
+            seen.add(id(row))
+            if any(type(key) not in atomic or type(child) not in atomic for key, child in row.items()):
+                return False
+        return True
+
+    @staticmethod
+    def _copy_flat_rows(value: List[Dict[Any, Any]]) -> List[Dict[Any, Any]]:
+        """Copy proven distinct rows; their exact atomic keys/values are immutable."""
+        return [row.copy() for row in value]
 
     def _make_key(
         self,
@@ -116,15 +176,14 @@ class QueryCache:
         category: Optional[str],
         hybrid_alpha: float,
         search_method: str = "auto",
-    ) -> str:
+    ) -> Tuple[str, int, Optional[str], float, str]:
         """Generate cache key from query parameters.
 
-        ``search_method`` defaults to ``"auto"`` so calls that omit it hash the
-        same as pre-v4.8.2 callers (backward compat for internal callers not
-        yet aware of the FTS5 fast-path dispatch).
+        Structured keys preserve parameter boundaries and distinguish ``None``
+        from the literal category ``"None"``. Omitted search methods retain
+        the same key as an explicit ``"auto"``.
         """
-        raw = f"{query}|{max_results}|{category}|{hybrid_alpha}|{search_method}"
-        return hashlib.sha256(raw.encode()).hexdigest()[:24]
+        return query, max_results, category, hybrid_alpha, search_method
 
     def get(
         self,
@@ -138,17 +197,19 @@ class QueryCache:
         key = self._make_key(query, max_results, category, hybrid_alpha, search_method)
 
         with self._lock:
-            if key in self._cache:
-                timestamp, result = self._cache[key]
-                if time.time() - timestamp < self.ttl_seconds:
-                    self._cache.move_to_end(key)
-                    self._hits += 1
-                    return result
-                else:
-                    del self._cache[key]
-
-            self._misses += 1
-            return None
+            entry = self._cache.get(key)
+            if entry is None:
+                self._misses += 1
+                return None
+            timestamp, result, flat_rows = entry
+            if time.time() - timestamp >= self.ttl_seconds:
+                del self._cache[key]
+                self._misses += 1
+                return None
+            self._cache.move_to_end(key)
+            self._hits += 1
+        # Cached snapshots are private: copying them needs no cache-wide lock.
+        return self._copy_flat_rows(result) if flat_rows else self._clone_result(result)
 
     def put(
         self,
@@ -158,23 +219,35 @@ class QueryCache:
         hybrid_alpha: float,
         result: Any,
         search_method: str = "auto",
+        *,
+        expected_generation: Optional[int] = None,
     ) -> None:
         """Store result in cache.
 
         ``search_method`` is appended (with default ``"auto"``) rather than
         inserted before ``result`` so pre-v4.8.2 positional callers keep
         working — the FTS5 dispatch passes it as a keyword argument.
+        Queries pass ``expected_generation`` to discard computations started
+        before invalidation, including invalidation during snapshot copying.
         """
+        if self.max_size <= 0:
+            return
         key = self._make_key(query, max_results, category, hybrid_alpha, search_method)
+        snapshot = self._clone_result(result)
+        flat_rows = self._has_flat_rows(snapshot)
         with self._lock:
-            if len(self._cache) >= self.max_size:
+            if expected_generation is not None and expected_generation != self._generation:
+                return
+            if key not in self._cache and len(self._cache) >= self.max_size:
                 self._cache.popitem(last=False)
-            self._cache[key] = (time.time(), result)
+            self._cache[key] = (time.time(), snapshot, flat_rows)
+            self._cache.move_to_end(key)
 
     def invalidate(self) -> None:
         """Clear entire cache (call after reindex)"""
         with self._lock:
             self._cache.clear()
+            self._generation += 1
 
     def stats(self) -> Dict[str, Any]:
         """Return cache statistics"""
@@ -278,7 +351,7 @@ class FastEmbedEmbeddings:
                     os.environ["PATH"] = p + os.pathsep + os.environ.get("PATH", "")
                     added.append(lib.split("/")[1])
         if added:
-            print(f"[INFO] CUDA DLL paths added for: {', '.join(dict.fromkeys(added))}")
+            print(f"[INFO] CUDA DLL paths added for: {', '.join(dict.fromkeys(added))}", file=sys.stderr)
 
     @staticmethod
     def verify_gpu_readiness() -> GPUStatus:
@@ -411,25 +484,22 @@ class FastEmbedEmbeddings:
         try:
             import onnxruntime as ort
 
-            # Create a trivial ONNX graph (identity op) to test CUDA session
-            # This validates that the CUDA EP can actually initialize
+            # A valid Add graph verifies both session creation and inference.
+            # IR 7 / opset 13 works with the oldest supported ONNX runtimes.
             from onnxruntime import InferenceSession, SessionOptions
 
             opts = SessionOptions()
             opts.log_severity_level = 3  # suppress verbose ORT logs
 
-            # Build minimal ONNX model bytes: single Identity node
-            # Using raw protobuf bytes to avoid onnx dependency
-            # Graph: input(float[1]) -> Identity -> output(float[1])
+            # Serialized ModelProto: float[1] x -> Add(x, x) -> float[1] y.
+            # Keeping a tiny fixture avoids an optional dependency on `onnx`.
             _MINI_ONNX = (
-                b"\x08\x07\x12\x0eonnx_gpu_probe\x1a\x01\x30"
-                b"\x22\x05onnx:"
-                b"\x3a\x26\x0a\x05\x0a\x01x\x12\x01y\x1a\x08"
-                b"Identity\x22\x00"
-                b"\x0a\x0btest_domain"
-                b"\x12\x14\x0a\x01x\x0a\x01y"
-                b"\x1a\x0c\x0a\x01x\x12\x07\x0a\x05\x08\x01"
-                b"\x12\x01\x08\x01"
+                b"\x08\x07\x12\x0dknowledge-rag\x3a\x3d"
+                b"\x0a\x0e\x0a\x01x\x0a\x01x\x12\x01y\x22\x03Add"
+                b"\x12\x09gpu_probe"
+                b"\x5a\x0f\x0a\x01x\x12\x0a\x0a\x08\x08\x01\x12\x04\x0a\x02\x08\x01"
+                b"\x62\x0f\x0a\x01y\x12\x0a\x0a\x08\x08\x01\x12\x04\x0a\x02\x08\x01"
+                b"\x42\x02\x10\x0d"
             )
 
             try:
@@ -440,17 +510,17 @@ class FastEmbedEmbeddings:
                 )
                 active = sess.get_providers()
                 if "CUDAExecutionProvider" in active:
+                    result = sess.run(None, {"x": np.ones(1, dtype=np.float32)})
+                    if len(result) != 1 or not np.array_equal(result[0], np.array([2.0], dtype=np.float32)):
+                        raise RuntimeError("CUDA session probe returned invalid output")
                     status.available = True
                     status.provider = "CUDAExecutionProvider"
                 else:
                     status.fallback_reason = (
-                        f"CUDA session created but active provider is {active[0]}. ORT silently fell back to CPU."
+                        f"CUDA session created but active providers are {active}. ORT silently fell back to CPU."
                     )
-            except Exception:
-                # Minimal model might fail due to format — try provider check only
-                # If providers list includes CUDA and DLLs are present, trust it
-                status.available = True
-                status.provider = "CUDAExecutionProvider"
+            except Exception as exc:
+                status.fallback_reason = f"CUDA session probe failed: {exc}"
 
         except ImportError as exc:
             status.fallback_reason = f"numpy or onnxruntime not available: {exc}"
@@ -466,66 +536,67 @@ class FastEmbedEmbeddings:
 
         Called on EVERY startup path (v4.8.0+), including CPU-only and
         fallback, so operators always see which mode ran and why. Prints
-        to stderr (print() is redirected there during init).
+        explicitly to stderr so background loading cannot corrupt MCP stdio.
 
         ``status`` is None when gpu_mode="false" (no probe performed).
         ``mode`` is one of forced-cpu | forced-cuda | forced-cuda-fallback
-        | auto-cuda | auto-cpu-fallback.
+        | auto-cuda | auto-cpu-fallback | directml | directml-cpu-fallback.
         """
-        active = status is not None and status.available and mode in ("auto-cuda", "forced-cuda")
-        print("")
-        print("=" * 60)
+        active = status is not None and status.available and mode in ("auto-cuda", "forced-cuda", "directml")
+        print("", file=sys.stderr)
+        print("=" * 60, file=sys.stderr)
         if active:
             FastEmbedEmbeddings._print_gpu_active(status, mode)
         else:
             FastEmbedEmbeddings._print_gpu_unavailable(status, mode)
-        print("=" * 60)
-        print("")
+        print("=" * 60, file=sys.stderr)
+        print("", file=sys.stderr)
 
     @staticmethod
     def _print_gpu_active(status: GPUStatus, mode: str) -> None:
         """Emit the ACTIVE branch of the GPU banner (probe passed + provider used)."""
-        print("  GPU STATUS: ACTIVE")
-        print(f"  Provider:   {status.provider}")
+        print("  GPU STATUS: ACTIVE", file=sys.stderr)
+        print(f"  Provider:   {status.provider}", file=sys.stderr)
         if status.device_name:
-            print(f"  Device:     {status.device_name}")
+            print(f"  Device:     {status.device_name}", file=sys.stderr)
         if status.vram_mb > 0:
             vram_display = f"{status.vram_mb / 1024:.1f} GB" if status.vram_mb >= 1024 else f"{status.vram_mb} MB"
-            print(f"  VRAM:       {vram_display}")
-        print(f"  Mode:       {mode}")
+            print(f"  VRAM:       {vram_display}", file=sys.stderr)
+        print(f"  Mode:       {mode}", file=sys.stderr)
 
     @staticmethod
     def _print_gpu_unavailable(status: Optional[GPUStatus], mode: str) -> None:
         """Emit the UNAVAILABLE branch (forced CPU, probe failed, or load fallback)."""
-        print("  GPU STATUS: UNAVAILABLE — running on CPU")
+        print("  GPU STATUS: UNAVAILABLE — running on CPU", file=sys.stderr)
         if status is not None and status.fallback_reason:
-            print(f"  Reason:     {status.fallback_reason}")
+            print(f"  Reason:     {status.fallback_reason}", file=sys.stderr)
         if status is not None and status.missing_deps:
-            print("  Missing:")
+            print("  Missing:", file=sys.stderr)
             for dep in status.missing_deps:
-                print(f"    - {dep}")
-        print(f"  Mode:       {mode}")
+                print(f"    - {dep}", file=sys.stderr)
+        print(f"  Mode:       {mode}", file=sys.stderr)
         if mode != "forced-cpu":
-            print("  Hint:       pip install onnxruntime-gpu --extra-index-url \\")
-            print(
-                "              https://aiinfra.pkgs.visualstudio.com/PublicPackages"
-                "/_packaging/onnxruntime-cuda-12/pypi/simple/"
-            )
-            print("              plus nvidia-cudnn-cu12, nvidia-cublas-cu12, nvidia-cuda-runtime-cu12")
+            print("  Setup:      https://github.com/lyonzin/knowledge-rag/blob/main/docs/gpu-setup.md", file=sys.stderr)
 
     def __init__(self, model: str = None):
         self.model_name = model or config.embedding_model
         self._dim = config.embedding_dim
         # Build kwargs once; defer the heavy TextEmbedding(**kwargs) call to first use.
         self._init_kwargs = {"model_name": self.model_name, "cache_dir": str(config.models_cache_dir)}
-        # v4.8.0+: tri-state mode drives the load routing. Legacy bool alias kept for BC.
+        # Provider mode drives lazy loading; the legacy bool alias remains available.
         self._gpu_mode = getattr(config, "gpu_mode", "auto")
+        self._gpu_device_id = getattr(config, "gpu_device_id", None)
         self._gpu = bool(config.gpu_acceleration)
         self._model: Optional[TextEmbedding] = None
         self._load_lock = threading.Lock()
         # Sticky failure flag: once load fails, subsequent calls re-raise immediately
         # instead of looping through download/retry. Same pattern as CrossEncoderReranker.
         self._load_failed: Optional[Exception] = None
+        # v4.9.3 (GH #224): the active ONNX provider is captured when the model
+        # loads so `_embed` can dispatch the right batch_size (CPU=32 avoids a
+        # ~500MB BFC arena allocation; CUDA=256 keeps VRAM throughput).
+        self._active_provider: Optional[str] = None
+        self._inference_lock = threading.Lock()  # DirectML forbids concurrent Run on one session.
 
     def _load_model(self) -> None:
         """Load the ONNX model on demand. Idempotent and thread-safe.
@@ -533,7 +604,8 @@ class FastEmbedEmbeddings:
         Routes via config.gpu_mode (v4.8.0+):
           "false" — CPU-only, no probe (zero startup overhead).
           "auto"  — probe verify_gpu_readiness(); CUDA if ready, CPU otherwise.
-          "true"  — force CUDA; fall back to CPU only if actual load fails.
+          "true"  — request CUDA; fall back if its probe or model load fails.
+          "directml" — explicit Windows adapter with validated session options.
 
         Raises:
             EmbeddingModelLoadError: sticky failure — subsequent calls re-raise
@@ -568,6 +640,8 @@ class FastEmbedEmbeddings:
             self._load_forced_cpu()
         elif mode == "auto":
             self._load_auto()
+        elif mode == "directml":
+            self._load_directml()
         else:
             self._load_forced_cuda()
 
@@ -583,10 +657,12 @@ class FastEmbedEmbeddings:
         if gpu_status.available:
             try:
                 self._load_with_providers(["CUDAExecutionProvider", "CPUExecutionProvider"], label="GPU auto")
-                self._print_gpu_banner(status=gpu_status, mode="auto-cuda")
+                self._report_cuda_load(gpu_status, "auto-cuda")
                 return
-            except (ValueError, RuntimeError) as e:
-                print(f"[WARN] GPU probe passed but load failed ({e}); loading on CPU...")
+            except Exception as e:
+                gpu_status.available = False
+                gpu_status.fallback_reason = f"CUDA model load failed: {e}"
+                print(f"[WARN] GPU probe passed but load failed ({e}); loading on CPU...", file=sys.stderr)
         self._load_with_providers(["CPUExecutionProvider"], label="CPU fallback")
         self._print_gpu_banner(status=gpu_status, mode="auto-cpu-fallback")
 
@@ -597,22 +673,115 @@ class FastEmbedEmbeddings:
         if gpu_status.available:
             try:
                 self._load_with_providers(["CUDAExecutionProvider", "CPUExecutionProvider"], label="GPU forced")
-                self._print_gpu_banner(status=gpu_status, mode="forced-cuda")
+                self._report_cuda_load(gpu_status, "forced-cuda")
                 return
-            except (ValueError, RuntimeError) as e:
-                print(f"[WARN] gpu: true but CUDA load failed ({e}); loading on CPU...")
+            except Exception as e:
+                gpu_status.available = False
+                gpu_status.fallback_reason = f"CUDA model load failed: {e}"
+                print(f"[WARN] gpu: true but CUDA load failed ({e}); loading on CPU...", file=sys.stderr)
         else:
-            print(f"[WARN] gpu: true but GPU not ready ({gpu_status.fallback_reason}); loading on CPU")
+            print(f"[WARN] gpu: true but GPU not ready ({gpu_status.fallback_reason}); loading on CPU", file=sys.stderr)
         self._load_with_providers(["CPUExecutionProvider"], label="CPU fallback")
         self._print_gpu_banner(status=gpu_status, mode="forced-cuda-fallback")
 
-    def _load_with_providers(self, providers: List[str], label: str) -> None:
-        """Instantiate TextEmbedding with the given ONNX providers list."""
+    def _report_cuda_load(self, status: GPUStatus, mode: str) -> None:
+        """Report the real model session, which may differ from the probe."""
+        status.available = self._active_provider == "CUDA"
+        status.provider = "CUDAExecutionProvider" if status.available else "CPUExecutionProvider"
+        if not status.available:
+            status.fallback_reason = "Embedding session did not activate CUDA; using the CPU batch size."
+            mode = "auto-cpu-fallback" if mode == "auto-cuda" else "forced-cuda-fallback"
+        self._print_gpu_banner(status=status, mode=mode)
+
+    def _directml_providers(self) -> List[Any]:
+        """Require Windows, a real DirectML runtime, and an explicit adapter."""
+        if platform.system() != "Windows":
+            raise RuntimeError("DirectML is available only on Windows")
+        if type(self._gpu_device_id) is not int or not 0 <= self._gpu_device_id <= 0x7FFFFFFF:
+            raise ValueError("DirectML requires a nonnegative models.embedding.device_id (DXGI adapter index)")
+        import onnxruntime as ort
+
+        if "DmlExecutionProvider" not in ort.get_available_providers():
+            raise RuntimeError("DmlExecutionProvider is unavailable; use an isolated onnxruntime-directml environment")
+        return [("DmlExecutionProvider", {"device_id": self._gpu_device_id}), "CPUExecutionProvider"]
+
+    def _load_directml(self) -> None:
+        """Explicit opt-in: validate the effective session before any inference."""
+        status = GPUStatus()
+        try:
+            self._load_with_providers(self._directml_providers(), label="DirectML")
+            status.available = self._active_provider == "DirectML"
+            if status.available:
+                status.provider = "DmlExecutionProvider"
+                status.device_name = f"DXGI adapter {self._gpu_device_id}"
+                self._print_gpu_banner(status, "directml")
+                return
+            status.fallback_reason = "Embedding session did not activate DirectML; using CPU."
+        except Exception as exc:
+            status.fallback_reason = f"DirectML model load rejected: {exc}"
+        if self._model is None:
+            self._load_with_providers(["CPUExecutionProvider"], label="CPU fallback")
+        self._print_gpu_banner(status, "directml-cpu-fallback")
+
+    @staticmethod
+    def _validate_directml_session(session: Any) -> None:
+        """Fail closed if ORT did not enforce DirectML's required options."""
+        import onnxruntime as ort
+
+        options = session.get_session_options()
+        if options.enable_mem_pattern is not False or options.execution_mode != ort.ExecutionMode.ORT_SEQUENTIAL:
+            raise RuntimeError("DirectML requires enable_mem_pattern=False and ORT_SEQUENTIAL")
+
+    def _load_with_providers(self, providers: List[Any], label: str) -> None:
+        """Publish the model only after inspecting its actual ONNX session."""
         kwargs = dict(self._init_kwargs)
         kwargs["providers"] = providers
-        print(f"[INFO] Loading embedding model: {self.model_name} ({self._dim}D) [{label}]...")
-        self._model = TextEmbedding(**kwargs)
-        print(f"[INFO] Embedding model loaded successfully [{label}]")
+        print(f"[INFO] Loading embedding model: {self.model_name} ({self._dim}D) [{label}]...", file=sys.stderr)
+        model = TextEmbedding(**kwargs)
+        session = getattr(getattr(model, "model", None), "model", None)
+        active = session.get_providers() if callable(getattr(session, "get_providers", None)) else []
+        # Missing introspection is conservatively treated as CPU for batching.
+        provider = "CUDA" if "CUDAExecutionProvider" in active else "CPU"
+        if "DmlExecutionProvider" in active:
+            self._validate_directml_session(session)
+            provider = "DirectML"
+        self._active_provider = provider
+        self._model = model
+        print(f"[INFO] Embedding model loaded successfully [{self._active_provider}]", file=sys.stderr)
+
+    def _embedding_batch_size(self) -> int:
+        """Resolve bounded env > YAML > active-provider micro-batch settings."""
+        default = {"CUDA": 256, "DirectML": 8}.get(self._active_provider, 32)
+        configured = config.embed_batch_size
+        batch = configured if type(configured) is int and configured > 0 else default
+        raw = os.environ.get("KNOWLEDGE_RAG_EMBED_BATCH_SIZE")
+        if raw is not None:
+            try:
+                override = int(raw)
+                if override < 1:
+                    raise ValueError("must be positive")
+                batch = override
+            except ValueError:
+                print(f"[WARN] KNOWLEDGE_RAG_EMBED_BATCH_SIZE={raw!r} invalid; using {batch}", file=sys.stderr)
+        if batch > 512:
+            print(f"[WARN] embed_batch_size={batch} exceeds 512, clamping to 512", file=sys.stderr)
+        return min(batch, 512)
+
+    def _collect_embeddings(self, embeddings: Iterable, expected: int) -> List[List[float]]:
+        """Validate each vector as it arrives without retaining ONNX batch arrays."""
+        result = []
+        for embedding in embeddings:
+            if len(result) >= expected:
+                raise EmbeddingError(f"Embedding count mismatch: expected {expected}, got more")
+            vector = np.asarray(embedding)
+            if vector.ndim != 1 or vector.shape[0] != self._dim:
+                raise EmbeddingError(f"Embedding dim mismatch: expected ({self._dim},), got {vector.shape}")
+            if vector.dtype.kind not in "fiu" or not np.isfinite(vector).all():
+                raise EmbeddingError("Embedding contains nonnumeric or nonfinite values")
+            result.append(vector.tolist())
+        if len(result) != expected:
+            raise EmbeddingError(f"Embedding count mismatch: expected {expected}, got {len(result)}")
+        return result
 
     @staticmethod
     def _apply_prefix(texts: List[str], prefix: str) -> List[str]:
@@ -651,19 +820,17 @@ class FastEmbedEmbeddings:
             return []
 
         self._load_model()  # may raise EmbeddingModelLoadError
+        embed_batch = self._embedding_batch_size()
         try:
-            embeddings = list(self._model.embed(texts))
+            if self._gpu_mode == "directml":
+                with self._inference_lock:
+                    return self._collect_embeddings(self._model.embed(texts, batch_size=embed_batch), len(texts))
+            return self._collect_embeddings(self._model.embed(texts, batch_size=embed_batch), len(texts))
+        except EmbeddingError:
+            raise
         except Exception as exc:
             print(f"[ERROR] Embedding generation FAILED: {exc}", file=sys.stderr)
             raise EmbeddingError(f"Embedding generation failed: {exc}") from exc
-
-        # Sanity check: model returned the right number of vectors with the right dim
-        if len(embeddings) != len(texts):
-            raise EmbeddingError(f"Embedding count mismatch: expected {len(texts)}, got {len(embeddings)}")
-        result = [emb.tolist() for emb in embeddings]
-        if result and len(result[0]) != self._dim:
-            raise EmbeddingError(f"Embedding dim mismatch: expected {self._dim}, got {len(result[0])}")
-        return result
 
     def __call__(self, input: List[str]) -> List[List[float]]:
         """
@@ -737,19 +904,22 @@ class CrossEncoderReranker:
         self.model_name = model or config.reranker_model
         self._model = None  # Lazy init
         self._load_failed = False
+        self._load_lock = threading.Lock()
 
     def _ensure_model(self) -> bool:
         """Lazy initialization of cross-encoder model"""
-        if self._load_failed:
-            return False
-        if self._model is None:
-            print(f"[INFO] Loading reranker model: {self.model_name}...")
+        with self._load_lock:
+            if self._load_failed:
+                return False
+            if self._model is not None:
+                return True
+            print(f"[INFO] Loading reranker model: {self.model_name}...", file=sys.stderr)
             try:
                 self._model = TextCrossEncoder(model_name=self.model_name, cache_dir=str(config.models_cache_dir))
-                print("[INFO] Reranker model loaded successfully")
+                print("[INFO] Reranker model loaded successfully", file=sys.stderr)
             except Exception as e:
                 self._load_failed = True
-                print(f"[WARN] Reranker unavailable, using RRF order: {e}")
+                print(f"[WARN] Reranker unavailable, using RRF order: {e}", file=sys.stderr)
                 return False
         return True
 
@@ -779,7 +949,7 @@ class CrossEncoderReranker:
                 doc["reranker_score"] = float(score)
             documents.sort(key=lambda x: x.get("reranker_score", 0), reverse=True)
         except Exception as e:
-            print(f"[WARN] Reranker failed, using RRF order: {e}")
+            print(f"[WARN] Reranker failed, using RRF order: {e}", file=sys.stderr)
 
         return documents[:top_k]
 
@@ -816,6 +986,17 @@ def _metadata_path_score(query: str, metadata: Dict[str, Any]) -> float:
 # =============================================================================
 
 
+@dataclass(frozen=True, slots=True)
+class _BM25Snapshot:
+    """A published scoring generation, retained by any in-flight readers."""
+
+    ids: Tuple[str, ...]
+    inverted: Dict[str, List[Tuple[int, int]]]
+    idf: Dict[str, float]
+    doc_lengths: np.ndarray
+    avgdl: float
+
+
 class BM25Index:
     """
     BM25 keyword index with inverted-index acceleration for hybrid search.
@@ -838,6 +1019,9 @@ class BM25Index:
         self._b: float = 0.75
         self._epsilon: float = 0.25
         self._index_built: bool = False
+        self._lock = threading.RLock()
+        self._token_pool: Dict[str, str] = {}
+        self._snapshot: Optional[_BM25Snapshot] = None
 
     def _tokenize(self, text: str) -> List[str]:
         """Tokenize: lowercase, split on non-alphanumeric, emit composite + sub-tokens.
@@ -922,13 +1106,23 @@ class BM25Index:
 
     def add_documents(self, chunk_ids: List[str], texts: List[str]) -> None:
         """Add documents to the BM25 index"""
-        for chunk_id, text in zip(chunk_ids, texts):
-            self.corpus.append(text)
-            self.corpus_ids.append(chunk_id)
-            self._tokenized_corpus.append(self._tokenize(text))
+        with self._lock:
+            for chunk_id, text in zip(chunk_ids, texts):
+                tokens = self._tokenize(text)
+                # Pool ownership is local to this index, so clear/replacement
+                # releases vocabulary. Global intern() can retain strings forever.
+                tokens = [self._token_pool.setdefault(token, token) for token in tokens]
+                self.corpus.append(text)
+                self.corpus_ids.append(chunk_id)
+                self._tokenized_corpus.append(tokens)
 
     def build_index(self) -> None:
         """Build inverted index with pre-computed IDF and doc lengths."""
+        with self._lock:
+            self._build_index_locked()
+
+    def _build_index_locked(self) -> None:
+        """Build off the published generation, then expose all fields together."""
         if not self._tokenized_corpus:
             return
 
@@ -973,6 +1167,7 @@ class BM25Index:
         self._avgdl = avgdl
         self._corpus_size = corpus_size
         self._index_built = True
+        self._snapshot = _BM25Snapshot(tuple(self.corpus_ids), inverted, idf, doc_lengths, avgdl)
 
     def search(self, query: str, top_k: int = 20) -> List[Tuple[str, float]]:
         """
@@ -981,7 +1176,8 @@ class BM25Index:
         Uses inverted-index posting lists to score only documents containing
         at least one query term. Returns (chunk_id, score) sorted descending.
         """
-        if not self._index_built or not self.corpus:
+        snapshot = self._snapshot
+        if snapshot is None or top_k <= 0:
             return []
 
         expanded_query = self.expand_query(query)
@@ -991,10 +1187,11 @@ class BM25Index:
 
         k1 = self._k1
         b = self._b
-        avgdl = self._avgdl
-        doc_len = self._doc_len
-        idf_lookup = self._idf
-        inv = self._inverted_index
+        avgdl = snapshot.avgdl
+        doc_len = snapshot.doc_lengths
+        idf_lookup = snapshot.idf
+        inv = snapshot.inverted
+        corpus_ids = snapshot.ids
 
         candidate_scores: Dict[int, float] = {}
         for q in tokenized_query:
@@ -1015,7 +1212,7 @@ class BM25Index:
 
         n_candidates = len(candidate_scores)
         if n_candidates <= top_k:
-            results = [(self.corpus_ids[idx], score) for idx, score in candidate_scores.items()]
+            results = [(corpus_ids[idx], score) for idx, score in candidate_scores.items()]
             results.sort(key=lambda x: x[1], reverse=True)
             return results
 
@@ -1023,19 +1220,27 @@ class BM25Index:
         scores = np.fromiter(candidate_scores.values(), dtype=np.float64, count=n_candidates)
         partition_idx = np.argpartition(scores, -top_k)[-top_k:]
         top_indices = partition_idx[np.argsort(scores[partition_idx])[::-1]]
-        return [(self.corpus_ids[indices[i]], float(scores[i])) for i in top_indices]
+        return [(corpus_ids[indices[i]], float(scores[i])) for i in top_indices]
 
     def clear(self) -> None:
         """Clear the index"""
-        self.corpus = []
-        self.corpus_ids = []
-        self._tokenized_corpus = []
-        self._inverted_index = {}
-        self._idf = {}
-        self._doc_len = None
-        self._avgdl = 0.0
-        self._corpus_size = 0
-        self._index_built = False
+        with self._lock:
+            self._reset_corpus()
+            self._inverted_index = {}
+            self._idf = {}
+            self._doc_len = None
+            self._avgdl = 0.0
+            self._corpus_size = 0
+            self._index_built = False
+            self._snapshot = None
+
+    def _reset_corpus(self) -> None:
+        """Prepare a replacement while existing readers retain the published index."""
+        with self._lock:
+            self.corpus = []
+            self.corpus_ids = []
+            self._tokenized_corpus = []
+            self._token_pool = {}
 
     def __len__(self) -> int:
         return len(self.corpus)
@@ -1147,7 +1352,10 @@ def _enable_wal_mode(chroma_dir: Path) -> None:
     import sqlite3
 
     if _is_network_filesystem(chroma_dir):
-        print("[INFO] ChromaDB SQLite: network filesystem detected — keeping default journal mode (WAL unsafe)")
+        print(
+            "[INFO] ChromaDB SQLite: network filesystem detected — keeping default journal mode (WAL unsafe)",
+            file=sys.stderr,
+        )
         return
     sqlite_path = chroma_dir / "chroma.sqlite3"
     fresh = not sqlite_path.exists()
@@ -1160,11 +1368,11 @@ def _enable_wal_mode(chroma_dir: Path) -> None:
             if not fresh and current and str(current[0]).lower() == "wal":
                 return  # already WAL (sticky header) — nothing to re-toggle
             conn.execute("PRAGMA journal_mode=WAL;")
-            print("[INFO] ChromaDB SQLite: WAL mode enabled")
+            print("[INFO] ChromaDB SQLite: WAL mode enabled", file=sys.stderr)
         finally:
             conn.close()
     except Exception as e:
-        print(f"[WARN] Could not enable WAL mode: {e}")
+        print(f"[WARN] Could not enable WAL mode: {e}", file=sys.stderr)
 
 
 # =============================================================================
@@ -1193,36 +1401,52 @@ class DocumentWatcher(FileSystemEventHandler):
         with self._lock:
             self._pending_paths.add(path)
             if self._timer is None or not self._timer.is_alive():
-                self._timer = threading.Timer(self._debounce, self._do_reindex)
-                self._timer.daemon = True
-                self._timer.start()
+                self._start_timer_locked()
+
+    def _start_timer_locked(self):
+        """Arm one callback while holding the pending-path lock."""
+        self._timer = threading.Timer(self._debounce, self._do_reindex)
+        self._timer.daemon = True
+        self._timer.start()
 
     def _do_reindex(self):
         """Perform incremental reindex in background (serialized)."""
         if not self._reindex_lock.acquire(blocking=False):
-            print("[WATCHER] Reindex already in progress, skipping")
+            print("[WATCHER] Reindex already in progress, skipping", file=sys.stderr)
             return
+        paths = set()
         try:
             with self._lock:
-                count = len(self._pending_paths)
+                paths = set(self._pending_paths)
+                count = len(paths)
                 self._pending_paths.clear()
             if count == 0:
                 return
-            print(f"[WATCHER] {count} file(s) changed, starting incremental reindex...")
+            print(f"[WATCHER] {count} file(s) changed, starting incremental reindex...", file=sys.stderr)
             orch = self._get_orchestrator()
             stats = orch.index_all(force=False)
+            if stats.get("skipped_reason") == "reindex_already_running":
+                with self._lock:
+                    self._pending_paths.update(paths)
             changed = stats.get("indexed", 0) + stats.get("updated", 0) + stats.get("deleted", 0)
             if changed > 0:
                 print(
                     f"[WATCHER] Auto-reindexed: {stats['indexed']} new, "
-                    f"{stats['updated']} updated, {stats['deleted']} deleted"
+                    f"{stats['updated']} updated, {stats['deleted']} deleted",
+                    file=sys.stderr,
                 )
         except Exception as e:
             import traceback as _tb
 
-            print(f"[WATCHER] Reindex failed: {e}\n{_tb.format_exc()}")
+            with self._lock:
+                self._pending_paths.update(paths)
+            print(f"[WATCHER] Reindex failed: {e}\n{_tb.format_exc()}", file=sys.stderr)
         finally:
             self._reindex_lock.release()
+            with self._lock:
+                self._timer = None
+                if self._pending_paths:
+                    self._start_timer_locked()
 
     @staticmethod
     def _is_supported(path: str) -> bool:
@@ -1231,6 +1455,8 @@ class DocumentWatcher(FileSystemEventHandler):
         Suffixes are lowercased to match DocumentParser.parse_directory().
         """
         p = Path(path)
+        if p.name.startswith(".rag-pending-"):
+            return False
         return p.suffix.lower() in config.supported_formats or p.name in config.supported_formats
 
     def _is_real_change(self, src_path: str) -> bool:
@@ -1313,7 +1539,8 @@ class KnowledgeOrchestrator:
         # staging orch was garbage-collected while holding the lock, the class
         # attribute stayed acquired forever and every subsequent reindex
         # returned `reindex_already_running` despite `active: false`.
-        self._index_lock = threading.Lock()
+        self._index_lock = threading.RLock()
+        self._publication_lock = PublicationLock()
 
         # GH #161 (v4.8.3): _staging_target holds the staging collection
         # while populate is running. Write helpers dispatch through
@@ -1330,12 +1557,13 @@ class KnowledgeOrchestrator:
         # opens the DB — never through a second connection afterwards.
         self.chroma_client = self._init_chroma_client()
 
-        # Get or create collection (with auto-recovery from corruption)
+        # Get or create collection; existing data is preserved on any failure.
         self.collection = self._safe_get_collection()
 
         # BM25 index for hybrid search
         self.bm25_index = BM25Index()
         self._bm25_initialized = False
+        self._bm25_build_lock = threading.Lock()
 
         # Cross-encoder reranker (lazy-loaded on first query)
         self.reranker = CrossEncoderReranker()
@@ -1346,6 +1574,9 @@ class KnowledgeOrchestrator:
         # Index metadata cache
         self._metadata_file = config.data_dir / "index_metadata.json"
         self._indexed_docs: Dict[str, Dict] = self._load_metadata()
+        if self._indexed_docs and self.collection.count() == 0:
+            print("[INDEX] Empty collection: ignoring metadata from a previous index", file=sys.stderr)
+            self._indexed_docs = {}
 
         # v4.8.0 Fase 4: resume checkpoint file (written every 500 docs or 30s
         # during smart_reindex; opt-in loaded via reindex_documents(resume=True)).
@@ -1379,7 +1610,7 @@ class KnowledgeOrchestrator:
         try:
             self._cleanup_stale_staging_collections()
         except Exception as e:
-            print(f"[STAGING] Startup cleanup skipped (non-fatal): {e}")
+            print(f"[STAGING] Startup cleanup skipped (non-fatal): {e}", file=sys.stderr)
 
     def _init_chroma_client(self):
         """Create the Chroma PersistentClient, switching SQLite to WAL first.
@@ -1395,56 +1626,19 @@ class KnowledgeOrchestrator:
         return chromadb.PersistentClient(path=str(config.chroma_dir))
 
     def _safe_get_collection(self):
-        """
-        Get or create ChromaDB collection with auto-recovery.
-
-        Handles:
-        - Corrupted SQLite DB (segfault/crash during previous indexing)
-        - Embedding function conflict (collection created with different embed fn)
-        - Any other ChromaDB initialization error
-
-        Recovery: deletes corrupted data and starts fresh.
-        """
-        import shutil
-
+        """Open the collection without discarding data on initialization errors."""
         try:
             return self.chroma_client.get_or_create_collection(
                 name=config.collection_name,
                 embedding_function=self.embed_fn,
                 metadata={"description": "Knowledge base for RAG"},
             )
-        except (ValueError, Exception) as e:
-            error_msg = str(e).lower()
-            if "conflict" in error_msg or "embedding" in error_msg:
-                print(f"[RECOVERY] Embedding function conflict detected: {e}")
-                print("[RECOVERY] Deleting old collection and recreating...")
-                try:
-                    self.chroma_client.delete_collection(config.collection_name)
-                except Exception:
-                    pass
-            else:
-                print(f"[RECOVERY] ChromaDB error: {e}")
-                print("[RECOVERY] Clearing corrupted database...")
-                # Nuclear cleanup — delete all ChromaDB data
-                chroma_dir = config.chroma_dir
-                if chroma_dir.exists():
-                    for item in chroma_dir.iterdir():
-                        try:
-                            if item.is_dir():
-                                shutil.rmtree(item)
-                            else:
-                                item.unlink()
-                        except Exception:
-                            pass
-                # Recreate client
-                self.chroma_client = chromadb.PersistentClient(path=str(config.chroma_dir))
-
-            print("[RECOVERY] Creating fresh collection...")
-            return self.chroma_client.get_or_create_collection(
-                name=config.collection_name,
-                embedding_function=self.embed_fn,
-                metadata={"description": "Knowledge base for RAG"},
-            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"Could not open ChromaDB collection {config.collection_name!r} "
+                f"at {config.chroma_dir}: {exc}. Existing index preserved. "
+                "Check database access and embedding configuration before retrying."
+            ) from exc
 
     def _check_dimension_mismatch(self) -> bool:
         """Check if stored embeddings have different dimension than current config.
@@ -1466,9 +1660,10 @@ class KnowledgeOrchestrator:
                 if cached_dim != config.embedding_dim:
                     print(
                         f"[MIGRATION] Embedding dim mismatch (cached): "
-                        f"stored={cached_dim} config={config.embedding_dim}"
+                        f"stored={cached_dim} config={config.embedding_dim}",
+                        file=sys.stderr,
                     )
-                    print("[MIGRATION] Nuclear rebuild required.")
+                    print("[MIGRATION] Nuclear rebuild required.", file=sys.stderr)
                     return True
                 return False  # first cached hit is authoritative
         # Legacy fallback: no cached dim → query the collection (embeds once)
@@ -1477,30 +1672,34 @@ class KnowledgeOrchestrator:
             return False
         except Exception as e:
             if "dimension" in str(e).lower():
-                print(f"[MIGRATION] Embedding dimension mismatch detected: {e}")
-                print("[MIGRATION] Nuclear rebuild required.")
+                print(f"[MIGRATION] Embedding dimension mismatch detected: {e}", file=sys.stderr)
+                print("[MIGRATION] Nuclear rebuild required.", file=sys.stderr)
                 return True
-            print(f"[WARN] Dimension check query failed (non-dimension error): {e}")
+            print(f"[WARN] Dimension check query failed (non-dimension error): {e}", file=sys.stderr)
             return False
 
     _bm25_build_lock = threading.Lock()
 
     def _ensure_bm25_index(self) -> None:
-        """Lazy initialization of BM25 index from existing ChromaDB data.
+        """Reload derived BM25 data without waiting behind an active writer.
 
-        Only marks ``_bm25_initialized=True`` after a successful build with
-        actual content. Empty-collection bootup or build failures leave the
-        flag ``False`` so the next call retries once documents are present.
-
-        Prior behavior set the flag unconditionally at the end of the guarded
-        block, which trapped the index in an uninitialized state when the
-        server booted against an empty collection (issue #114): subsequent
-        ``add_document`` calls populate ``bm25_index.corpus`` but do not
-        rebuild the inverted index, and this method — the only path that
-        does — would short-circuit forever on the stale flag.
+        During ingestion, queries use the last published BM25 generation,
+        or semantic retrieval alone until the first generation is ready.
+        Empty collections and failures remain retryable (issue #114).
         """
         if self._bm25_initialized:
             return
+        index_lock = getattr(self, "_index_lock", None)
+        if index_lock is not None and not index_lock.acquire(blocking=False):
+            return
+        try:
+            self._rebuild_bm25_from_collection()
+        finally:
+            if index_lock is not None:
+                index_lock.release()
+
+    def _rebuild_bm25_from_collection(self) -> None:
+        """Read stable Chroma pages while holding the mutation lock, then publish."""
         with self._bm25_build_lock:
             if self._bm25_initialized:
                 return
@@ -1516,23 +1715,21 @@ class KnowledgeOrchestrator:
                 # rebuilds IN(?, ?, ...) per row; single get(limit=count) blows
                 # past the 999 default max_variable_number at ~48k chunks).
                 batch_size = 500
-                all_ids: list = []
-                all_docs: list = []
+                # Retry starts from a clean corpus after any partial load/build.
+                self.bm25_index._reset_corpus()
                 for offset in range(0, count, batch_size):
                     batch = self.collection.get(include=["documents"], limit=batch_size, offset=offset)
                     if not batch.get("ids"):
-                        break
-                    all_ids.extend(batch["ids"])
-                    all_docs.extend(batch["documents"] or [])
-                if not all_ids or not all_docs:
+                        return
+                    self.bm25_index.add_documents(batch["ids"], batch["documents"] or [])
+                if not self.bm25_index.corpus:
                     return
 
-                self.bm25_index.add_documents(all_ids, all_docs)
                 self.bm25_index.build_index()
-                print(f"[INFO] BM25 index built with {len(self.bm25_index)} documents")
+                print(f"[INFO] BM25 index built with {len(self.bm25_index)} documents", file=sys.stderr)
                 self._bm25_initialized = True
             except Exception as e:
-                print(f"[WARN] Failed to build BM25 index: {e}")
+                print(f"[WARN] Failed to build BM25 index: {e}", file=sys.stderr)
                 # Do not mark initialized; retry allowed on next call.
 
     # =========================================================================
@@ -1616,12 +1813,12 @@ class KnowledgeOrchestrator:
         }
 
     def _scan_and_count_documents(self, stats: Dict[str, Any]) -> list:
-        """Parse docs directory, publish total to progress, print if large."""
-        documents = self.parser.parse_directory()
+        """Discover paths only; parse changed files individually in the worker."""
+        documents = list(self.parser.iter_files())
         stats["total_files"] = len(documents)
         self._reindex_progress["total_files"] = stats["total_files"]
         if stats["total_files"] > 100:
-            print(f"[INDEX] Scanning {stats['total_files']} documents...")
+            print(f"[INDEX] Scanning {stats['total_files']} documents...", file=sys.stderr)
         return documents
 
     def _build_path_to_docid_map(self) -> Dict[str, str]:
@@ -1638,20 +1835,31 @@ class KnowledgeOrchestrator:
         hashes. Mutates ``stats`` (chunks_removed, deleted) and evicts from
         both ``_indexed_docs`` and ``_source_to_docid``.
         """
-        current_paths = {str(doc.source) for doc in documents}
-        orphan_ids = []
+        current_paths = {str(Path(getattr(doc, "source", doc)).resolve()) for doc in documents}
         for doc_id, info in list(self._indexed_docs.items()):
-            if info.get("source", "") not in current_paths:
-                removed = self._remove_document_chunks(doc_id)
+            source = Path(info.get("source", ""))
+            if str(source.resolve()) not in current_paths:
+                # A failed parser or inaccessible subtree is not evidence of deletion.
+                if is_path_within(config.documents_dir, source):
+                    try:
+                        source.stat()
+                    except FileNotFoundError:
+                        pass
+                    except OSError:
+                        continue
+                    else:
+                        if not self.parser._should_exclude(source, config.documents_dir, config.exclude_patterns):
+                            continue
+                try:
+                    removed = self._remove_document_chunks(doc_id)
+                except Exception as exc:
+                    stats["errors"] += 1
+                    print(f"[ERROR] Failed to prune {source}: {exc}", file=sys.stderr)
+                    continue
                 stats["chunks_removed"] += removed
                 stats["deleted"] += 1
-                orphan_ids.append(doc_id)
-
-        for doc_id in orphan_ids:
-            src = self._indexed_docs[doc_id].get("source", "")
-            if src:
-                self._source_to_docid.pop(str(Path(src).resolve()), None)
-            del self._indexed_docs[doc_id]
+                self._source_to_docid.pop(str(source.resolve()), None)
+                del self._indexed_docs[doc_id]
 
     def _init_reindex_tracking(self, resume_state: Optional[Dict[str, Any]], stats: Dict[str, Any]) -> Dict[str, Any]:
         """Build the mutable per-run tracking dict (checkpoint + throughput + resume)."""
@@ -1707,15 +1915,35 @@ class KnowledgeOrchestrator:
         caught and logged; the caller keeps iterating.
         """
         try:
+            source = doc if isinstance(doc, Path) else doc.source
+            source_stat = source.stat()
+            if isinstance(doc, Path):
+                existing = path_to_docid.get(str(doc)) or self._source_to_docid.get(str(doc.resolve()))
+                if not force and existing and self._path_unchanged(doc, existing):
+                    stats["skipped"] += 1
+                    return
+                if not is_path_within(config.documents_dir, doc):
+                    raise PathEscapeError(f"File escaped documents directory: {doc}")
+                doc = self.parser.parse_file(doc)
+                if doc is None:
+                    raise ValueError("Document has no indexable content")
+                after_parse = source.stat()
+                if (source_stat.st_mtime_ns, source_stat.st_size) != (after_parse.st_mtime_ns, after_parse.st_size):
+                    raise RuntimeError("Source changed during parsing; retry indexing this document")
             existing_doc_id = self._resolve_existing_or_skip(doc, force, path_to_docid, stats, tracking)
             if existing_doc_id is _SKIP_DOC:
                 return
 
-            chunks_added, dedup_skipped = self._index_document(doc)
-            self._commit_indexed_doc(doc, chunks_added, dedup_skipped, existing_doc_id, force, stats, tracking)
+            chunks_added, dedup_skipped, removed = self._replace_document_chunks(doc, existing_doc_id)
+            stats["chunks_removed"] += removed
+            if existing_doc_id:
+                stats["updated"] += 1
+            self._commit_indexed_doc(
+                doc, chunks_added, dedup_skipped, existing_doc_id, force, stats, tracking, source_stat
+            )
         except Exception as e:
             stats["errors"] += 1
-            print(f"[ERROR] Failed to index {doc.source}: {e}")
+            print(f"[ERROR] Failed to index {source}: {e}", file=sys.stderr)
 
     def _resolve_existing_or_skip(
         self,
@@ -1736,12 +1964,11 @@ class KnowledgeOrchestrator:
             stats["skipped"] += 1
             return _SKIP_DOC
 
-        existing_doc_id = path_to_docid.get(str(doc.source))
+        existing_doc_id = path_to_docid.get(str(doc.source)) or self._source_to_docid.get(str(doc.source.resolve()))
         if not force and existing_doc_id:
             if self._unchanged_since_last_index(doc, existing_doc_id):
                 stats["skipped"] += 1
                 return _SKIP_DOC
-            self._evict_stale_doc(existing_doc_id, stats)
         elif not force and doc.id in self._indexed_docs:
             stats["skipped"] += 1
             return _SKIP_DOC
@@ -1756,10 +1983,13 @@ class KnowledgeOrchestrator:
         force: bool,
         stats: Dict[str, Any],
         tracking: Dict[str, Any],
+        source_stat=None,
     ) -> None:
         """Post-index bookkeeping: stats bump + throughput sample + metadata write."""
-        if not (existing_doc_id and not force):
+        if not existing_doc_id:
             stats["indexed"] += 1
+        elif existing_doc_id != doc.id:
+            self._indexed_docs.pop(existing_doc_id, None)
         stats["chunks_added"] += chunks_added
         stats["dedup_skipped"] += dedup_skipped
         stats["categories"][doc.category] = stats["categories"].get(doc.category, 0) + 1
@@ -1767,20 +1997,23 @@ class KnowledgeOrchestrator:
         # meaningful only when _index_document returned normally.
         tracking["chunks_processed"] += chunks_added
         tracking["committed_this_run"].add(doc.id)  # GH #162: only IDs this run committed go into the checkpoint
-        self._register_indexed_doc(doc, chunks_added)
+        self._register_indexed_doc(doc, chunks_added, source_stat)
 
     def _unchanged_since_last_index(self, doc, existing_doc_id: str) -> bool:
         """True if the on-disk file matches the stored mtime + size."""
+        return self._path_unchanged(doc.source, existing_doc_id)
+
+    def _path_unchanged(self, source: Path, existing_doc_id: str) -> bool:
+        """Check cheap file metadata before loading content or producing chunks."""
         existing_meta = self._indexed_docs.get(existing_doc_id, {})
         stored_mtime = existing_meta.get("file_mtime", "")
         stored_size = existing_meta.get("file_size", 0)
         try:
-            current_stat = doc.source.stat()
+            current_stat = source.stat()
             current_mtime = datetime.fromtimestamp(current_stat.st_mtime).isoformat()
             current_size = current_stat.st_size
         except OSError:
-            current_mtime = ""
-            current_size = 0
+            return False
         return stored_mtime == current_mtime and stored_size == current_size
 
     def _evict_stale_doc(self, existing_doc_id: str, stats: Dict[str, Any]) -> None:
@@ -1793,10 +2026,10 @@ class KnowledgeOrchestrator:
         del self._indexed_docs[existing_doc_id]
         stats["updated"] += 1
 
-    def _register_indexed_doc(self, doc, chunks_added: int) -> None:
-        """Persist post-index metadata (mtime/size/chunk count) for a doc."""
+    def _register_indexed_doc(self, doc, chunks_added: int, source_stat=None) -> None:
+        """Record the source version actually parsed, before potentially slow inference."""
         try:
-            file_stat = doc.source.stat()
+            file_stat = source_stat if source_stat is not None else doc.source.stat()
             file_mtime = datetime.fromtimestamp(file_stat.st_mtime).isoformat()
             file_size = file_stat.st_size
         except OSError:
@@ -1904,7 +2137,7 @@ class KnowledgeOrchestrator:
             tracking["last_checkpoint_ts"] = time.monotonic()
         except OSError as e:
             # Non-fatal — a lost checkpoint just gives less to resume from.
-            print(f"[WARN] Checkpoint write failed (non-fatal): {e}")
+            print(f"[WARN] Checkpoint write failed (non-fatal): {e}", file=sys.stderr)
 
     def _maybe_print_progress(self, idx: int, stats: Dict[str, Any], progress_interval: int) -> None:
         """Emit periodic progress line for corpora larger than 100 docs."""
@@ -1912,7 +2145,8 @@ class KnowledgeOrchestrator:
             pct = int((idx + 1) / stats["total_files"] * 100)
             print(
                 f"[INDEX] Progress: {idx + 1}/{stats['total_files']} ({pct}%) "
-                f"— {stats['indexed']} new, {stats['skipped']} skipped"
+                f"— {stats['indexed']} new, {stats['skipped']} skipped",
+                file=sys.stderr,
             )
 
     def _finalize_reindex(self, stats: Dict[str, Any], tracking: Dict[str, Any]) -> Dict[str, Any]:
@@ -1922,7 +2156,15 @@ class KnowledgeOrchestrator:
         # Checkpoint is no longer needed after a successful run — clear it so
         # the next reindex(resume=True) does not resume into a stale state.
         if tracking["checkpoint_enabled"]:
-            self._clear_checkpoint()
+            if stats["errors"]:
+                self._write_checkpoint(
+                    operation=tracking["op_mode"],
+                    indexed_doc_ids=list(tracking["committed_this_run"]),
+                    chunks_processed=tracking["chunks_processed"],
+                    started_at=self._reindex_progress.get("started_at"),
+                )
+            else:
+                self._clear_checkpoint()
 
         if stats["indexed"] > 0 or stats["updated"] > 0 or stats["deleted"] > 0:
             self.query_cache.invalidate()
@@ -1933,6 +2175,49 @@ class KnowledgeOrchestrator:
     # Orchestrator without a full Config (e.g. `object.__new__` mocks in
     # tests/test_search.py). Production reads `config.batch_size` first.
     _CHROMA_BATCH_SIZE = 500
+
+    def _snapshot_document_chunks(self, doc_id: Optional[str]) -> Dict[str, Any]:
+        """Retain one document for rollback, never an entire corpus."""
+        if not doc_id:
+            return {"ids": [], "documents": [], "metadatas": [], "embeddings": []}
+        return self._write_collection.get(where={"doc_id": doc_id}, include=["documents", "metadatas", "embeddings"])
+
+    def _restore_document_chunks(self, snapshot: Dict[str, Any]) -> None:
+        """Restore committed vectors without calling the embedding model again."""
+        ids = snapshot["ids"]
+        bs = getattr(config, "batch_size", self._CHROMA_BATCH_SIZE)
+        for start in range(0, len(ids), bs):
+            data = {
+                key: value[start : start + bs]
+                for key, value in snapshot.items()
+                if key in {"ids", "documents", "metadatas", "embeddings"} and value is not None
+            }
+            self._write_collection.upsert(**data)
+        self._fts5_sync_add(ids, snapshot.get("documents") or [], snapshot.get("metadatas") or [])
+
+    def _replace_document_chunks(
+        self, doc: Document, existing_doc_id: Optional[str], previous=None
+    ) -> Tuple[int, int, int]:
+        """Write replacement first; restore the previous document on any batch failure."""
+        if previous is None:
+            previous = self._snapshot_document_chunks(existing_doc_id)
+        ids, _, _, _ = self._dedup_chunks(doc)
+        try:
+            added, skipped = self._index_document(doc)
+            obsolete = sorted(set(previous["ids"]) - set(ids))
+            if obsolete:
+                self._write_collection.delete(ids=obsolete)
+                self._fts5_sync_remove_ids(obsolete)
+        except Exception:
+            newly_created = sorted(set(ids) - set(previous["ids"]))
+            if newly_created:
+                self._write_collection.delete(ids=newly_created)
+                self._fts5_sync_remove_ids(newly_created)
+            self._restore_document_chunks(previous)
+            self._bm25_initialized = False
+            raise
+        self._bm25_initialized = False
+        return added, skipped, len(previous["ids"])
 
     def _index_document(self, doc: Document) -> Tuple[int, int]:
         """Index a single document's chunks into ChromaDB and BM25 with dedup.
@@ -1951,6 +2236,7 @@ class KnowledgeOrchestrator:
         if unique_ids:
             self._add_chunks_batched(unique_ids, unique_docs, unique_metas)
             self.bm25_index.add_documents(unique_ids, unique_docs)
+            self._fts5_sync_add(unique_ids, unique_docs, unique_metas)
 
         return len(unique_ids), dedup_skipped
 
@@ -1987,7 +2273,7 @@ class KnowledgeOrchestrator:
         return unique_ids, unique_docs, unique_metas, dedup_skipped
 
     def _add_chunks_batched(self, ids, docs, metas) -> None:
-        """Dispatch ChromaDB.add across batches (parallel path when workers > 1)."""
+        """Upsert bounded Chroma batches so forced indexing refreshes existing IDs."""
         bs = getattr(config, "batch_size", self._CHROMA_BATCH_SIZE)
         workers = getattr(config, "parallel_workers", 1)
 
@@ -2000,7 +2286,7 @@ class KnowledgeOrchestrator:
             # reading self.collection so users see zero-downtime.
             target = self._write_collection
             for i in range(0, len(ids), bs):
-                target.add(
+                target.upsert(
                     ids=ids[i : i + bs],
                     documents=docs[i : i + bs],
                     metadatas=metas[i : i + bs],
@@ -2019,17 +2305,25 @@ class KnowledgeOrchestrator:
         # nuclear rebuild. Snapshot the target once so all workers agree.
         target = self._write_collection
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = [
-                pool.submit(
-                    target.add,
-                    ids=ids[i : i + bs],
-                    documents=docs[i : i + bs],
-                    metadatas=metas[i : i + bs],
-                )
-                for i in range(0, len(ids), bs)
-            ]
-            for f in futures:
-                f.result()
+            pending = deque()
+            try:
+                for i in range(0, len(ids), bs):
+                    if len(pending) >= workers:
+                        pending.popleft().result()
+                    pending.append(
+                        pool.submit(
+                            target.upsert,
+                            ids=ids[i : i + bs],
+                            documents=docs[i : i + bs],
+                            metadatas=metas[i : i + bs],
+                        )
+                    )
+                while pending:
+                    pending.popleft().result()
+            except Exception:
+                for future in pending:
+                    future.cancel()
+                raise
 
     def _remove_document_chunks(self, doc_id: str) -> int:
         """Remove all chunks belonging to a document from ChromaDB and BM25.
@@ -2040,16 +2334,12 @@ class KnowledgeOrchestrator:
         serving queries with the pre-rebuild state until swap.
         """
         target = self._write_collection
-        try:
-            results = target.get(where={"doc_id": doc_id}, include=[])
-
-            if results["ids"]:
-                target.delete(ids=results["ids"])
-                self._bm25_initialized = False
-                return len(results["ids"])
-        except Exception as e:
-            print(f"[WARN] Failed to remove chunks for doc {doc_id}: {e}")
-
+        results = target.get(where={"doc_id": doc_id}, include=[])
+        if results["ids"]:
+            target.delete(ids=results["ids"])
+            self._bm25_initialized = False
+            self._fts5_sync_remove_ids(results["ids"])
+            return len(results["ids"])
         return 0
 
     def start_reindex_background(
@@ -2111,7 +2401,7 @@ class KnowledgeOrchestrator:
             self._reindex_progress["result"] = result
         except Exception as e:
             self._reindex_progress["error"] = str(e)
-            print(f"[ERROR] Background reindex failed: {e}")
+            print(f"[ERROR] Background reindex failed: {e}", file=sys.stderr)
         finally:
             self._reindex_progress["active"] = False
 
@@ -2137,17 +2427,20 @@ class KnowledgeOrchestrator:
             print(
                 f"[REINDEX] Resuming smart reindex from checkpoint "
                 f"({len(resume_state.get('doc_ids', []))} docs already "
-                f"processed, {resume_state.get('chunks_processed', 0)} chunks)"
+                f"processed, {resume_state.get('chunks_processed', 0)} chunks)",
+                file=sys.stderr,
             )
         elif force:
-            print("[REINDEX] Starting FORCED smart reindex (re-embedding all files)...")
+            print("[REINDEX] Starting FORCED smart reindex (re-embedding all files)...", file=sys.stderr)
         else:
-            print("[REINDEX] Starting smart incremental reindex...")
+            print("[REINDEX] Starting smart incremental reindex...", file=sys.stderr)
         start_time = time.time()
 
         stats = self.index_all(force=force, resume_state=resume_state)
+        if stats.get("skipped_reason"):
+            return stats
 
-        print("[REINDEX] Rebuilding BM25 index...")
+        print("[REINDEX] Rebuilding BM25 index...", file=sys.stderr)
         self.bm25_index.clear()
         self._bm25_initialized = False
         self._ensure_bm25_index()
@@ -2172,7 +2465,8 @@ class KnowledgeOrchestrator:
         print(
             f"[REINDEX] Completed in {elapsed:.1f}s "
             f"(indexed: {stats['indexed']}, updated: {stats['updated']}, "
-            f"skipped: {stats['skipped']}, deleted: {stats['deleted']})"
+            f"skipped: {stats['skipped']}, deleted: {stats['deleted']})",
+            file=sys.stderr,
         )
 
         return stats
@@ -2201,21 +2495,31 @@ class KnowledgeOrchestrator:
         Structured logging reports counts so operators can spot leaks.
         """
         prefix = f"{config.collection_name}__staging_"
+        backup_prefix = f"{config.collection_name}__old_"
         now = int(time.time())
         stats = {"scanned": 0, "removed": 0, "preserved": 0}
         try:
             existing = self.chroma_client.list_collections()
         except Exception as e:
-            print(f"[STAGING] list_collections failed (non-fatal): {e}")
+            print(f"[STAGING] list_collections failed (non-fatal): {e}", file=sys.stderr)
             return stats
 
+        primary_exists = any(getattr(coll, "name", "") == config.collection_name for coll in existing)
         for coll in existing:
-            self._process_staging_candidate(coll, prefix, now, stats)
+            if getattr(coll, "name", "").startswith(backup_prefix):
+                if not primary_exists:
+                    stats["scanned"] += 1
+                    stats["preserved"] += 1
+                    continue
+                self._process_staging_candidate(coll, backup_prefix, now, stats)
+            else:
+                self._process_staging_candidate(coll, prefix, now, stats)
 
         if stats["removed"] > 0 or stats["scanned"] > 0:
             print(
                 f"[STAGING] Cleanup: scanned={stats['scanned']} "
-                f"removed={stats['removed']} preserved={stats['preserved']}"
+                f"removed={stats['removed']} preserved={stats['preserved']}",
+                file=sys.stderr,
             )
         return stats
 
@@ -2242,9 +2546,9 @@ class KnowledgeOrchestrator:
         try:
             self.chroma_client.delete_collection(name)
             stats["removed"] += 1
-            print(f"[STAGING] Cleaned up stale staging: {name}")
+            print(f"[STAGING] Cleaned up stale staging: {name}", file=sys.stderr)
         except Exception as e:
-            print(f"[STAGING] Failed to delete {name} (non-fatal): {e}")
+            print(f"[STAGING] Failed to delete {name} (non-fatal): {e}", file=sys.stderr)
 
     def _create_staging_collection(self, ts: int):
         """Create a fresh staging collection with the current embedding fn.
@@ -2263,43 +2567,27 @@ class KnowledgeOrchestrator:
         )
 
     def _populate_staging(self, staging) -> Dict[str, Any]:
-        """Populate ``staging`` while ``self.collection`` keeps serving queries.
-
-        GH #161 (v4.8.3): the previous implementation rebound
-        ``self.collection = staging`` before populate, so concurrent queries
-        arriving during the hours-long populate phase saw the empty staging
-        collection instead of production. Now writes go through
-        ``_write_collection`` (which returns ``self._staging_target`` when
-        set) while reads on ``self.collection`` continue hitting production.
-        Zero-downtime is finally atomic.
-
-        BM25 / _indexed_docs / _source_to_docid are still rebound because
-        those in-memory structures have no equivalent read/write split and
-        their staging state is only committed on final swap. If populate or
-        validate raises, ``_saved`` is restored so production sees zero net
-        change.
-
-        Returns the ``index_all`` stats dict on success. Rollback is the
-        caller's responsibility on any exception raised out of here.
-        """
-        _saved = {
-            "bm25_index": self.bm25_index,
-            "_bm25_initialized": self._bm25_initialized,
-            "_indexed_docs": dict(self._indexed_docs),
-            "_source_to_docid": dict(self._source_to_docid),
-        }
-        self._staging_target = staging  # write dispatch redirects here
-        self.bm25_index = BM25Index()
-        self._bm25_initialized = True  # suppress lazy rebuild on staging
-        self._indexed_docs = {}
-        self._source_to_docid = {}
-        try:
-            return self.index_all(force=True)
-        except Exception:
-            self._staging_target = None
-            for k, v in _saved.items():
-                setattr(self, k, v)
-            raise
+        """Build independent staging state while every production read stays intact."""
+        staged = copy(self)
+        staged.collection = staging
+        staged._staging_target = None
+        staged._index_lock = threading.RLock()
+        staged._publication_lock = PublicationLock()
+        staged._bm25_build_lock = threading.Lock()
+        staged.bm25_index = BM25Index()
+        staged._bm25_initialized = True
+        staged._indexed_docs = {}
+        staged._source_to_docid = {}
+        staged.query_cache = QueryCache()
+        staged.fts5_index = None
+        staged._persist_metadata = False
+        stats = staged.index_all(force=True)
+        if stats.get("errors", 0):
+            raise RuntimeError(f"Staging contains {stats['errors']} failed documents")
+        staged.bm25_index.build_index()
+        staged._bm25_initialized = True
+        self._staged_state = staged._snapshot_pre_staging()
+        return stats
 
     @property
     def _write_collection(self):
@@ -2392,7 +2680,7 @@ class KnowledgeOrchestrator:
         return True
 
     def _swap_collections_atomic(self, staging, prod_name: str, ts: int) -> None:
-        """Two-step rename: prod → old, staging → prod, then delete old.
+        """Two-step rename: prod → old, staging → prod; retain old for commit rollback.
 
         ChromaDB's ``Collection.modify(name=)`` renames in place — no data
         movement. Race window between the two modifies is one Python
@@ -2411,11 +2699,7 @@ class KnowledgeOrchestrator:
         # Step 2: staging assumes the production name (with rollback).
         self._promote_staging_or_rollback(staging, prod, prod_name, old_name)
 
-        # Step 3: cleanup the old prod. Non-fatal — cleanup helper ages it out.
-        try:
-            self.chroma_client.delete_collection(old_name)
-        except Exception as e:
-            print(f"[SWAP] Failed to delete post-swap old prod (non-fatal): {e}")
+        # Keep old vectors until the replacement state has been durably saved.
 
     def _promote_staging_or_rollback(self, staging, prod, prod_name: str, old_name: str) -> None:
         """Rename staging to production; on failure, restore previous prod name.
@@ -2431,7 +2715,8 @@ class KnowledgeOrchestrator:
             except Exception as inner:
                 print(
                     f"[SWAP] CRITICAL: staging rename failed AND rollback "
-                    f"failed. Prod is at '{old_name}'. Inner: {inner}"
+                    f"failed. Prod is at '{old_name}'. Inner: {inner}",
+                    file=sys.stderr,
                 )
             raise
 
@@ -2451,14 +2736,19 @@ class KnowledgeOrchestrator:
         # is no longer needed. Writes now hit the swapped-in production
         # collection through self.collection directly.
         self._staging_target = None
-        self.bm25_index.clear()
-        self._bm25_initialized = False
+        staged_state = getattr(self, "_staged_state", None)
+        if staged_state:
+            for key, value in staged_state.items():
+                if key != "collection":
+                    setattr(self, key, value)
+        else:
+            self.bm25_index.clear()
+            self._bm25_initialized = False
         self.query_cache.invalidate()
         # Trigger a fresh build from the swapped-in ChromaDB contents.
         self._ensure_bm25_index()
         # ADR-008 ``on_reindex_complete`` hook — same rationale as the
         # destructive path: FTS5 is derived from Chroma and must be rebuilt.
-        self._fts5_reset_and_rebuild()
 
     def _rebuild_destructive(self) -> Dict[str, Any]:
         """Legacy destructive rebuild — DELETE everything and re-embed.
@@ -2469,12 +2759,12 @@ class KnowledgeOrchestrator:
         """
         import shutil
 
-        print("[NUCLEAR] Starting destructive rebuild (swap=False)...")
+        print("[NUCLEAR] Starting destructive rebuild (swap=False)...", file=sys.stderr)
         start_time = time.time()
 
         try:
             self.chroma_client.delete_collection(config.collection_name)
-            print("[NUCLEAR] Deleted ChromaDB collection")
+            print("[NUCLEAR] Deleted ChromaDB collection", file=sys.stderr)
         except Exception:
             pass
 
@@ -2512,7 +2802,8 @@ class KnowledgeOrchestrator:
         stats["elapsed_seconds"] = round(elapsed, 2)
         print(
             f"[NUCLEAR] Destructive rebuild completed in {elapsed:.1f}s "
-            f"({stats['indexed']} docs, {stats['chunks_added']} chunks)"
+            f"({stats['indexed']} docs, {stats['chunks_added']} chunks)",
+            file=sys.stderr,
         )
 
         return stats
@@ -2524,7 +2815,7 @@ class KnowledgeOrchestrator:
         If any earlier step fails, staging is deleted and production state
         is restored via snapshot so callers see exactly the pre-call state.
         """
-        print("[NUCLEAR] Starting zero-downtime rebuild (swap=True)...")
+        print("[NUCLEAR] Starting zero-downtime rebuild (swap=True)...", file=sys.stderr)
         start_time = time.time()
         prod_name = config.collection_name
         baseline_count = self._read_baseline_count()
@@ -2538,14 +2829,34 @@ class KnowledgeOrchestrator:
         try:
             stats = self._populate_staging(staging)
             self._enforce_staging_validation(staging, baseline_count)
-            self._swap_collections_atomic(staging, prod_name, ts)
-            self._rebuild_bm25_post_swap(prod_name)
-            self._save_metadata()
         except Exception:
             self._rollback_and_cleanup_staging(prod_name, ts, _saved)
             raise
 
+        with collection_publication(self):
+            self._publish_staging(staging, prod_name, ts, _saved)
         return self._finalize_swap_stats(stats, start_time)
+
+    def _publish_staging(self, staging, prod_name: str, ts: int, saved) -> None:
+        """Publish/rollback while existing readers have drained and new ones wait."""
+        swapped = False
+        try:
+            self._swap_collections_atomic(staging, prod_name, ts)
+            swapped = True
+            self._rebuild_bm25_post_swap(prod_name)
+            self._save_metadata()
+        except Exception:
+            if swapped:
+                staging.modify(name=f"{prod_name}__staging_{ts}")
+                self.chroma_client.get_collection(f"{prod_name}__old_{ts}").modify(name=prod_name)
+            self._rollback_and_cleanup_staging(prod_name, ts, saved)
+            raise
+        self._staged_state = None
+        try:
+            self.chroma_client.delete_collection(f"{prod_name}__old_{ts}")
+        except Exception as exc:
+            print(f"[SWAP] Previous collection retained for cleanup: {exc}", file=sys.stderr)
+        self._fts5_reset_and_rebuild()
 
     def _finalize_swap_stats(self, stats: Dict[str, Any], start_time: float) -> Dict[str, Any]:
         """Stamp elapsed_seconds and emit the completion banner."""
@@ -2553,7 +2864,8 @@ class KnowledgeOrchestrator:
         stats["elapsed_seconds"] = round(elapsed, 2)
         print(
             f"[NUCLEAR] Zero-downtime rebuild completed in {elapsed:.1f}s "
-            f"({stats['indexed']} docs, {stats['chunks_added']} chunks)"
+            f"({stats['indexed']} docs, {stats['chunks_added']} chunks)",
+            file=sys.stderr,
         )
         return stats
 
@@ -2562,7 +2874,7 @@ class KnowledgeOrchestrator:
         try:
             return self.collection.count()
         except Exception as e:
-            print(f"[SWAP] Could not read baseline count (assume 0): {e}")
+            print(f"[SWAP] Could not read baseline count (assume 0): {e}", file=sys.stderr)
             return 0
 
     def _enforce_staging_validation(self, staging, baseline_count: int) -> None:
@@ -2573,10 +2885,14 @@ class KnowledgeOrchestrator:
                 f"[SWAP] Validation FAILED — count={validation['count']} "
                 f"min={validation['min_expected']} "
                 f"canonical_hits={validation['canonical_hits']}/5 "
-                f"err={validation['query_error']}"
+                f"err={validation['query_error']}",
+                file=sys.stderr,
             )
             raise RuntimeError(f"Staging validation failed: {validation}")
-        print(f"[SWAP] Validation OK — count={validation['count']} canonical_hits={validation['canonical_hits']}/5")
+        print(
+            f"[SWAP] Validation OK — count={validation['count']} canonical_hits={validation['canonical_hits']}/5",
+            file=sys.stderr,
+        )
 
     def _rollback_and_cleanup_staging(self, prod_name: str, ts: int, saved) -> None:
         """Restore pre-staging prod state + delete the staging orphan."""
@@ -2584,13 +2900,17 @@ class KnowledgeOrchestrator:
         # it before restoring so future writes hit production, not the
         # collection we're about to delete.
         self._staging_target = None
+        self._staged_state = None
         self._rollback_staging_state(saved)
         # GH #173: populate persisted the staging map to index_metadata.json
         # (index_all -> _finalize_reindex -> _save_metadata) before validation.
         # Restoring only in-memory fields would leave the file describing
         # staging while memory holds production; re-persist so durable metadata
         # matches the restored state and a restart won't load stale staging.
-        self._save_metadata()
+        try:
+            self._save_metadata()
+        except OSError as exc:
+            print(f"[SWAP] Failed to persist restored metadata: {exc}", file=sys.stderr)
         try:
             self.chroma_client.delete_collection(f"{prod_name}__staging_{ts}")
         except Exception:
@@ -2614,9 +2934,11 @@ class KnowledgeOrchestrator:
                 (minutes to hours depending on corpus size + hardware).
                 Preserved for backwards-compat and forced-cleanup cases.
         """
-        if swap:
-            return self._rebuild_via_swap()
-        return self._rebuild_destructive()
+        with self._index_lock:
+            if swap:
+                return self._rebuild_via_swap()
+            with collection_publication(self):
+                return self._rebuild_destructive()
 
     # =========================================================================
     # Search
@@ -2664,16 +2986,18 @@ class KnowledgeOrchestrator:
         status = state_payload.get("status")
         if status == "complete":
             if not self._fts5_marker_matches_reality():
-                print("[FTS5] stale complete marker detected — forcing rebuild")
+                print("[FTS5] stale complete marker detected — forcing rebuild", file=sys.stderr)
                 # Fall through to dispatch a fresh migration below.
             else:
                 return
-        resume_from = int(state_payload.get("docs_indexed", 0)) if status == "in_progress" else 0
+        # A prior offset cannot identify chunks after the corpus has changed.
+        resume_from = 0
         try:
             docs_total = int(self.collection.count())
         except Exception as exc:  # noqa: BLE001 — Chroma error must not kill startup
-            print(f"[FTS5] migration skipped — cannot count corpus: {exc}")
+            print(f"[FTS5] migration skipped — cannot count corpus: {exc}", file=sys.stderr)
             return
+        self.fts5_index.clear()
         if docs_total <= 0:
             # Empty corpus: nothing to rebuild. Mark as complete so the
             # fast-path becomes ready immediately for future writes.
@@ -2688,32 +3012,36 @@ class KnowledgeOrchestrator:
             with self.fts5_index._fts5_lock:  # noqa: SLF001
                 self.fts5_index._ready = True  # noqa: SLF001
             return
-        print(f"[FTS5] migration starting (resume_from={resume_from}, docs_total={docs_total})")
+        print(f"[FTS5] migration starting (resume_from={resume_from}, docs_total={docs_total})", file=sys.stderr)
         get_metrics().set_gauge(FAST_PATH_MIGRATION_DOCS_TOTAL, float(docs_total))
         get_metrics().set_gauge(FAST_PATH_MIGRATION_DOCS_INDEXED, float(resume_from))
-        self.fts5_index.start_migration_background(
-            self._iter_chroma_chunks_for_fts5,
+        index = self.fts5_index
+        self._fts5_migration_thread = index.start_migration_background(
+            lambda: self._locked_fts5_source(index),
             docs_total,
             resume_from=resume_from,
             on_progress=self._fts5_migration_progress,
         )
 
     def _fts5_marker_matches_reality(self) -> bool:
-        """Return True when the FTS5 marker is credible vs actual state.
-
-        Rejects markers claiming ``complete`` while the FTS5 index holds far
-        fewer rows than Chroma. Threshold is 10% because a small drift is
-        normal (chunk-level dedup, deletes), but a >90% deficit means the
-        marker is lying about a rebuild that didn't actually populate.
-        """
+        """Require matching row counts; a partial index must not claim completion."""
         try:
             fts5_count = self.fts5_index.count()
             chroma_count = self.collection.count()
         except Exception:
-            return True  # can't check → trust the marker (fail-safe)
-        if chroma_count == 0:
-            return True  # empty corpus, marker complete is legitimate
-        return fts5_count >= chroma_count * 0.1
+            return False
+        return fts5_count == chroma_count
+
+    def _locked_fts5_source(self, index) -> Iterable[Tuple[str, str, str, str]]:
+        """Keep paginated Chroma contents stable while queries remain available."""
+        while not self._index_lock.acquire(timeout=0.1):
+            if index._migration_stop.is_set():
+                return
+        try:
+            if not index._migration_stop.is_set():
+                yield from self._iter_chroma_chunks_for_fts5()
+        finally:
+            self._index_lock.release()
 
     @staticmethod
     def _fts5_migration_progress(docs_indexed: int, docs_total: int) -> None:
@@ -2723,20 +3051,15 @@ class KnowledgeOrchestrator:
         metrics.set_gauge(FAST_PATH_MIGRATION_DOCS_TOTAL, float(docs_total))
 
     def _iter_chroma_chunks_for_fts5(self) -> Iterable[Tuple[str, str, str, str]]:
-        """Yield ``(chunk_id, content, filename, category)`` rows in stable order.
+        """Yield bounded Chroma pages; source failures must fail the migration.
 
-        Batches via offset+limit to avoid the SQLite ``too many SQL variables``
-        error (chromadb 1.x rebuilds an ``IN (?, ?, ...)`` clause for every
-        returned row; a single ``limit=48184`` call blows past the 999 default
-        max_variable_number and the whole migration fails). Deterministic order
-        is preserved by sorting each batch by ``chunk_id`` — good enough for
-        resume-from-index semantics since chunk_ids are UUIDs.
+        The caller serializes mutations during iteration. Old process offsets
+        are never reused by the orchestrator because the corpus may have changed.
         """
         try:
             count = self.collection.count()
         except Exception as exc:  # noqa: BLE001
-            print(f"[FTS5] chunk iterator aborted — Chroma count failed: {exc}")
-            return
+            raise Fts5MigrationError(f"Chroma count failed: {exc}") from exc
         if count == 0:
             return
         batch_size = 500  # SQLite default max_variable_number is 999
@@ -2749,13 +3072,12 @@ class KnowledgeOrchestrator:
                     offset=offset,
                 )
             except Exception as exc:  # noqa: BLE001
-                print(f"[FTS5] chunk batch failed at offset={offset}: {exc}")
-                return
+                raise Fts5MigrationError(f"Chroma batch failed at offset={offset}: {exc}") from exc
             ids = fetched.get("ids") or []
             docs = fetched.get("documents") or []
             metas = fetched.get("metadatas") or []
             if not ids:
-                break
+                raise Fts5MigrationError(f"Chroma iterator ended early at {offset}/{count}")
             order = sorted(range(len(ids)), key=lambda i: ids[i])
             for i in order:
                 meta = metas[i] or {}
@@ -2775,7 +3097,7 @@ class KnowledgeOrchestrator:
         CRUD must keep succeeding even when the FTS5 secondary index is
         temporarily unwritable (disk full, permission drift). See ADR-008.
         """
-        if not (config.fts5_enabled and self.fts5_index is not None):
+        if not (getattr(config, "fts5_enabled", False) and getattr(self, "fts5_index", None) is not None):
             return
         for chunk_id, content, meta in zip(ids, docs, metas):
             try:
@@ -2787,7 +3109,7 @@ class KnowledgeOrchestrator:
                 )
             except Exception as exc:  # noqa: BLE001 — see docstring; NEVER raise
                 get_metrics().inc(FAST_PATH_ERRORS_TOTAL, '{error_class="Fts5CrudSyncError"}')
-                print(f"[FTS5] add sync failed for chunk_id={chunk_id}: {exc}")
+                print(f"[FTS5] add sync failed for chunk_id={chunk_id}: {exc}", file=sys.stderr)
 
     def _fts5_sync_remove_by_doc_id(self, doc_id: str) -> None:
         """Remove every chunk whose id begins with ``<doc_id>_`` (see ``_dedup_chunks``)."""
@@ -2797,14 +3119,21 @@ class KnowledgeOrchestrator:
             results = self.collection.get(where={"doc_id": doc_id}, include=[])
         except Exception as exc:  # noqa: BLE001
             get_metrics().inc(FAST_PATH_ERRORS_TOTAL, '{error_class="Fts5CrudSyncError"}')
-            print(f"[FTS5] remove sync fetch failed for doc_id={doc_id}: {exc}")
+            print(f"[FTS5] remove sync fetch failed for doc_id={doc_id}: {exc}", file=sys.stderr)
             return
         for chunk_id in results.get("ids") or []:
+            self._fts5_sync_remove_ids([chunk_id])
+
+    def _fts5_sync_remove_ids(self, ids: Sequence[str]) -> None:
+        """Remove the exact committed IDs, including after their Chroma rows are gone."""
+        if not (getattr(config, "fts5_enabled", False) and getattr(self, "fts5_index", None) is not None):
+            return
+        for chunk_id in ids:
             try:
                 self.fts5_index.remove_document(str(chunk_id))
             except Exception as exc:  # noqa: BLE001
                 get_metrics().inc(FAST_PATH_ERRORS_TOTAL, '{error_class="Fts5CrudSyncError"}')
-                print(f"[FTS5] remove sync failed for chunk_id={chunk_id}: {exc}")
+                print(f"[FTS5] remove sync failed for chunk_id={chunk_id}: {exc}", file=sys.stderr)
 
     def _fts5_reset_and_rebuild(self) -> None:
         """Drop the FTS5 database + marker file then start a fresh migration.
@@ -2815,17 +3144,14 @@ class KnowledgeOrchestrator:
         """
         if not (config.fts5_enabled and self.fts5_index is not None):
             return
-        try:
-            self.fts5_index.close()
-        except Exception:  # noqa: BLE001 — best-effort close
-            pass
+        self.fts5_index.close()
         db_path = config.data_dir / "fts5_index.db"
         state_path = config.data_dir / "fts5_migration.state"
         for path in (db_path, state_path, db_path.with_suffix(".db-wal"), db_path.with_suffix(".db-shm")):
             try:
                 path.unlink(missing_ok=True)
             except OSError as exc:
-                print(f"[FTS5] could not remove {path}: {exc}")
+                print(f"[FTS5] could not remove {path}: {exc}", file=sys.stderr)
         self.fts5_index = Fts5LexicalIndex(db_path=db_path, state_path=state_path)
         self._maybe_start_fts5_migration()
 
@@ -2907,7 +3233,8 @@ class KnowledgeOrchestrator:
             metrics.observe(FAST_PATH_LATENCY_SECONDS, time.monotonic() - start)
         if not skip_min_hits and len(hits) < config.fts5_min_hits:
             return None
-        formatted = self._format_fts5_results(hits, max_results, category_filter)
+        hydration_limit = candidates if config.fts5_rerank_enabled else max_results
+        formatted = self._format_fts5_results(hits, hydration_limit, category_filter)
         if config.fts5_rerank_enabled and formatted:
             formatted = self._rerank_fts5_results(query_text, formatted, max_results)
         else:
@@ -2954,7 +3281,7 @@ class KnowledgeOrchestrator:
         try:
             fetched = self.collection.get(ids=chunk_ids, include=["documents", "metadatas"])
         except Exception as exc:  # noqa: BLE001 — degrade gracefully; caller falls back
-            print(f"[WARN] FTS5 metadata fetch failed: {exc}")
+            print(f"[WARN] FTS5 metadata fetch failed: {exc}", file=sys.stderr)
             return []
         documents_by_id = dict(zip(fetched.get("ids", []), fetched.get("documents", [])))
         metadata_by_id = dict(zip(fetched.get("ids", []), fetched.get("metadatas", [])))
@@ -3000,6 +3327,7 @@ class KnowledgeOrchestrator:
     # Query — hybrid pipeline (with optional FTS5 fast-path dispatch on top).
     # =========================================================================
 
+    @collection_reader
     def query(
         self,
         query_text: str,
@@ -3027,6 +3355,7 @@ class KnowledgeOrchestrator:
 
         # Cache lookup (5-tuple key includes search_method — different paths
         # produce different result sets, they MUST NOT share cache entries).
+        cache_generation = self.query_cache.generation
         cached = self.query_cache.get(query_text, max_results, category_filter, hybrid_alpha, search_method)
         if cached is not None:
             return cached
@@ -3046,12 +3375,14 @@ class KnowledgeOrchestrator:
                     hybrid_alpha,
                     fast_path_result,
                     search_method=search_method,
+                    expected_generation=cache_generation,
                 )
                 return fast_path_result
         elif search_method == "fts5":
             raise Fts5NotReadyError("FTS5 fast-path is disabled in config; set search.lexical_fast_path.enabled=true")
 
-        self._ensure_bm25_index()
+        if hybrid_alpha < 1.0:
+            self._ensure_bm25_index()
 
         # Keyword routing — informational only.
         # `routed_category` is surfaced via the `routed_by` field for telemetry,
@@ -3094,10 +3425,10 @@ class KnowledgeOrchestrator:
                                 "rank": i + 1,
                                 "distance": results["distances"][0][i] if results["distances"] else 0,
                                 "document": results["documents"][0][i] if results["documents"] else "",
-                                "metadata": results["metadatas"][0][i] if results["metadatas"] else {},
+                                "metadata": (results["metadatas"][0][i] or {}) if results["metadatas"] else {},
                             }
                 except Exception as e:
-                    print(f"[WARN] Semantic search failed: {e}")
+                    print(f"[WARN] Semantic search failed: {e}", file=sys.stderr)
             return r
 
         def _do_bm25():
@@ -3117,13 +3448,13 @@ class KnowledgeOrchestrator:
                         bm25_hits = [
                             (chunk_id, bm25_score)
                             for chunk_id, bm25_score in bm25_hits
-                            if _matches_category(metadata_by_id.get(chunk_id, {}))
+                            if _matches_category(metadata_by_id.get(chunk_id) or {})
                         ]
 
                     for rank, (chunk_id, bm25_score) in enumerate(bm25_hits[: max_results * 3]):
                         r[chunk_id] = {"rank": rank + 1, "bm25_score": bm25_score}
                 except Exception as e:
-                    print(f"[WARN] BM25 search failed: {e}")
+                    print(f"[WARN] BM25 search failed: {e}", file=sys.stderr)
             return r
 
         # Run both in parallel when hybrid mode
@@ -3141,6 +3472,9 @@ class KnowledgeOrchestrator:
         RRF_K = 60
         combined_scores: Dict[str, Dict] = {}
         all_chunk_ids = set(semantic_results.keys()) | set(bm25_results.keys())
+        keyword_documents = self._fetch_keyword_documents(
+            [chunk_id for chunk_id in bm25_results if chunk_id not in semantic_results]
+        )
 
         for chunk_id in all_chunk_ids:
             semantic_rank = semantic_results.get(chunk_id, {}).get("rank", 1000)
@@ -3153,21 +3487,8 @@ class KnowledgeOrchestrator:
             if chunk_id in semantic_results:
                 data = semantic_results[chunk_id]
             else:
-                try:
-                    fetched = self.collection.get(ids=[chunk_id], include=["documents", "metadatas"])
-                    if (
-                        not fetched["documents"]
-                        or not fetched["metadatas"]
-                        or not fetched["documents"][0]
-                        or not fetched["metadatas"][0]
-                    ):
-                        continue
-                    data = {
-                        "document": fetched["documents"][0],
-                        "metadata": fetched["metadatas"][0],
-                        "distance": 0,
-                    }
-                except Exception:
+                data = keyword_documents.get(chunk_id)
+                if data is None:
                     continue
 
             if not _matches_category(data.get("metadata", {})):
@@ -3261,10 +3582,28 @@ class KnowledgeOrchestrator:
             hybrid_alpha,
             formatted,
             search_method=search_method,
+            expected_generation=cache_generation,
         )
         if config.fts5_enabled:
             get_metrics().inc(FAST_PATH_HITS_TOTAL, f'{{path="{hybrid_path_label}"}}')
         return formatted
+
+    def _fetch_keyword_documents(self, chunk_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+        """Fetch BM25-only candidates together, avoiding one DB read per hit."""
+        if not chunk_ids:
+            return {}
+        try:
+            fetched = self.collection.get(ids=chunk_ids, include=["documents", "metadatas"])
+        except Exception as exc:
+            print(f"[WARN] Keyword result fetch failed: {exc}", file=sys.stderr)
+            return {}
+        return {
+            chunk_id: {"document": document, "metadata": metadata or {}, "distance": 0}
+            for chunk_id, document, metadata in zip(
+                fetched.get("ids") or [], fetched.get("documents") or [], fetched.get("metadatas") or []
+            )
+            if document
+        }
 
     def _expand_with_adjacent_chunks(self, results: List[Dict], window: int = 1) -> List[Dict]:
         """
@@ -3311,7 +3650,7 @@ class KnowledgeOrchestrator:
             return results
 
         try:
-            adj_data = self.collection.get(ids=all_adj_ids, include=["documents"])
+            adj_data = self.collection.get(ids=list(dict.fromkeys(all_adj_ids)), include=["documents"])
             fetched = dict(zip(adj_data["ids"], adj_data["documents"]))
         except Exception:
             return results
@@ -3420,7 +3759,7 @@ class KnowledgeOrchestrator:
         try:
             resolved = validate_path_within(config.documents_dir, filepath)
         except PathEscapeError as exc:
-            print(f"[SECURITY] get_document refused escaping path {filepath!r}: {exc}")
+            print(f"[SECURITY] get_document refused escaping path {filepath!r}: {exc}", file=sys.stderr)
             return None
         try:
             doc = self.parser.parse_file(resolved)
@@ -3436,7 +3775,7 @@ class KnowledgeOrchestrator:
                     "chunk_count": len(doc.chunks),
                 }
         except Exception as e:
-            print(f"[ERROR] Failed to read document {resolved}: {e}")
+            print(f"[ERROR] Failed to read document {resolved}: {e}", file=sys.stderr)
         return None
 
     def add_document_from_content(
@@ -3465,58 +3804,70 @@ class KnowledgeOrchestrator:
         if external_source:
             content = sanitize_external_content(content, external_source)
 
-        full_path.parent.mkdir(parents=True, exist_ok=True)
-        full_path.write_text(content, encoding="utf-8")
+        with self._index_lock:
+            result = self._store_document_content(full_path, content, category)
+        if "error" not in result:
+            result["chunks_added"] = result.pop("new_chunks_added")
+            result["category"] = category
+        return result
 
-        doc = self.parser.parse_file(full_path)
-        if not doc:
-            return {"error": "Failed to parse document content"}
-
-        doc.category = category
-        for chunk in doc.chunks:
-            chunk.metadata["category"] = category
-
-        chunks_added, dedup_skipped = self._index_document(doc)
-
-        try:
-            file_stat = full_path.stat()
-            file_mtime = datetime.fromtimestamp(file_stat.st_mtime).isoformat()
-            file_size = file_stat.st_size
-        except OSError:
-            file_mtime = datetime.now().isoformat()
-            file_size = 0
-
-        self._indexed_docs[doc.id] = {
-            "source": str(full_path),
-            "category": category,
-            "format": doc.format,
-            "chunks": chunks_added,
-            "keywords": doc.keywords,
-            "indexed_at": datetime.now().isoformat(),
-            "file_mtime": file_mtime,
-            "file_size": file_size,
-            "embedding_dim": config.embedding_dim,
-        }
-        self._source_to_docid[str(full_path.resolve())] = doc.id
-        self._save_metadata()
+    def _store_document_content(self, path: Path, content: str, category: Optional[str]) -> Dict[str, Any]:
+        """Stage bytes and vectors, restoring both on a failed persistent commit."""
+        old_id = self._source_to_docid.get(str(path))
+        old_info = self._indexed_docs.get(old_id)
+        previous = self._snapshot_document_chunks(old_id)
+        with staged_text_file(path, content) as staged:
+            doc = self.parser.parse_file(staged.path)
+            if not doc:
+                return {"error": "Failed to parse document content"}
+            temporary_stem = staged.path.stem
+            doc.source = path
+            doc.category = category if category is not None else self.parser._detect_category(path)
+            for metadata in [doc.metadata, *(chunk.metadata for chunk in doc.chunks)]:
+                metadata["category"] = doc.category
+                if metadata.get("title") == temporary_stem:
+                    metadata["title"] = path.stem
+            staged.publish()
+            doc.id = self.parser._generate_id(path)
+            source_stat = path.stat()
+            try:
+                added, skipped, removed = self._replace_document_chunks(doc, old_id, previous)
+                if old_id:
+                    self._indexed_docs.pop(old_id, None)
+                self._register_indexed_doc(doc, added, source_stat)
+                self._save_metadata()
+            except Exception:
+                self._rollback_content_document(doc, old_id, old_info, previous)
+                raise
+            staged.committed = True
         self.query_cache.invalidate()
-        self.bm25_index.build_index()
-        self._fts5_sync_add_from_doc(doc)
-
         return {
-            "chunks_added": chunks_added,
-            "dedup_skipped": dedup_skipped,
-            "category": category,
-            "filepath": str(full_path),
+            "new_chunks_added": added,
+            "old_chunks_removed": removed,
+            "dedup_skipped": skipped,
+            "filepath": str(path),
         }
+
+    def _rollback_content_document(self, doc, old_id, old_info, previous) -> None:
+        """Undo the replacement without embedding old text a second time."""
+        ids, _, _, _ = self._dedup_chunks(doc)
+        if ids:
+            self._write_collection.delete(ids=ids)
+            self._fts5_sync_remove_ids(ids)
+        self._restore_document_chunks(previous)
+        self._indexed_docs.pop(doc.id, None)
+        self._source_to_docid.pop(str(doc.source), None)
+        if old_id:
+            self._indexed_docs[old_id] = old_info
+            self._source_to_docid[str(doc.source)] = old_id
+        self._bm25_initialized = False
+        self.query_cache.invalidate()
 
     def _fts5_sync_add_from_doc(self, doc: Document) -> None:
         """Insert every chunk of ``doc`` into FTS5. Best-effort (ADR-008)."""
         if not (config.fts5_enabled and self.fts5_index is not None and doc.chunks):
             return
-        ids = [f"{doc.id}_{chunk.index}" for chunk in doc.chunks]
-        docs_content = [chunk.content for chunk in doc.chunks]
-        metas = [{"filename": doc.filename, "category": doc.category} for _ in doc.chunks]
+        ids, docs_content, metas, _ = self._dedup_chunks(doc)
         self._fts5_sync_add(ids, docs_content, metas)
 
     def update_document_content(self, filepath: str, content: str) -> Dict[str, Any]:
@@ -3530,61 +3881,10 @@ class KnowledgeOrchestrator:
         except PathEscapeError as exc:
             return {"error": f"Filepath rejected: {exc}"}
 
-        if not filepath.exists():
-            return {"error": f"File not found: {filepath}"}
-
-        # Resolve to absolute for consistent comparison with stored metadata
-        filepath_resolved = str(filepath.resolve())
-
-        doc_id = self._source_to_docid.get(filepath_resolved)
-
-        old_chunks_removed = 0
-        if doc_id:
-            self._fts5_sync_remove_by_doc_id(doc_id)
-            old_chunks_removed = self._remove_document_chunks(doc_id)
-            self._source_to_docid.pop(filepath_resolved, None)
-            del self._indexed_docs[doc_id]
-
-        filepath.write_text(content, encoding="utf-8")
-
-        doc = self.parser.parse_file(filepath)
-        if not doc:
-            self._save_metadata()
-            return {"error": "Failed to parse updated content", "old_chunks_removed": old_chunks_removed}
-
-        new_chunks_added, dedup_skipped = self._index_document(doc)
-
-        try:
-            file_stat = filepath.stat()
-            file_mtime = datetime.fromtimestamp(file_stat.st_mtime).isoformat()
-            file_size = file_stat.st_size
-        except OSError:
-            file_mtime = datetime.now().isoformat()
-            file_size = 0
-
-        self._indexed_docs[doc.id] = {
-            "source": str(filepath),
-            "category": doc.category,
-            "format": doc.format,
-            "chunks": new_chunks_added,
-            "keywords": doc.keywords,
-            "indexed_at": datetime.now().isoformat(),
-            "file_mtime": file_mtime,
-            "file_size": file_size,
-            "embedding_dim": config.embedding_dim,
-        }
-        self._source_to_docid[str(filepath.resolve())] = doc.id
-        self._save_metadata()
-        self.query_cache.invalidate()
-        self.bm25_index.build_index()
-        self._fts5_sync_add_from_doc(doc)
-
-        return {
-            "old_chunks_removed": old_chunks_removed,
-            "new_chunks_added": new_chunks_added,
-            "dedup_skipped": dedup_skipped,
-            "filepath": str(filepath),
-        }
+        with self._index_lock:
+            if not filepath.exists():
+                return {"error": f"File not found: {filepath}"}
+            return self._store_document_content(filepath, content, None)
 
     def remove_document_by_path(self, filepath: str, delete_file: bool = False) -> Dict[str, Any]:
         """Remove a document from the index. Optionally delete from disk.
@@ -3598,28 +3898,36 @@ class KnowledgeOrchestrator:
         except PathEscapeError as exc:
             return {"error": f"Filepath rejected: {exc}"}
 
-        filepath_resolved = str(resolved_path)
+        with self._index_lock:
+            return self._remove_document_by_path(resolved_path, delete_file)
 
-        doc_id = self._source_to_docid.get(filepath_resolved)
-
+    def _remove_document_by_path(self, path: Path, delete_file: bool) -> Dict[str, Any]:
+        """Keep metadata consistent with failed backend deletion and honest file status."""
+        source = str(path)
+        doc_id = self._source_to_docid.get(source)
         if not doc_id:
-            return {"error": f"Document not found in index: {filepath}"}
-
-        self._fts5_sync_remove_by_doc_id(doc_id)
-        chunks_removed = self._remove_document_chunks(doc_id)
-        self._source_to_docid.pop(filepath_resolved, None)
+            return {"error": f"Document not found in index: {path}"}
+        previous = self._snapshot_document_chunks(doc_id)
+        old_info = self._indexed_docs[doc_id]
+        removed = self._remove_document_chunks(doc_id)
         del self._indexed_docs[doc_id]
-
+        self._source_to_docid.pop(source, None)
+        try:
+            self._save_metadata()
+        except Exception:
+            self._restore_document_chunks(previous)
+            self._indexed_docs[doc_id] = old_info
+            self._source_to_docid[source] = doc_id
+            raise
+        result = {"chunks_removed": removed, "filepath": source, "file_deleted": False}
         if delete_file:
             try:
-                resolved_path.unlink(missing_ok=True)
-            except Exception as e:
-                print(f"[WARN] Failed to delete file {filepath}: {e}")
-
-        self._save_metadata()
+                path.unlink(missing_ok=True)
+                result["file_deleted"] = True
+            except OSError as exc:
+                result["file_delete_error"] = str(exc)
         self.query_cache.invalidate()
-
-        return {"chunks_removed": chunks_removed, "filepath": filepath_resolved, "file_deleted": delete_file}
+        return result
 
     def add_from_url(self, url: str, category: str, title: str = None) -> Dict[str, Any]:
         """Fetch URL content, convert to markdown, and add to knowledge base."""
@@ -3657,6 +3965,7 @@ class KnowledgeOrchestrator:
         # ever reaches the parser or the LLM that will consume the RAG output.
         return self.add_document_from_content(clean_text, filepath, category, external_source=url)
 
+    @collection_reader
     def search_similar(self, filepath: str, max_results: int = 5) -> List[Dict[str, Any]]:
         """Find documents similar to a given document using embedding similarity.
 
@@ -3664,10 +3973,10 @@ class KnowledgeOrchestrator:
         list rather than probing index state — an attacker must not be able
         to use this endpoint to test for the existence of arbitrary files.
         """
-        if not is_path_within(config.documents_dir, filepath):
+        try:
+            filepath_resolved = str(validate_path_within(config.documents_dir, filepath))
+        except PathEscapeError:
             return []
-
-        filepath_resolved = str(Path(filepath).resolve())
 
         doc_id = self._source_to_docid.get(filepath_resolved)
 
@@ -3676,10 +3985,8 @@ class KnowledgeOrchestrator:
 
         try:
             results = self.collection.get(where={"doc_id": doc_id}, include=["embeddings"], limit=1)
-            if not results["ids"] or not results.get("embeddings"):
-                return []
-            embeddings = results.get("embeddings", [])
-            if not embeddings:
+            embeddings = results.get("embeddings")
+            if not results["ids"] or embeddings is None or len(embeddings) == 0:
                 return []
             query_embedding = embeddings[0]
         except Exception:
@@ -3700,7 +4007,7 @@ class KnowledgeOrchestrator:
         seen_sources = set()
         output = []
         for i, chunk_id in enumerate(similar["ids"][0]):
-            meta = similar["metadatas"][0][i]
+            meta = (similar["metadatas"][0][i] or {}) if similar["metadatas"] else {}
             source = meta.get("source", "")
 
             if meta.get("doc_id") == doc_id:
@@ -3728,7 +4035,8 @@ class KnowledgeOrchestrator:
         return output
 
     def evaluate_retrieval(self, test_cases: List[Dict[str, str]]) -> Dict[str, Any]:
-        """Evaluate retrieval quality with test queries. Returns MRR@5, Recall@5, Precision@5."""
+        """Evaluate retrieval quality with test queries. Returns MRR@5 and Recall@5."""
+        _validate_retrieval_cases(test_cases)
         per_query = []
         mrr_sum = 0.0
         recall_sum = 0.0
@@ -3742,7 +4050,7 @@ class KnowledgeOrchestrator:
 
             found_rank = None
             for i, r in enumerate(results):
-                if expected in r.get("source", ""):
+                if _matches_expected_path(r.get("source", ""), expected):
                     found_rank = i + 1
                     break
 
@@ -3800,6 +4108,7 @@ class KnowledgeOrchestrator:
             )
         return docs
 
+    @collection_reader
     def get_stats(self) -> Dict[str, Any]:
         """Get index statistics including background reindex progress."""
         stats = {
@@ -3880,19 +4189,49 @@ class KnowledgeOrchestrator:
         return result
 
     def _load_metadata(self) -> Dict[str, Dict]:
-        """Load index metadata from disk"""
-        if self._metadata_file.exists():
-            try:
-                return json.loads(self._metadata_file.read_text(encoding="utf-8"))
-            except Exception:
-                pass
-        return {}
+        """Read validated metadata; never silently replace a corrupt state file."""
+        if not self._metadata_file.exists():
+            return {}
+        try:
+            data = json.loads(self._metadata_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"Cannot load index metadata: {self._metadata_file}") from exc
+        if not isinstance(data, dict) or any(
+            not isinstance(key, str) or not isinstance(value, dict) or not isinstance(value.get("source"), str)
+            for key, value in data.items()
+        ):
+            raise ValueError(f"Invalid index metadata schema: {self._metadata_file}")
+        return data
 
     def _save_metadata(self) -> None:
-        """Save index metadata to disk"""
+        """Atomically publish metadata; staging has no permission to publish."""
+        if not getattr(self, "_persist_metadata", True):
+            return
+        import tempfile
+
         self._metadata_file.parent.mkdir(parents=True, exist_ok=True)
         snapshot = dict(self._indexed_docs)
-        self._metadata_file.write_text(json.dumps(snapshot, indent=2, ensure_ascii=False), encoding="utf-8")
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=self._metadata_file.parent,
+            prefix=self._metadata_file.name,
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            try:
+                json.dump(snapshot, stream, indent=2, ensure_ascii=False)
+                stream.flush()
+                os.fsync(stream.fileno())
+            except BaseException:
+                stream.close()
+                temporary.unlink(missing_ok=True)
+                raise
+        try:
+            os.replace(temporary, self._metadata_file)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     # =========================================================================
     # v4.8.0 Fase 4: reindex checkpoint (resume support)
@@ -3907,7 +4246,17 @@ class KnowledgeOrchestrator:
         embedding model or chunk size would produce a mixed collection
         (partial old + partial new), which is worse than a full restart.
         """
-        payload = f"{config.embedding_model}|{config.embedding_dim}|{config.chunk_size}|{config.chunk_overlap}"
+        payload = json.dumps(
+            [
+                config.embedding_model,
+                config.embedding_dim,
+                config.chunk_size,
+                config.chunk_overlap,
+                config.query_prefix,
+                config.passage_prefix,
+            ],
+            ensure_ascii=False,
+        )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def _write_checkpoint(
@@ -3958,22 +4307,39 @@ class KnowledgeOrchestrator:
         try:
             data = json.loads(self._checkpoint_file.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as e:
-            print(f"[WARN] Corrupt checkpoint file, ignoring: {e}")
+            print(f"[WARN] Corrupt checkpoint file, ignoring: {e}", file=sys.stderr)
             return None
 
         if not isinstance(data, dict):
-            print("[WARN] Checkpoint payload is not a dict, ignoring")
+            print("[WARN] Checkpoint payload is not a dict, ignoring", file=sys.stderr)
             return None
 
         version = data.get("version")
-        if version != self.CHECKPOINT_VERSION:
-            print(f"[WARN] Checkpoint version {version} != current {self.CHECKPOINT_VERSION}, ignoring")
+        if type(version) is not int or version != self.CHECKPOINT_VERSION:
+            print(
+                f"[WARN] Checkpoint version {version} != current {self.CHECKPOINT_VERSION}, ignoring", file=sys.stderr
+            )
+            return None
+
+        ids = data.get("indexed_doc_ids")
+        chunks = data.get("chunks_processed")
+        if (
+            not isinstance(ids, list)
+            or any(not isinstance(doc_id, str) for doc_id in ids)
+            or type(chunks) is not int
+            or chunks < 0
+            or data.get("operation") != "smart_reindex"
+        ):
+            print("[WARN] Invalid checkpoint fields, ignoring", file=sys.stderr)
             return None
 
         stored_sig = data.get("config_signature")
         current_sig = self._compute_config_signature()
         if stored_sig != current_sig:
-            print("[WARN] Checkpoint config_signature mismatch (embedding model or chunking changed) — starting fresh")
+            print(
+                "[WARN] Checkpoint config_signature mismatch (embedding model or chunking changed) — starting fresh",
+                file=sys.stderr,
+            )
             return None
 
         return data
@@ -3984,7 +4350,7 @@ class KnowledgeOrchestrator:
             if self._checkpoint_file.exists():
                 self._checkpoint_file.unlink()
         except OSError as e:
-            print(f"[WARN] Failed to remove checkpoint file: {e}")
+            print(f"[WARN] Failed to remove checkpoint file: {e}", file=sys.stderr)
 
     def _build_source_lookup(self) -> Dict[str, str]:
         """Build reverse lookup from resolved source path to doc_id."""
@@ -4002,7 +4368,7 @@ class KnowledgeOrchestrator:
 
 mcp = MCPServer(
     "knowledge-rag",
-    version="4.6.0",
+    version=__version__,
 )
 
 _orchestrator: Optional[KnowledgeOrchestrator] = None
@@ -4067,7 +4433,7 @@ def search_knowledge(
 
     Args:
         query: Search query text (1–3 keywords recommended; phrase queries also work)
-        max_results: Maximum number of results (default: 5, max: 20)
+        max_results: Maximum number of results (default: 5, capped by search.max_results).
         category: Optional category filter — one of: security, ctf, logscale, development, general,
             redteam, blueteam. Call list_categories() first to see available categories and counts.
         hybrid_alpha: Balance between semantic and keyword search. 0.0 = keyword-only (best for exact
@@ -4143,10 +4509,10 @@ def search_knowledge(
         results = [r for r in results if r.get("score", 0) >= min_score]
 
     if snippet_mode:
-        for r in results:
-            full_len = len(r.get("content", ""))
-            r["content"] = _make_snippet(r["content"])
-            r["content_length"] = full_len
+        results = [
+            {**row, "content": _make_snippet(row["content"]), "content_length": len(row.get("content", ""))}
+            for row in results
+        ]
 
     return json.dumps(
         {
@@ -4226,7 +4592,7 @@ def _load_reindex_resume_state(orchestrator) -> Optional[Dict[str, Any]]:
     """
     cp = orchestrator._load_checkpoint()
     if cp is None:
-        print("[INFO] resume=True but no valid checkpoint — starting fresh smart reindex")
+        print("[INFO] resume=True but no valid checkpoint — starting fresh smart reindex", file=sys.stderr)
         return None
     return {
         "doc_ids": cp.get("indexed_doc_ids", []),
@@ -4382,8 +4748,9 @@ def get_index_stats() -> str:
         JSON string with system metrics: total documents, total chunks, embedding model name,
         BM25 status, query cache hit rate, and file watcher status.
 
-    Usage: Use for system health checks — verifying the embedding model loaded, checking
-    index population, or monitoring cache efficiency. Use list_categories() for per-category
+    Usage: Use for system health checks — inspecting embedding runtime status, checking
+    index population, or monitoring cache efficiency. This does not load the embedding
+    model or initialize BM25. Use list_categories() for per-category
     document counts instead. Use evaluate_retrieval() to measure actual search quality with
     test queries.
     """
@@ -4581,6 +4948,34 @@ def search_similar(filepath: str, max_results: int = 5) -> str:
     )
 
 
+def _matches_expected_path(source: str, expected: str) -> bool:
+    """Match complete path components across Windows and POSIX separators."""
+    source_parts = PurePosixPath(source.replace("\\", "/")).parts
+    expected_path = PurePosixPath(expected.replace("\\", "/"))
+    expected_parts = expected_path.parts
+    if not expected_parts:
+        return False
+    if PureWindowsPath(source).drive:
+        source_parts = tuple(part.casefold() for part in source_parts)
+        expected_parts = tuple(part.casefold() for part in expected_parts)
+    if expected_path.is_absolute() or PureWindowsPath(expected).is_absolute():
+        return source_parts == expected_parts
+    return source_parts[-len(expected_parts) :] == expected_parts
+
+
+def _validate_retrieval_cases(test_cases: Any) -> None:
+    """Reject cases that would produce meaningless or artificially perfect scores."""
+    if not isinstance(test_cases, list) or not test_cases:
+        raise ValueError("test_cases must be a non-empty JSON array")
+    for index, case in enumerate(test_cases):
+        if not isinstance(case, dict):
+            raise ValueError(f"test_cases[{index}] must be an object")
+        for field_name in ("query", "expected_filepath"):
+            value = case.get(field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"test_cases[{index}].{field_name} must be a non-empty string")
+
+
 @mcp.tool()
 @rate_limited
 @instrument("evaluate_retrieval")
@@ -4608,8 +5003,10 @@ def evaluate_retrieval(test_cases: str) -> str:
     except json.JSONDecodeError:
         return json.dumps({"status": "error", "message": "Invalid JSON for test_cases"})
 
-    if not isinstance(cases, list) or not cases:
-        return json.dumps({"status": "error", "message": "test_cases must be a non-empty JSON array"})
+    try:
+        _validate_retrieval_cases(cases)
+    except ValueError as exc:
+        return json.dumps({"status": "error", "message": str(exc)})
 
     orchestrator = get_orchestrator()
     results = orchestrator.evaluate_retrieval(cases)
@@ -4741,6 +5138,21 @@ def _run_transport(transport: str) -> None:
     uvicorn.run(served, host=config.server_host, port=config.server_port)
 
 
+def _resolve_transport(arguments: Sequence[str]) -> str:
+    """Resolve and validate CLI overrides before startup uses transport settings."""
+    transport = config.transport
+    for index, argument in enumerate(arguments):
+        if argument == "--transport":
+            if index + 1 >= len(arguments):
+                raise ValueError("--transport requires a value")
+            transport = arguments[index + 1]
+        elif argument.startswith("--transport="):
+            transport = argument.split("=", 1)[1]
+    if transport not in ("stdio", *_HTTP_TRANSPORTS):
+        raise ValueError(f"Unknown transport: {transport!r}")
+    return transport
+
+
 def main():
     """Run the MCP server"""
     if len(sys.argv) > 1 and sys.argv[1] == "init":
@@ -4764,12 +5176,8 @@ def main():
 
     try:
         # SSE/HTTP mode: auto-enable single-instance lock (port collision prevention)
-        transport = config.transport
-        for i, arg in enumerate(sys.argv[1:], 1):
-            if arg == "--transport" and i < len(sys.argv) - 1:
-                transport = sys.argv[i + 1]
-            elif arg.startswith("--transport="):
-                transport = arg.split("=", 1)[1]
+        transport = _resolve_transport(sys.argv[1:])
+        config.transport = transport
         if transport != "stdio":
             os.environ["KNOWLEDGE_RAG_SINGLE_INSTANCE"] = "1"
 
@@ -4781,16 +5189,17 @@ def main():
             # Migration: check dimension mismatch AFTER full init (avoids segfault during __init__)
             orchestrator._needs_rebuild = orchestrator._check_dimension_mismatch()
             if orchestrator._needs_rebuild:
-                print("[MIGRATION] Running nuclear rebuild for embedding model change...")
+                print("[MIGRATION] Running nuclear rebuild for embedding model change...", file=sys.stderr)
                 try:
                     stats = orchestrator.nuclear_rebuild()
                     print(
                         f"[MIGRATION] Rebuild complete: {stats['indexed']} docs, "
-                        f"{stats['chunks_added']} chunks in {stats.get('elapsed_seconds', '?')}s"
+                        f"{stats['chunks_added']} chunks in {stats.get('elapsed_seconds', '?')}s",
+                        file=sys.stderr,
                     )
                 except Exception as e:
-                    print(f"[ERROR] Migration failed: {e}")
-                    print("[FALLBACK] Attempting regular index instead...")
+                    print(f"[ERROR] Migration failed: {e}", file=sys.stderr)
+                    print("[FALLBACK] Attempting regular index instead...", file=sys.stderr)
                     stats = orchestrator.index_all(force=True)
             elif orchestrator.collection.count() == 0:
                 # GH #216: initial indexing runs in a background thread so it
@@ -4799,13 +5208,16 @@ def main():
                 # clients to timeout, kill the process, and restart into an
                 # empty index — an endless full-reindex loop. Users poll
                 # get_reindex_status() to track progress.
-                print("[INFO] No documents indexed. Starting initial indexing in background...")
+                print("[INFO] No documents indexed. Starting initial indexing in background...", file=sys.stderr)
                 orchestrator.start_reindex_background("incremental")
-                print("[INFO] Initial indexing runs in background. Track progress with get_reindex_status.")
+                print(
+                    "[INFO] Initial indexing runs in background. Track progress with get_reindex_status.",
+                    file=sys.stderr,
+                )
 
             # Start file watcher for auto-reindex on document changes
             if os.environ.get("KNOWLEDGE_RAG_WATCHER_DISABLED", "").strip() == "1":
-                print("[WATCHER] Disabled via KNOWLEDGE_RAG_WATCHER_DISABLED=1")
+                print("[WATCHER] Disabled via KNOWLEDGE_RAG_WATCHER_DISABLED=1", file=sys.stderr)
             else:
                 try:
                     watcher = DocumentWatcher(get_orchestrator, debounce_seconds=10.0)
@@ -4813,29 +5225,16 @@ def main():
                     observer.schedule(watcher, str(config.documents_dir), recursive=True)
                     observer.daemon = True
                     observer.start()
-                    print(f"[WATCHER] Monitoring {config.documents_dir} for changes")
+                    print(f"[WATCHER] Monitoring {config.documents_dir} for changes", file=sys.stderr)
                 except Exception as e:
-                    print(f"[WARN] Failed to start file watcher: {e}")
-                    print("[WARN] Auto-reindexing disabled. Use reindex_documents tool manually.")
+                    print(f"[WARN] Failed to start file watcher: {e}", file=sys.stderr)
+                    print("[WARN] Auto-reindexing disabled. Use reindex_documents tool manually.", file=sys.stderr)
 
             # Start optional metrics server
             if config.metrics_enabled and config.transport != "stdio":
                 from .metrics import start_metrics_server
 
                 start_metrics_server(config.metrics_port)
-
-            # Restore real stdout for MCP JSON-RPC, keep print() going to stderr
-            from . import _original_stdout
-
-            sys.stdout = _original_stdout
-
-            # Parse --transport CLI override
-            transport = config.transport
-            for i, arg in enumerate(sys.argv[1:], 1):
-                if arg == "--transport" and i < len(sys.argv) - 1:
-                    transport = sys.argv[i + 1]
-                elif arg.startswith("--transport="):
-                    transport = arg.split("=", 1)[1]
 
             if transport != "stdio":
                 print(

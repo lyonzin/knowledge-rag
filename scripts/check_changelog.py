@@ -1,4 +1,4 @@
-"""Enforce that user-facing PRs add an entry under README.md > ## Unreleased.
+"""Enforce a new user-facing CHANGELOG.md entry (README.md legacy fallback).
 
 Used by .github/workflows/quality-gate.yml on pull_request events. Runs
 locally too:
@@ -12,8 +12,8 @@ Logic:
        feat / fix / perf / refactor      => CHANGELOG entry REQUIRED
        docs / chore / ci / test / build  => skipped (not user-facing)
        style / revert                    => skipped
-3. Compare README.md against `master`. If the conventional-commit type
-   requires an entry, then `## Unreleased` (or `## v3.X.Y`) must have
+3. Compare CHANGELOG.md against `master`. If the conventional-commit type
+   requires an entry, then `### Unreleased` (or `### vX.Y.Z`) must have
    gained at least one new bullet line.
 
 Skip via PR label `skip-changelog` if the maintainer agrees a change
@@ -76,7 +76,7 @@ def _conventional_type(title: str) -> str | None:
 
 
 def _read_unreleased_section(text: str) -> str:
-    """Extract the body of the ## Unreleased heading, up to the next H2."""
+    """Extract the ### Unreleased body up to the next H3 or H2 heading."""
     pattern = re.compile(
         r"^### Unreleased\s*\n(?P<body>.*?)(?=^### |^## |\Z)",
         re.MULTILINE | re.DOTALL,

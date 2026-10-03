@@ -1,4 +1,4 @@
-successfully downloaded text file (SHA: bf3039601aff729e487a1178c6abd69c4dc61a9b)[Resource from github at repo://lyonzin/knowledge-rag/sha/6ef97ce3bab9e8d05f904e5d68f42b52cf2cab98/contents/CHANGELOG.md] # Changelog
+# Changelog
 
 All notable changes to **knowledge-rag** are documented in this file.
 
@@ -14,6 +14,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ---
 
 ### Unreleased
+
+**Fixed:**
+
+- Bound metric histogram memory to aggregates per series and emit valid labeled Prometheus samples.
+- Preserve ChromaDB data on collection-opening errors; preserve prior document/index state on handled indexing, mutation and rebuild-publication failures.
+- Drain in-flight collection readers during final publication, retain source timestamps from before parsing, persist partial orphan-pruning successes, and clean retired collection backups conservatively.
+- Skip unchanged files before parsing, bound pending indexing work, validate traversal containment, and prevent duplicate overlap-only chunks.
+- Make FTS5 chunk replay idempotent, index chunk identities for updates, validate migration completion, and synchronize derived lexical state with document/index mutations.
+- Choose embedding batch size from the actual execution provider, validate batch overrides and every output vector, and synchronize lazy model initialization.
+- Preserve full-content cached search results, batch keyword-hit hydration, and rerank the full FTS5 candidate pool before truncating results.
+- Reject cache writes from queries that started before a newer invalidation, preventing old content from repopulating the cache after document updates.
+- Use non-signaling Windows PID checks and a stable OS file lock for stale-PID races and crash recovery; resolve preflight paths and keep diagnostics off the MCP stdio protocol stream.
+- Handle absent Chroma metadata in retrieval, avoid loading BM25 for semantic-only searches, and preserve cache invalidation when post-commit backup cleanup fails.
+- Respect configured custom Chroma directories in the standalone FTS5 builder unless an explicit data-directory override is supplied.
+- Match retrieval evaluation sources by path components across Windows and Unix instead of arbitrary substrings.
+- Share repeated BM25 vocabulary strings within each index and publish coherent scoring snapshots without blocking lazy reads behind ingestion.
+- Preserve invalid installer JSON, honor the chosen Python executable, make dry-run side-effect free, and safely forward arguments on PowerShell 5.1 and Bash 3.2-compatible shells.
+- Include the multilingual preset in the wheel and synchronize bundled templates; detect additional breaking call-shape changes in the public API gate.
+- Measure RSS in bytes separately from benchmark duration and retain explicit workload identities and raw measurements in CI artifacts.
+
+**Added:**
+
+- Explicit Windows DirectML embedding mode with a required adapter index, effective-session safety checks, serialized inference and CPU fallback. Automatic GPU selection remains CUDA/CPU.
+- An opt-in real indexing/retrieval audit harness with temporary ChromaDB/FTS5 storage, CPU/GPU selection, corpus/model hashes, mutation/reopen checks and measured query quality.
+
+**Documentation:**
+
+- Correct configuration/API examples, reindex recovery and model migration guidance, FTS5 counters/readiness, multi-client boundaries, and the limitations of security and quality claims.
+- Record measured memory/storage changes, CPU/CUDA/AMD validation boundaries, and the review of open PRs/issues in `docs/audit-2026-10-03.md`.
+
+### v4.9.3 (2026-10-01) — Hotfix: cap FastEmbed batch_size at 32 under CPU execution
+
+**Fixed:**
+
+- **fix(embeddings)** — GH #224: `FastEmbedEmbeddings._embed` now caps FastEmbed's internal `batch_size` at 32 when the active ONNX provider is CPU (previously used FastEmbed's default of 256). ONNXRuntime's BFC arena allocates `batch_size * seq_len * hidden * layers * 4` for intermediate reshape tensors — the worst-case ~500MB allocation (`Failed to allocate memory for requested buffer of size 503316480`) ran out of contiguous heap during ingestion of minified JS and large JSON on Windows, crashing CPU indexing while GPU runs on the same corpus completed cleanly (VRAM is contiguous). The new path dispatches `batch_size=32` for CPU and `batch_size=256` for CUDA, with env var `KNOWLEDGE_RAG_EMBED_BATCH_SIZE` and YAML key `documents.embed_batch_size` as per-workload overrides. Public MCP tool surface unchanged (12 tools, same signatures). CPU throughput reduced ~20–30% in exchange for unblocking users who previously saw 100% ingestion failure on affected corpora; GPU users see no change. 3 new regression tests pin CPU default, CUDA default, and env override behavior.
 
 ### v4.9.2 (2026-09-29) — Post-review hotfix: rename atomicity, real-thread test guard, operating-model docs
 

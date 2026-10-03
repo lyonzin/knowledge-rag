@@ -49,25 +49,25 @@ class TestBatchSizeConfig:
         c = Config(batch_size=0)
         assert c.batch_size == 1
         captured = capsys.readouterr()
-        assert "batch_size" in captured.out and "clamping to 1" in captured.out
+        assert "batch_size" in captured.err and "clamping to 1" in captured.err
 
     def test_batch_size_negative_clamped_with_warn(self, capsys):
         c = Config(batch_size=-42)
         assert c.batch_size == 1
         captured = capsys.readouterr()
-        assert "batch_size" in captured.out
+        assert "batch_size" in captured.err
 
     def test_batch_size_above_5000_clamped_with_warn(self, capsys):
         c = Config(batch_size=999_999)
         assert c.batch_size == 5000
         captured = capsys.readouterr()
-        assert "batch_size" in captured.out and "5000" in captured.out
+        assert "batch_size" in captured.err and "5000" in captured.err
 
     def test_batch_size_wrong_type_clamped_with_warn(self, capsys):
         c = Config(batch_size="lots")  # type: ignore[arg-type]
         assert c.batch_size == 1
         captured = capsys.readouterr()
-        assert "batch_size" in captured.out
+        assert "batch_size" in captured.err
 
 
 # =============================================================================
@@ -89,19 +89,19 @@ class TestParallelWorkersConfig:
         c = Config(parallel_workers=64)
         assert c.parallel_workers == 16
         captured = capsys.readouterr()
-        assert "parallel_workers" in captured.out and "16" in captured.out
+        assert "parallel_workers" in captured.err and "16" in captured.err
 
     def test_parallel_workers_below_1_clamped_with_warn(self, capsys):
         c = Config(parallel_workers=0)
         assert c.parallel_workers == 1
         captured = capsys.readouterr()
-        assert "parallel_workers" in captured.out
+        assert "parallel_workers" in captured.err
 
     def test_parallel_workers_wrong_type_clamped_with_warn(self, capsys):
         c = Config(parallel_workers="many")  # type: ignore[arg-type]
         assert c.parallel_workers == 1
         captured = capsys.readouterr()
-        assert "parallel_workers" in captured.out
+        assert "parallel_workers" in captured.err
 
     def test_windows_over_4_workers_emits_extra_warn(self, capsys, monkeypatch):
         """On Windows, workers > 4 gets an extra stability WARN."""
@@ -111,8 +111,8 @@ class TestParallelWorkersConfig:
         assert c.parallel_workers == 8  # not clamped (within [1, 16])
 
         captured = capsys.readouterr()
-        assert "Windows" in captured.out
-        assert "ONNX" in captured.out or "SQLite" in captured.out
+        assert "Windows" in captured.err
+        assert "ONNX" in captured.err or "SQLite" in captured.err
 
     def test_non_windows_over_4_workers_no_extra_warn(self, capsys, monkeypatch):
         """Linux/macOS at workers > 4 must NOT emit the Windows WARN."""
@@ -122,7 +122,7 @@ class TestParallelWorkersConfig:
         assert c.parallel_workers == 8
 
         captured = capsys.readouterr()
-        assert "Windows" not in captured.out
+        assert "Windows" not in captured.err
 
 
 # =============================================================================
@@ -177,8 +177,8 @@ class TestIndexingBatching:
         assert indexed == 100
         assert skipped == 0
         mock_pool.assert_not_called()
-        # 4 sequential add() calls (100 chunks / 25 batch)
-        assert orch.collection.add.call_count == 4
+        # 4 sequential upsert() calls (100 chunks / 25 batch)
+        assert orch.collection.upsert.call_count == 4
 
     def test_multi_worker_uses_thread_pool(self, monkeypatch):
         """When parallel_workers > 1 AND >1 batch, ThreadPoolExecutor is used."""
@@ -190,7 +190,7 @@ class TestIndexingBatching:
 
         with patch("concurrent.futures.ThreadPoolExecutor") as mock_pool_cls:
             # Rig the mock to behave like the real Executor context manager
-            # AND actually call the submitted callables (so orch.collection.add
+            # AND actually call the submitted callables (so orch.collection.upsert
             # is invoked with the right slices).
             mock_pool = MagicMock()
             mock_pool_cls.return_value.__enter__.return_value = mock_pool
@@ -210,8 +210,8 @@ class TestIndexingBatching:
         mock_pool_cls.assert_called_once_with(max_workers=4)
         # 4 submit() calls — one per batch
         assert mock_pool.submit.call_count == 4
-        # collection.add() called 4 times (via _fake_submit)
-        assert orch.collection.add.call_count == 4
+        # collection.upsert() called 4 times (via _fake_submit)
+        assert orch.collection.upsert.call_count == 4
 
     def test_multi_worker_single_batch_skips_pool(self, monkeypatch):
         """workers > 1 but only 1 batch → skip ThreadPoolExecutor (no benefit)."""
@@ -226,10 +226,10 @@ class TestIndexingBatching:
 
         assert indexed == 50
         mock_pool.assert_not_called()
-        assert orch.collection.add.call_count == 1
+        assert orch.collection.upsert.call_count == 1
 
     def test_batch_size_respected_in_sequential_path(self, monkeypatch):
-        """collection.add() must be called with slices of size == config.batch_size."""
+        """collection.upsert() must be called with slices of size == config.batch_size."""
         monkeypatch.setattr("mcp_server.server.config.batch_size", 10)
         monkeypatch.setattr("mcp_server.server.config.parallel_workers", 1)
 
@@ -240,8 +240,8 @@ class TestIndexingBatching:
 
         assert indexed == 25
         # 3 calls: sizes 10, 10, 5
-        assert orch.collection.add.call_count == 3
-        sizes = [len(call.kwargs["ids"]) for call in orch.collection.add.call_args_list]
+        assert orch.collection.upsert.call_count == 3
+        sizes = [len(call.kwargs["ids"]) for call in orch.collection.upsert.call_args_list]
         assert sizes == [10, 10, 5]
 
     def test_fallback_to_class_constant_when_config_missing_batch_size(self, monkeypatch):
@@ -257,7 +257,7 @@ class TestIndexingBatching:
 
         assert indexed == 50
         # 50 < 500 (_CHROMA_BATCH_SIZE fallback) → single batch
-        assert orch.collection.add.call_count == 1
+        assert orch.collection.upsert.call_count == 1
 
     def test_parallel_path_propagates_first_exception(self, monkeypatch):
         """When one worker fails, .result() raises — indexing surfaces the error."""
@@ -267,7 +267,7 @@ class TestIndexingBatching:
         orch = _build_orchestrator_mocks()
         doc = _make_doc_with_chunks(60)  # 3 batches
 
-        # Rig collection.add to raise on the second call
+        # Rig collection.upsert to raise on the second call
         call_count = {"n": 0}
 
         def _raise_on_second(**_kwargs):
@@ -275,7 +275,7 @@ class TestIndexingBatching:
             if call_count["n"] == 2:
                 raise RuntimeError("simulated ChromaDB write failure")
 
-        orch.collection.add.side_effect = _raise_on_second
+        orch.collection.upsert.side_effect = _raise_on_second
 
         with pytest.raises(RuntimeError, match="simulated ChromaDB write failure"):
             orch._index_document(doc)
@@ -297,5 +297,5 @@ class TestIndexingBatching:
         indexed, skipped = orch._index_document(empty_doc)
 
         assert indexed == 0 and skipped == 0
-        orch.collection.add.assert_not_called()
+        orch.collection.upsert.assert_not_called()
         orch.bm25_index.add_documents.assert_not_called()
