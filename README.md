@@ -183,7 +183,7 @@ knowledge-rag --transport sse
 
 ### Multi-client setup (Shared Server via Streamable HTTP)
 
-`stdio` is ideal when one MCP client owns one `knowledge-rag` process. If several clients (e.g. Claude Desktop, Cursor, LM Studio, or multiple terminal windows) should share one index and one running process, run `knowledge-rag` once with Streamable HTTP and point each HTTP-capable client at the same endpoint:
+`stdio` is ideal when one MCP client owns one `knowledge-rag` process. If several clients (e.g. Claude, Cursor, LM Studio, or multiple terminal windows) should share one index and one running process, run `knowledge-rag` once with Streamable HTTP and point each HTTP-capable client at the same endpoint (prompted by [#217](https://github.com/lyonzin/knowledge-rag/pull/217) and issue [#223](https://github.com/lyonzin/knowledge-rag/issues/223)):
 
 ```bash
 knowledge-rag --transport streamable-http
@@ -191,13 +191,15 @@ knowledge-rag --transport streamable-http
 ```
 
 - **Local MCP clients (Cursor, LM Studio, etc.):** Point their remote-server URL directly at `http://127.0.0.1:8179/mcp`.
-- **Claude Desktop / Remote Connectors:** If connecting from cloud-based or remote connectors (**Settings → Connectors → Add custom connector**), expose the endpoint with a public URL (e.g. via Cloudflare Tunnel, ngrok, or reverse proxy) since Anthropic's cloud cannot reach local `127.0.0.1`. Note: Do not configure remote HTTP endpoints inside `claude_desktop_config.json`; that file is reserved for local process execution.
+- **Claude Custom Connectors (Remote MCP):**
+  - **Network requirement:** Custom connector requests originate from Anthropic's cloud infrastructure across web, desktop, and mobile, so they cannot reach local `127.0.0.1`. You must expose your server via a secure, publicly accessible HTTPS endpoint (e.g. Cloudflare Tunnel, ngrok, or reverse proxy) at `https://your-public-domain/mcp`. Local `claude_desktop_config.json` uses `command`/`args` for local stdio processes and does not support remote HTTP endpoints.
+  - **Setup & Auth:** In Claude (Pro/Max plans: **Customize > Connectors > + Add > Add custom connector**; Team/Enterprise owners: **Organization settings > Connectors**), enter your public endpoint. In **Request headers**, set header name `Authorization` with value `Bearer <your-token>` matching `server.auth.bearer_token` in `config.yaml` (see [Anthropic Custom Connectors documentation](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)).
 
-| Transport | Clients per server | Shared index / process | Startup model | Best fit |
-|---|:---:|:---:|---|---|
-| `stdio` | 1 | No | Client launches process | Simplest local setup (single client) |
-| `sse` | Many | Yes | Start server once | Legacy HTTP clients |
-| `streamable-http` | Many | Yes | Start server once | **Preferred** shared-server setup |
+| Transport | Clients | Shared index / process | RAM overhead | Process management | Startup & query latency | Best fit |
+|---|:---:|:---:|---|---|---|---|
+| `stdio` | 1 | No | 1 runtime per client; models load lazily in each process when queried | Client manages its own process; no separate server | Spawns per client; pays preflight and first-query model load | Simplest local setup (single client) |
+| `sse` | Many | Yes | Shared server process; single shared model load across clients | Operator manages one background server | Reuses warm server; first-query model load still applies | Legacy HTTP clients |
+| `streamable-http` | Many | Yes | Shared server process; single shared model load across clients | Operator manages one background server | Reuses warm server; first-query model load still applies | **Preferred** shared-server setup |
 
 When an HTTP transport is selected, `knowledge-rag` automatically enables its single-instance lock (`KNOWLEDGE_RAG_SINGLE_INSTANCE=1`) to prevent multiple servers from binding the same data directory or port.
 

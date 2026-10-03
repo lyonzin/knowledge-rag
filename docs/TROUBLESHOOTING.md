@@ -121,7 +121,7 @@ A second instance exits immediately with code 75. Default is OFF (multi-client f
 
 ### Second MCP client disconnects / exits with code 75
 
-If two clients both launch `knowledge-rag` over `stdio` against the same `data_dir`, the single-instance guard (`KNOWLEDGE_RAG_SINGLE_INSTANCE=1`) can reject the second process to prevent ChromaDB index corruption.
+If two clients both launch `knowledge-rag` over `stdio` against the same `data_dir`, the single-instance guard (`KNOWLEDGE_RAG_SINGLE_INSTANCE=1`) can reject the second process to prevent ChromaDB index corruption (discussed in [#217](https://github.com/lyonzin/knowledge-rag/pull/217)).
 
 To share a single index across multiple clients concurrently, run one shared server instead:
 
@@ -129,7 +129,7 @@ To share a single index across multiple clients concurrently, run one shared ser
 knowledge-rag --transport streamable-http
 ```
 
-Then connect every local HTTP-capable client (Cursor, LM Studio, etc.) to `http://127.0.0.1:8179/mcp`. For Claude Desktop remote connectors, use a public/tunneled HTTPS URL. See the [Multi-client setup](../README.md#multi-client-setup-shared-server-via-streamable-http) section in the README.
+Then connect every local HTTP-capable client (Cursor, LM Studio, etc.) to `http://127.0.0.1:8179/mcp`. For Claude custom connectors, use a public/tunneled HTTPS URL (custom connectors connect from Anthropic's cloud). See the [Multi-client setup](../README.md#multi-client-setup-shared-server-via-streamable-http) section in the README.
 
 ### SSE server won't start
 
