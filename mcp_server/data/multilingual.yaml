@@ -1,0 +1,119 @@
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║                                                                              ║
+# ║              KNOWLEDGE RAG — Multilingual Preset                             ║
+# ║                                                                              ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+#
+# Opt-in preset for corpora that mix languages other than English —
+# Portuguese, Spanish, French, German, Italian, Russian/Cyrillic, Arabic,
+# Chinese/Japanese/Korean (CJK), using the
+# ``intfloat/multilingual-e5-large`` embedding model.
+#
+# What changes vs the default (compact) profile:
+#   - Embedding model → intfloat/multilingual-e5-large (1024 dimensions).
+#     Measure memory and throughput on your hardware before switching.
+#   - Query / passage prefixes → "query: " / "passage: " are wired
+#     automatically by the ``multilingual`` profile. The e5 family was
+#     trained with these scoped inputs and quality degrades without them.
+#
+# Trade-offs to know before you switch:
+#   - Reindex is REQUIRED. Existing chunks were embedded with the previous
+#     model+prefix combo and their vectors are not comparable to the new
+#     ones. Build and validate an isolated data directory and metadata store
+#     before switching clients; see docs/reindex-operations.md. A dimension
+#     mismatch can prevent startup before the reindex MCP tool is available.
+#   - The default reranker (``Xenova/ms-marco-MiniLM-L-6-v2``) was trained
+#     on English MS-MARCO. Compare enabled/disabled retrieval with expected
+#     sources in each corpus language; no non-English improvement or fixed
+#     latency is guaranteed.
+#
+# Usage:  cp presets/multilingual.yaml config.yaml
+
+
+# ============================================================================
+# PATHS
+# ============================================================================
+
+paths:
+  documents_dir: "./documents"
+  data_dir: "./data"
+  models_cache_dir: "./models_cache"
+
+
+# ============================================================================
+# DOCUMENTS
+# ============================================================================
+
+documents:
+  supported_formats:
+    - .md
+    - .txt
+    - .pdf
+    - .docx
+
+  exclude_patterns: []
+
+  chunking:
+    chunk_size: 1000
+    chunk_overlap: 200
+
+
+# ============================================================================
+# MODELS
+# ============================================================================
+
+models:
+  embedding:
+    # Named profile does the heavy lifting: model, dimensions,
+    # query_prefix ("query: "), passage_prefix ("passage: ") are all
+    # populated automatically from _EMBEDDING_PROFILES["multilingual"].
+    # See mcp_server/config.py.
+    profile: "multilingual"
+    # GPU requires a compatible runtime, drivers and an effective GPU session.
+    # See docs/gpu-setup.md for installation and actual-provider validation.
+    # Leave false for CPU-only environments; throughput depends on workload.
+    gpu: false
+
+  reranker:
+    enabled: true
+    model: "Xenova/ms-marco-MiniLM-L-6-v2"
+    top_k_multiplier: 3
+
+
+# ============================================================================
+# SEARCH
+# ============================================================================
+
+search:
+  default_results: 5
+  max_results: 20
+  collection_name: "knowledge_base"
+
+
+# ============================================================================
+# CATEGORIES
+# ============================================================================
+# No language-specific categories shipped. Add your own to bucket documents
+# by domain — the multilingual embedding handles cross-lingual retrieval.
+
+category_mappings: {}
+
+
+# ============================================================================
+# KEYWORD ROUTING
+# ============================================================================
+# No keyword routes shipped. Multilingual routing requires per-language
+# stopword awareness and is deferred to caller configuration.
+
+keyword_routes: {}
+
+
+# ============================================================================
+# QUERY EXPANSION
+# ============================================================================
+# No expansions shipped. The multilingual embedding already handles
+# cross-lingual retrieval. Validate source recall for the language pairs
+# in your corpus. Add expansions for domain-specific acronyms when measured
+# retrieval errors justify them.
+
+query_expansions: {}

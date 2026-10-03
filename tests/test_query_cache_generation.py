@@ -105,11 +105,14 @@ def test_query_captures_generation_before_cache_lookup(isolated_orchestrator, mo
     assert orchestrator.query_cache.stats()["size"] == 0
 
 
-def test_cached_read_overlapping_invalidation_does_not_restore_its_snapshot(monkeypatch):
+@pytest.mark.parametrize("flat_rows", [False, True])
+def test_cached_read_overlapping_invalidation_does_not_restore_its_snapshot(monkeypatch, flat_rows):
     cache = server.QueryCache()
-    cache.put("query", 1, None, 1.0, [{"content": "old"}])
+    old_result = [{"content": "old"}] if flat_rows else [{"content": "old", "keywords": ["old"]}]
+    cache.put("query", 1, None, 1.0, old_result)
     before_copy, release_copy = threading.Event(), threading.Event()
-    clone = cache._clone_result
+    copy_method = "_copy_flat_rows" if flat_rows else "_clone_result"
+    clone = getattr(cache, copy_method)
 
     def delayed_clone(result):
         if result[0]["content"] == "old":
@@ -117,7 +120,7 @@ def test_cached_read_overlapping_invalidation_does_not_restore_its_snapshot(monk
             assert release_copy.wait(timeout=5)
         return clone(result)
 
-    monkeypatch.setattr(cache, "_clone_result", delayed_clone)
+    monkeypatch.setattr(cache, copy_method, delayed_clone)
     with ThreadPoolExecutor(max_workers=1) as executor:
         reader = executor.submit(cache.get, "query", 1, None, 1.0)
         try:
@@ -127,5 +130,5 @@ def test_cached_read_overlapping_invalidation_does_not_restore_its_snapshot(monk
             cache.put("query", 1, None, 1.0, [{"content": "new"}], "auto")
         finally:
             release_copy.set()
-        assert reader.result(timeout=5) == [{"content": "old"}]
+        assert reader.result(timeout=5) == old_result
     assert cache.get("query", 1, None, 1.0) == [{"content": "new"}]

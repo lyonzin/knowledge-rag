@@ -110,7 +110,7 @@ class QueryCache:
     def __init__(self, max_size: int = 100, ttl_seconds: int = 300):
         self.max_size = max_size
         self.ttl_seconds = ttl_seconds
-        self._cache: OrderedDict[Tuple[str, int, Optional[str], float, str], Tuple[float, Any]] = OrderedDict()
+        self._cache: OrderedDict[Tuple[str, int, Optional[str], float, str], Tuple[float, Any, bool]] = OrderedDict()
         self._lock = threading.Lock()
         self._hits = 0
         self._misses = 0
@@ -149,6 +149,26 @@ class QueryCache:
                 cloned[copied_key] = child if type(child) in atomic else QueryCache._clone_result(child, memo)
         return cloned
 
+    @staticmethod
+    def _has_flat_rows(value: Any) -> bool:
+        """Prove once that shallow row copies fully isolate a private snapshot."""
+        if type(value) is not list:
+            return False
+        seen = set()
+        atomic = QueryCache._ATOMIC_TYPES
+        for row in value:
+            if type(row) is not dict or id(row) in seen:
+                return False
+            seen.add(id(row))
+            if any(type(key) not in atomic or type(child) not in atomic for key, child in row.items()):
+                return False
+        return True
+
+    @staticmethod
+    def _copy_flat_rows(value: List[Dict[Any, Any]]) -> List[Dict[Any, Any]]:
+        """Copy proven distinct rows; their exact atomic keys/values are immutable."""
+        return [row.copy() for row in value]
+
     def _make_key(
         self,
         query: str,
@@ -181,7 +201,7 @@ class QueryCache:
             if entry is None:
                 self._misses += 1
                 return None
-            timestamp, result = entry
+            timestamp, result, flat_rows = entry
             if time.time() - timestamp >= self.ttl_seconds:
                 del self._cache[key]
                 self._misses += 1
@@ -189,7 +209,7 @@ class QueryCache:
             self._cache.move_to_end(key)
             self._hits += 1
         # Cached snapshots are private: copying them needs no cache-wide lock.
-        return self._clone_result(result)
+        return self._copy_flat_rows(result) if flat_rows else self._clone_result(result)
 
     def put(
         self,
@@ -214,12 +234,13 @@ class QueryCache:
             return
         key = self._make_key(query, max_results, category, hybrid_alpha, search_method)
         snapshot = self._clone_result(result)
+        flat_rows = self._has_flat_rows(snapshot)
         with self._lock:
             if expected_generation is not None and expected_generation != self._generation:
                 return
             if key not in self._cache and len(self._cache) >= self.max_size:
                 self._cache.popitem(last=False)
-            self._cache[key] = (time.time(), snapshot)
+            self._cache[key] = (time.time(), snapshot, flat_rows)
             self._cache.move_to_end(key)
 
     def invalidate(self) -> None:

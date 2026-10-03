@@ -1,10 +1,88 @@
 """Cache snapshots preserve mutable results, key boundaries, and LRU/TTL rules."""
 
+from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
 
 import mcp_server.server as server
+
+
+@pytest.mark.parametrize(("rows", "fields"), [(0, 0), (1, 1), (5, 9), (10, 0), (10, 9)])
+def test_flat_rows_preserve_full_isolation_for_varied_payload_shapes(rows, fields):
+    values = ("text", 3, 1.25, True, b"bytes", None, 2j, range(3), "last")
+    original = [{f"field_{column}": values[column] for column in range(fields)} for _ in range(rows)]
+    expected = deepcopy(original)
+    cache = server.QueryCache()
+    cache.put("query", 5, None, 0.3, original)
+
+    for row in original:
+        row.clear()
+    original.append({"new": "not cached"})
+    cached = cache.get("query", 5, None, 0.3)
+    assert cached == expected
+    assert len({id(row) for row in cached}) == rows
+
+    for row in cached:
+        row["new"] = "local mutation"
+    cached.append({"new": "local result"})
+    assert cache.get("query", 5, None, 0.3) == expected
+
+
+def test_repeated_flat_rows_preserve_aliases_inside_each_isolated_result():
+    shared = {"content": "full document", "score": 1.0}
+    original = [shared] * 10
+    cache = server.QueryCache()
+    cache.put("query", 5, None, 0.3, original)
+    shared["content"] = "input mutation"
+
+    cached = cache.get("query", 5, None, 0.3)
+    assert cached == [{"content": "full document", "score": 1.0}] * 10
+    assert all(row is cached[0] for row in cached)
+    cached[0]["content"] = "output mutation"
+    fresh = cache.get("query", 5, None, 0.3)
+    assert all(row is fresh[0] for row in fresh)
+    assert fresh[0]["content"] == "full document"
+
+
+def test_dictionary_subclass_rows_preserve_type_and_mutable_attributes():
+    class Row(dict):
+        pass
+
+    row = Row(content="document")
+    row.labels = ["alpha"]
+    cache = server.QueryCache()
+    cache.put("query", 5, None, 0.3, [row])
+    row.labels.append("input mutation")
+
+    cached = cache.get("query", 5, None, 0.3)
+    assert type(cached[0]) is Row
+    assert cached[0].labels == ["alpha"]
+    cached[0].labels.clear()
+    assert cache.get("query", 5, None, 0.3)[0].labels == ["alpha"]
+
+
+def test_atomic_subclasses_in_keys_and_values_keep_their_mutable_state_isolated():
+    class Text(str):
+        pass
+
+    key, value = Text("key"), Text("value")
+    key.labels, value.labels = ["key label"], ["value label"]
+    cache = server.QueryCache()
+    cache.put("query", 5, None, 0.3, [{key: value}])
+    key.labels.clear()
+    value.labels.clear()
+
+    cached = cache.get("query", 5, None, 0.3)[0]
+    cached_key = next(iter(cached))
+    assert type(cached_key) is Text and type(cached[cached_key]) is Text
+    assert cached_key.labels == ["key label"]
+    assert cached[cached_key].labels == ["value label"]
+    cached_key.labels.clear()
+    cached[cached_key].labels.clear()
+    fresh = cache.get("query", 5, None, 0.3)[0]
+    assert next(iter(fresh)).labels == ["key label"]
+    assert fresh["key"].labels == ["value label"]
 
 
 def test_put_snapshots_nested_containers_and_shares_immutable_text():
