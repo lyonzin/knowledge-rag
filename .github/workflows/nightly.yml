@@ -89,7 +89,7 @@ jobs:
         shell: bash
         run: |
           pip install -e .
-          pip install pytest pytest-cov pytest-rerunfailures hypothesis psutil numpy pyyaml
+          pip install pytest pytest-cov pytest-rerunfailures hypothesis psutil numpy pyyaml hatchling
       - name: Run suite three times
         shell: bash
         env:

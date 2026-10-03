@@ -18,6 +18,7 @@ pytest-memray>=1.10.0; sys_platform != "win32"  # memory baseline (Pillar 3); me
 pytest-benchmark>=5.2.3       # micro-benchmarks
 pytest-timeout>=2.3.0         # safety net for hung tests
 hypothesis>=6.165.9            # property-based testing (Pillar 4: Versatility)
+hatchling                      # real wheel/sdist regressions; matches build-system
 
 # ── Type checking & quality ─────────────────────────────────────────────────
 mypy>=2.1.0

@@ -72,6 +72,9 @@ knowledge-rag-guarded = "mcp_server.guarded:guarded_main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["mcp_server"]
+# These tracked copies support source/editable installs; force-include below
+# supplies their canonical content once when building a wheel.
+exclude = ["/mcp_server/data/**"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "config.example.yaml" = "mcp_server/data/config.example.yaml"

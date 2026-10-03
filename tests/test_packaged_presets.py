@@ -2,7 +2,9 @@
 
 import shutil
 import subprocess
+import tarfile
 import tomllib
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -24,6 +26,30 @@ def test_bundled_config_matches_source_template():
     assert (ROOT / "mcp_server/data/config.example.yaml").read_text(encoding="utf-8") == (
         ROOT / "config.example.yaml"
     ).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("from_sdist", [False, True], ids=["direct-wheel", "sdist-wheel"])
+def test_built_wheel_contains_each_canonical_resource_once(tmp_path, from_sdist):
+    from hatchling.builders.sdist import SdistBuilder
+    from hatchling.builders.wheel import WheelBuilder
+
+    expected = {"config.example.yaml": (ROOT / "config.example.yaml").read_bytes()}
+    expected.update({preset.name: preset.read_bytes() for preset in (ROOT / "presets").glob("*.yaml")})
+    source = ROOT
+    if from_sdist:
+        sdist = next(SdistBuilder(str(ROOT)).build(directory=str(tmp_path / "sdist")))
+        with tarfile.open(sdist) as archive:
+            archive.extractall(tmp_path / "unpacked", filter="data")
+        source = next((tmp_path / "unpacked").iterdir())
+
+    wheel = next(WheelBuilder(str(source)).build(directory=str(tmp_path / "wheel"), versions=["standard"]))
+    with zipfile.ZipFile(wheel) as archive:
+        names = archive.namelist()
+        assert len(names) == len(set(names)), "Wheel archive contains duplicate paths"
+        resources = {name for name in names if name.startswith("mcp_server/data/")}
+        assert resources == {f"mcp_server/data/{name}" for name in expected}
+        for name, content in expected.items():
+            assert archive.read(f"mcp_server/data/{name}") == content
 
 
 def test_gitignore_keeps_bundled_presets_versionable_and_runtime_data_private(tmp_path):
