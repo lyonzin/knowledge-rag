@@ -38,13 +38,17 @@ import numpy as np  # noqa: E402  — imported after the importorskip guard
 
 @pytest.fixture
 def fake_text_embedding():
-    """Patch the real TextEmbedding with a lightweight MagicMock.
+    """Patch inference without retaining a mock call history during soak runs.
 
     The mock returns a fresh 384-D zero vector per input — same shape as
     the production model, but without the ~200MB ONNX runtime load.
     """
-    fake = MagicMock()
-    fake.embed.side_effect = lambda texts, batch_size=256: iter([np.zeros(384, dtype=np.float32) for _ in texts])
+
+    class ConstantEmbedding:
+        def embed(self, texts, batch_size=256):
+            return (np.zeros(384, dtype=np.float32) for _ in texts)
+
+    fake = ConstantEmbedding()
     with patch("mcp_server.server.TextEmbedding", return_value=fake):
         yield fake
 
@@ -88,18 +92,17 @@ def test_lazy_load_only_loads_once_under_pressure():
 def test_search_no_leak_after_1000_queries(fake_text_embedding):
     """N calls into the embedder must NOT accumulate RSS unboundedly.
 
-    Loose threshold (40 MB per 1000 iters baseline) catches genuine
-    leaks without false-positiving on GC jitter. The nightly soak test
+    Fixed 40 MiB growth budget catches retained state even in long runs.
+    The nightly soak test
     overrides ``KNOWLEDGE_RAG_SOAK_ITERATIONS`` to push the loop to
-    50000 calls — same threshold scaled proportionally.
+    50000 calls without allowing a proportionally larger leak.
     """
     import os
 
     from mcp_server.server import FastEmbedEmbeddings
 
     iterations = int(os.environ.get("KNOWLEDGE_RAG_SOAK_ITERATIONS", "1000"))
-    # 40 MB per 1000 iters is the regression budget; scale linearly.
-    threshold_mb = max(40, 40 * (iterations / 1000.0))
+    threshold_mb = 40
 
     emb = FastEmbedEmbeddings()
 

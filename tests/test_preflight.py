@@ -4,8 +4,23 @@ GH #216 (v4.9.1): retry + timeout + atomic-rename behavior.
 """
 
 import subprocess
+from unittest.mock import patch
 
 import pytest
+
+
+def test_probe_uses_absolute_parent_base_even_with_relative_environment(tmp_path, monkeypatch):
+    """The child cwd must not make a relative KNOWLEDGE_RAG_DIR resolve twice."""
+    from mcp_server import preflight
+
+    base = tmp_path / "rag"
+    base.mkdir()
+    monkeypatch.setattr(preflight, "BASE_DIR", base)
+    monkeypatch.setenv("KNOWLEDGE_RAG_DIR", "rag")
+    with patch.object(preflight.subprocess, "run") as run:
+        preflight._probe_chroma()
+    assert run.call_args.kwargs["env"]["KNOWLEDGE_RAG_DIR"] == str(base.resolve())
+    assert run.call_args.kwargs["cwd"] == str(base.resolve())
 
 
 def test_probe_failure_backs_up_chroma_and_metadata(tmp_path, monkeypatch):

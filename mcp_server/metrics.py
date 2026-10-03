@@ -4,6 +4,7 @@ import sys
 import threading
 import time
 from collections import defaultdict
+from dataclasses import dataclass, field
 from functools import wraps
 from typing import Any, Callable
 
@@ -26,13 +27,22 @@ FAST_PATH_MIGRATION_DOCS_TOTAL = "knowledge_rag_fast_path_migration_docs_total"
 FAST_PATH_LATENCY_BUCKETS: tuple[float, ...] = (0.001, 0.005, 0.010, 0.050, 0.100, 0.500)
 
 
+@dataclass(slots=True)
+class _Histogram:
+    """Keep sufficient statistics, never the individual observations."""
+
+    count: int = 0
+    total: float = 0.0
+    bucket_counts: list[int] = field(default_factory=list)
+
+
 class MetricsCollector:
     """Lightweight Prometheus-compatible metrics collector."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._counters: dict[str, float] = defaultdict(float)
-        self._histograms: dict[str, list[float]] = defaultdict(list)
+        self._histograms: dict[str, _Histogram] = {}
         self._gauges: dict[str, float] = defaultdict(float)
         self._histogram_buckets: dict[str, tuple[float, ...]] = {}
 
@@ -46,16 +56,30 @@ class MetricsCollector:
 
     def observe(self, name: str, value: float, labels: str = "") -> None:
         with self._lock:
-            self._histograms[f"{name}{labels}"].append(value)
+            key = f"{name}{labels}"
+            buckets = self._histogram_buckets.get(name, ())
+            histogram = self._histograms.get(key)
+            if histogram is None:
+                histogram = self._histograms[key] = _Histogram(bucket_counts=[0] * len(buckets))
+            histogram.count += 1
+            histogram.total += value
+            for index, boundary in enumerate(buckets):
+                if value <= boundary:
+                    histogram.bucket_counts[index] += 1
 
     def register_histogram_buckets(self, name: str, buckets: tuple[float, ...]) -> None:
         """Enable Prometheus-style bucketed emission for ``name``.
 
         Idempotent — re-registering with the same buckets is a no-op.
-        Unregistered histograms keep the compact ``_count``/``_sum`` output.
+        Register before observing: past bucket counts cannot be reconstructed
+        from bounded aggregates. Unregistered histograms emit count and sum.
         """
-        sorted_buckets = tuple(sorted(buckets))
+        sorted_buckets = tuple(sorted(set(buckets)))
         with self._lock:
+            if self._histogram_buckets.get(name) == sorted_buckets:
+                return
+            if any(_split_metric_key(key)[0] == name for key in self._histograms):
+                raise ValueError(f"Register histogram buckets before observing {name}")
             self._histogram_buckets[name] = sorted_buckets
 
     def exposition(self) -> str:
@@ -65,15 +89,13 @@ class MetricsCollector:
                 lines.append(f"{key} {val}")
             for key, val in sorted(self._gauges.items()):
                 lines.append(f"{key} {val}")
-            for key, observations in sorted(self._histograms.items()):
-                if not observations:
-                    continue
+            for key, histogram in sorted(self._histograms.items()):
                 name, base_labels = _split_metric_key(key)
                 buckets = self._histogram_buckets.get(name)
                 if buckets:
-                    lines.extend(_format_histogram_buckets(name, base_labels, observations, buckets))
-                lines.append(f"{key}_count {len(observations)}")
-                lines.append(f"{key}_sum {sum(observations):.6f}")
+                    lines.extend(_format_histogram_buckets(name, base_labels, histogram, buckets))
+                lines.append(f"{name}_count{base_labels} {histogram.count}")
+                lines.append(f"{name}_sum{base_labels} {histogram.total:.6f}")
         return "\n".join(lines) + "\n"
 
 
@@ -92,20 +114,16 @@ def _split_metric_key(key: str) -> tuple[str, str]:
 def _format_histogram_buckets(
     name: str,
     base_labels: str,
-    observations: list[float],
+    histogram: _Histogram,
     buckets: tuple[float, ...],
 ) -> list[str]:
     """Return Prometheus histogram bucket lines with cumulative counts."""
-    sorted_obs = sorted(observations)
     lines: list[str] = []
-    idx = 0
-    for boundary in buckets:
-        while idx < len(sorted_obs) and sorted_obs[idx] <= boundary:
-            idx += 1
+    for boundary, count in zip(buckets, histogram.bucket_counts):
         bucket_labels = _merge_labels(base_labels, f'le="{boundary}"')
-        lines.append(f"{name}_bucket{bucket_labels} {idx}")
+        lines.append(f"{name}_bucket{bucket_labels} {count}")
     inf_labels = _merge_labels(base_labels, 'le="+Inf"')
-    lines.append(f"{name}_bucket{inf_labels} {len(sorted_obs)}")
+    lines.append(f"{name}_bucket{inf_labels} {histogram.count}")
     return lines
 
 

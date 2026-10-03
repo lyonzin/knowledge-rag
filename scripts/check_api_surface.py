@@ -7,7 +7,7 @@ structured snapshot of:
 - Module-level public functions (no leading underscore)
 - Public classes and their public methods
 - Public exception classes
-- Type signatures (positional + keyword args, defaults presence, return type)
+- Call signatures (argument kinds/names, defaults presence, and sync/async)
 
 Two modes:
 
@@ -19,7 +19,7 @@ Two modes:
         Compare current code against the committed baseline and exit:
             0  = no breaking change (additions are OK)
             1  = breaking change detected (function/class removed,
-                 signature narrowed, parameter renamed, return type changed)
+                 signature narrowed, parameter renamed, sync/async flipped)
             2  = baseline file missing or unparseable
 
 In CI we run with --check on PRs. If a contributor genuinely needs to
@@ -57,8 +57,8 @@ def _arg_signature(args: ast.arguments) -> dict[str, Any]:
 
     We capture names, kind (positional / keyword-only / vararg / kwarg),
     and whether each argument has a default. We deliberately do NOT capture
-    the actual default expression — defaults can be tweaked without breaking
-    callers, only the *presence* of a default matters for compatibility.
+    the actual default expression: changing a value can affect behavior, but
+    this gate checks call compatibility, including the *presence* of defaults.
     """
 
     def render(arg_list: list[ast.arg], defaults_count: int, kind: str) -> list[dict[str, Any]]:
@@ -76,8 +76,11 @@ def _arg_signature(args: ast.arguments) -> dict[str, Any]:
         return rendered
 
     sig: list[dict[str, Any]] = []
-    sig.extend(render(args.posonlyargs, len(args.defaults), "positional_only"))
-    sig.extend(render(args.args, max(0, len(args.defaults) - len(args.posonlyargs)), "positional"))
+    # AST defaults align with the tail of posonlyargs + args, not each list.
+    positional_defaults = min(len(args.args), len(args.defaults))
+    posonly_defaults = len(args.defaults) - positional_defaults
+    sig.extend(render(args.posonlyargs, posonly_defaults, "positional_only"))
+    sig.extend(render(args.args, positional_defaults, "positional"))
     if args.vararg is not None:
         sig.append(
             {
@@ -165,14 +168,32 @@ def _diff_function(name: str, old: dict[str, Any], new: dict[str, Any], breaks: 
     old_args = old.get("args", [])
     new_args = new.get("args", [])
 
-    old_required = [a for a in old_args if not a["has_default"] and a["kind"] != "kwarg" and a["kind"] != "vararg"]
-    new_required = [a for a in new_args if not a["has_default"] and a["kind"] != "kwarg" and a["kind"] != "vararg"]
+    old_by_name = {a["name"]: a for a in old_args}
+    new_by_name = {a["name"]: a for a in new_args}
+    new_required = [a for a in new_args if not a["has_default"] and a["kind"] not in ("kwarg", "vararg")]
 
     # New required parameters break callers
-    if len(new_required) > len(old_required):
-        added = {a["name"] for a in new_required} - {a["name"] for a in old_required}
-        if added:
-            breaks.append(f"{name}: new required parameter(s): {sorted(added)}")
+    added = {a["name"] for a in new_required} - old_by_name.keys()
+    if added:
+        breaks.append(f"{name}: new required parameter(s): {sorted(added)}")
+
+    # Removing a default is breaking even when the parameter keeps its name.
+    for arg in new_required:
+        previous = old_by_name.get(arg["name"])
+        if previous and (previous["has_default"] or previous["kind"] in ("kwarg", "vararg")):
+            breaks.append(f"{name}: parameter became required: {arg['name']}")
+
+    compatible_kinds = {
+        "positional": {"positional"},
+        "positional_only": {"positional_only", "positional"},
+        "keyword_only": {"keyword_only", "positional"},
+        "vararg": {"vararg"},
+        "kwarg": {"kwarg"},
+    }
+    for arg in old_args:
+        replacement = new_by_name.get(arg["name"])
+        if replacement and replacement["kind"] not in compatible_kinds.get(arg["kind"], {arg["kind"]}):
+            breaks.append(f"{name}: parameter kind narrowed: {arg['name']} ({arg['kind']} -> {replacement['kind']})")
 
     # Removed parameters (any kind) break callers that supplied them
     old_names = {a["name"] for a in old_args}
@@ -187,6 +208,9 @@ def _diff_function(name: str, old: dict[str, Any], new: dict[str, Any], breaks: 
     for idx, old_arg in enumerate(old_positional):
         if idx < len(new_positional) and new_positional[idx]["name"] != old_arg["name"]:
             breaks.append(f"{name}: positional arg #{idx} renamed: {old_arg['name']} -> {new_positional[idx]['name']}")
+
+    if any(a["kind"] == "vararg" for a in old_args) and len(new_positional) > len(old_positional):
+        breaks.append(f"{name}: new positional parameter(s) consume existing *args arguments")
 
     # Async <-> sync flip is breaking
     if old.get("is_async") != new.get("is_async"):

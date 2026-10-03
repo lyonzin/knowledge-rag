@@ -65,13 +65,26 @@ _DEFAULT_SUPPORTED_FORMATS = sorted(_SUPPORTED_SUFFIXES) + sorted(_SUPPORTED_FIL
 
 
 def _has_documents(path: Path) -> bool:
-    """Check if path has a documents/ dir with actual supported files (follows symlinks)."""
-    docs_dir = path / "documents"
+    """Check contained supported files, following internal links without cycles."""
+    from .security import is_path_within
+
+    try:
+        docs_dir = (path / "documents").resolve()
+    except (OSError, RuntimeError):
+        return False
     if not docs_dir.exists():
         return False
-    for root, _, files in os.walk(docs_dir, followlinks=True):
+    seen = set()
+    for root, dirs, files in os.walk(docs_dir, followlinks=True):
+        real_root = os.path.realpath(root)
+        if real_root in seen or not is_path_within(docs_dir, Path(root)):
+            dirs.clear()
+            continue
+        seen.add(real_root)
+        dirs[:] = [d for d in dirs if is_path_within(docs_dir, Path(root) / d)]
         for f in files:
-            if Path(f).suffix.lower() in _SUPPORTED_SUFFIXES or f in _SUPPORTED_FILENAMES:
+            supported = Path(f).suffix.lower() in _SUPPORTED_SUFFIXES or f in _SUPPORTED_FILENAMES
+            if supported and is_path_within(docs_dir, Path(root) / f):
                 return True
     return False
 
@@ -127,12 +140,12 @@ def _load_yaml_config() -> dict:
         with open(config_path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
         if not isinstance(data, dict):
-            print("[WARN] config.yaml is not a valid mapping, ignoring")
+            print("[WARN] config.yaml is not a valid mapping, ignoring", file=sys.stderr)
             return {}
-        print(f"[INFO] Loaded config from {config_path}")
+        print(f"[INFO] Loaded config from {config_path}", file=sys.stderr)
         return data
     except yaml.YAMLError as e:
-        print(f"[WARN] Failed to parse config.yaml: {e} — using defaults")
+        print(f"[WARN] Failed to parse config.yaml: {e} — using defaults", file=sys.stderr)
         return {}
 
 
@@ -154,7 +167,8 @@ def _get(section: str, key: str, default):
     if not isinstance(val, type(default)):
         print(
             f"[WARN] config.yaml: {section}.{key} has wrong type "
-            f"(expected {type(default).__name__}, got {type(val).__name__}), using default"
+            f"(expected {type(default).__name__}, got {type(val).__name__}), using default",
+            file=sys.stderr,
         )
         return default
     return val
@@ -181,7 +195,8 @@ def _get_nested(section: str, subsection: str, key: str, default):
     if not isinstance(val, type(default)):
         print(
             f"[WARN] config.yaml: {section}.{subsection}.{key} has wrong type "
-            f"(expected {type(default).__name__}, got {type(val).__name__}), using default"
+            f"(expected {type(default).__name__}, got {type(val).__name__}), using default",
+            file=sys.stderr,
         )
         return default
     return val
@@ -193,7 +208,7 @@ def _get_top(key: str, default):
     if val is None:
         return default
     if not isinstance(val, type(default)):
-        print(f"[WARN] config.yaml: {key} has wrong type, using default")
+        print(f"[WARN] config.yaml: {key} has wrong type, using default", file=sys.stderr)
         return default
     return val
 
@@ -610,10 +625,10 @@ class Config:
             else 384
         )
     )
-    # GPU acceleration mode (v4.8.0+): "auto" (default) | "true" | "false".
+    # GPU acceleration mode: "auto" (default) | "true" | "false" | "directml".
     # Legacy YAML `gpu: true/false` (bool) is normalized to string in __post_init__.
-    #   "auto"  — probe CUDA at startup; use if ready, fall back to CPU otherwise
-    #   "true"  — force CUDA attempt; fall back to CPU only if load actually fails
+    #   "auto"  — probe CUDA on first embedding; fall back to CPU if unavailable
+    #   "true"  — request CUDA; fall back to CPU if the probe or model load fails
     #   "false" — never probe; runs on CPU with zero startup overhead
     gpu_mode: str = field(
         default_factory=lambda: (
@@ -622,10 +637,18 @@ class Config:
             else "auto"
         )
     )
-    # Legacy alias — derived in __post_init__. True when CUDA MAY be attempted
-    # (gpu_mode is "true" or "auto"). Kept for backwards compatibility with
+    # Legacy alias — derived in __post_init__. True when GPU MAY be attempted
+    # (gpu_mode is "true", "auto", or "directml"). Kept for compatibility with
     # callers that check `config.gpu_acceleration` as a bool.
     gpu_acceleration: bool = False
+    # DirectML requires an explicit DXGI adapter index; never assume GPU 0 is AMD.
+    gpu_device_id: Optional[int] = field(
+        default_factory=lambda: (
+            _get("models", "embedding", {}).get("device_id")
+            if isinstance(_get("models", "embedding", {}), dict)
+            else None
+        )
+    )
 
     # Embedding profile (v4.8.0) — named shortcut for model+dim+prefix.
     # See _EMBEDDING_PROFILES above. "custom" (default) opts out.
@@ -753,12 +776,12 @@ class Config:
     parallel_workers: int = field(default_factory=lambda: _get("documents", "parallel_workers", 1))
 
     # v4.9.3 (GH #224): FastEmbed `TextEmbedding.embed()` internal micro-batch.
-    # None = provider heuristic in BGESmallEmbedder._embed (CPU=32, CUDA=256).
+    # None = provider heuristic (CPU=32, CUDA=256, DirectML=8).
     # Set explicitly to override per workload. CPU default avoids a ~500MB BFC
     # arena allocation that crashes with BAD_ALLOC on fragmented Windows heaps
-    # when indexing minified JS or large JSON. GPU VRAM is contiguous so 256
-    # is safe. Env var KNOWLEDGE_RAG_EMBED_BATCH_SIZE takes precedence over
-    # this YAML key at runtime.
+    # when indexing minified JS or large JSON. CUDA=256 is a throughput default,
+    # not a guarantee against OOM. A valid KNOWLEDGE_RAG_EMBED_BATCH_SIZE takes
+    # precedence over this YAML key; both are bounded to [1, 512].
     embed_batch_size: Optional[int] = field(default_factory=lambda: _get("documents", "embed_batch_size", None))
 
     # Server (new in v4.0.0)
@@ -835,15 +858,16 @@ class Config:
     def _validate_chunking(self) -> None:
         """Bound-check chunk_size / chunk_overlap / default_results / max_results."""
         if not isinstance(self.chunk_size, int) or self.chunk_size < 100:
-            print(f"[WARN] chunk_size={self.chunk_size} invalid, using 1000")
+            print(f"[WARN] chunk_size={self.chunk_size} invalid, using 1000", file=sys.stderr)
             self.chunk_size = 1000
         if not isinstance(self.chunk_overlap, int) or self.chunk_overlap < 0:
-            print(f"[WARN] chunk_overlap={self.chunk_overlap} invalid, using 200")
+            print(f"[WARN] chunk_overlap={self.chunk_overlap} invalid, using 200", file=sys.stderr)
             self.chunk_overlap = 200
         if self.chunk_overlap >= self.chunk_size:
             print(
                 f"[WARN] chunk_overlap ({self.chunk_overlap}) >= "
-                f"chunk_size ({self.chunk_size}), using {self.chunk_size // 5}"
+                f"chunk_size ({self.chunk_size}), using {self.chunk_size // 5}",
+                file=sys.stderr,
             )
             self.chunk_overlap = self.chunk_size // 5
         if not isinstance(self.default_results, int) or self.default_results < 1:
@@ -855,27 +879,30 @@ class Config:
         """v4.8.0 Fase 3 — clamp batch_size [1,5000] and parallel_workers [1,16].
 
         v4.9.3 (GH #224): also clamp embed_batch_size [1,512] when set. None is
-        kept as "use provider heuristic" (CPU=32, CUDA=256) in BGESmallEmbedder.
+        kept as "use provider heuristic" (CPU=32, CUDA=256, DirectML=8).
         """
         if not isinstance(self.batch_size, int) or self.batch_size < 1:
-            print(f"[WARN] batch_size={self.batch_size!r} invalid, clamping to 1")
+            print(f"[WARN] batch_size={self.batch_size!r} invalid, clamping to 1", file=sys.stderr)
             self.batch_size = 1
         elif self.batch_size > 5000:
-            print(f"[WARN] batch_size={self.batch_size} exceeds 5000, clamping to 5000")
+            print(f"[WARN] batch_size={self.batch_size} exceeds 5000, clamping to 5000", file=sys.stderr)
             self.batch_size = 5000
         if self.embed_batch_size is not None:
-            if not isinstance(self.embed_batch_size, int) or self.embed_batch_size < 1:
-                print(f"[WARN] embed_batch_size={self.embed_batch_size!r} invalid, falling back to provider heuristic")
+            if type(self.embed_batch_size) is not int or self.embed_batch_size < 1:
+                print(
+                    f"[WARN] embed_batch_size={self.embed_batch_size!r} invalid, falling back to provider heuristic",
+                    file=sys.stderr,
+                )
                 self.embed_batch_size = None
             elif self.embed_batch_size > 512:
-                print(f"[WARN] embed_batch_size={self.embed_batch_size} exceeds 512, clamping to 512")
+                print(f"[WARN] embed_batch_size={self.embed_batch_size} exceeds 512, clamping to 512", file=sys.stderr)
                 self.embed_batch_size = 512
 
         if not isinstance(self.parallel_workers, int) or self.parallel_workers < 1:
-            print(f"[WARN] parallel_workers={self.parallel_workers!r} invalid, clamping to 1")
+            print(f"[WARN] parallel_workers={self.parallel_workers!r} invalid, clamping to 1", file=sys.stderr)
             self.parallel_workers = 1
         elif self.parallel_workers > 16:
-            print(f"[WARN] parallel_workers={self.parallel_workers} exceeds 16, clamping to 16")
+            print(f"[WARN] parallel_workers={self.parallel_workers} exceeds 16, clamping to 16", file=sys.stderr)
             self.parallel_workers = 16
         elif self.parallel_workers > 4:
             import platform
@@ -883,7 +910,8 @@ class Config:
             if platform.system() == "Windows":
                 print(
                     f"[WARN] parallel_workers={self.parallel_workers} on Windows may hit "
-                    f"ONNX threading issues or SQLite lock contention; monitor stability"
+                    f"ONNX threading issues or SQLite lock contention; monitor stability",
+                    file=sys.stderr,
                 )
 
     def _resolve_embedding_profile(self) -> None:
@@ -893,7 +921,7 @@ class Config:
         in ``_validate_embedding_types``.
         """
         if not isinstance(self.embedding_profile, str):
-            print(f"[WARN] embedding_profile={self.embedding_profile!r} invalid, using 'custom'")
+            print(f"[WARN] embedding_profile={self.embedding_profile!r} invalid, using 'custom'", file=sys.stderr)
             self.embedding_profile = "custom"
 
         if self.embedding_profile == "custom":
@@ -901,7 +929,10 @@ class Config:
 
         profile = _EMBEDDING_PROFILES.get(self.embedding_profile)
         if not profile:
-            print(f"[WARN] Invalid embedding profile '{self.embedding_profile}'; falling back to 'custom'")
+            print(
+                f"[WARN] Invalid embedding profile '{self.embedding_profile}'; falling back to 'custom'",
+                file=sys.stderr,
+            )
             self.embedding_profile = "custom"
             return
 
@@ -912,7 +943,8 @@ class Config:
         if _yaml_embedding_has("model"):
             print(
                 f"[WARN] Both models.embedding.model and profile="
-                f"'{self.embedding_profile}' set; profile takes precedence"
+                f"'{self.embedding_profile}' set; profile takes precedence",
+                file=sys.stderr,
             )
         self.embedding_model = profile["model"]
         self.embedding_dim = profile["dimensions"]
@@ -925,16 +957,16 @@ class Config:
     def _validate_embedding_types(self) -> None:
         """Type-check prefixes + embedding_dim + reranker settings (runs AFTER profile)."""
         if not isinstance(self.query_prefix, str):
-            print(f"[WARN] query_prefix={self.query_prefix!r} invalid, using ''")
+            print(f"[WARN] query_prefix={self.query_prefix!r} invalid, using ''", file=sys.stderr)
             self.query_prefix = ""
         if not isinstance(self.passage_prefix, str):
-            print(f"[WARN] passage_prefix={self.passage_prefix!r} invalid, using ''")
+            print(f"[WARN] passage_prefix={self.passage_prefix!r} invalid, using ''", file=sys.stderr)
             self.passage_prefix = ""
 
         if not isinstance(self.embedding_dim, int) or self.embedding_dim < 1:
             self.embedding_dim = 384
         if not isinstance(self.reranker_enabled, bool):
-            print(f"[WARN] reranker_enabled={self.reranker_enabled!r} invalid, using True")
+            print(f"[WARN] reranker_enabled={self.reranker_enabled!r} invalid, using True", file=sys.stderr)
             self.reranker_enabled = True
         if not isinstance(self.reranker_top_k_multiplier, int) or self.reranker_top_k_multiplier < 1:
             self.reranker_top_k_multiplier = 3
@@ -943,28 +975,40 @@ class Config:
         """v4.8.0+ — bool → str, str → validated one of {'auto','true','false'}.
 
         Accepts legacy YAML ``gpu: true/false`` (bool) and new
-        ``gpu: "auto"|"true"|"false"``. Also derives ``gpu_acceleration``
-        legacy alias: True when CUDA may be attempted.
+        ``gpu: "auto"|"true"|"false"|"directml"``. Also derives
+        ``gpu_acceleration``: True when a GPU may be attempted.
         """
         raw_gpu = self.gpu_mode
         if isinstance(raw_gpu, bool):
             self.gpu_mode = "true" if raw_gpu else "false"
         elif isinstance(raw_gpu, str):
             normalized = raw_gpu.strip().lower()
-            if normalized in ("auto", "true", "false"):
+            if normalized in ("auto", "true", "false", "directml"):
                 self.gpu_mode = normalized
             else:
-                print(f"[WARN] Invalid gpu value {raw_gpu!r}; falling back to 'auto'")
+                print(f"[WARN] Invalid gpu value {raw_gpu!r}; falling back to 'auto'", file=sys.stderr)
                 self.gpu_mode = "auto"
         else:
-            print(f"[WARN] Invalid gpu value {raw_gpu!r} (type {type(raw_gpu).__name__}); falling back to 'auto'")
+            print(
+                f"[WARN] Invalid gpu value {raw_gpu!r} (type {type(raw_gpu).__name__}); falling back to 'auto'",
+                file=sys.stderr,
+            )
             self.gpu_mode = "auto"
-        self.gpu_acceleration = self.gpu_mode in ("true", "auto")
+        self.gpu_acceleration = self.gpu_mode in ("true", "auto", "directml")
+        self._validate_gpu_device_id()
+
+    def _validate_gpu_device_id(self) -> None:
+        """Keep adapter selection explicit; reject bools and out-of-range IDs."""
+        if self.gpu_device_id is None:
+            return
+        if type(self.gpu_device_id) is not int or not 0 <= self.gpu_device_id <= 0x7FFFFFFF:
+            print(f"[WARN] models.embedding.device_id={self.gpu_device_id!r} invalid; ignoring", file=sys.stderr)
+            self.gpu_device_id = None
 
     def _validate_server_transport(self) -> None:
         """Bound-check transport / server_port / metrics_port / rate limits."""
         if self.transport not in ("stdio", "sse", "streamable-http"):
-            print(f"[WARN] server.transport={self.transport!r} invalid, using 'stdio'")
+            print(f"[WARN] server.transport={self.transport!r} invalid, using 'stdio'", file=sys.stderr)
             self.transport = "stdio"
         if not isinstance(self.server_port, int) or not (1 <= self.server_port <= 65535):
             self.server_port = 8179
@@ -973,11 +1017,11 @@ class Config:
         if not isinstance(self.rate_limit_rpm, int) or self.rate_limit_rpm < 1:
             self.rate_limit_rpm = 60
         if not isinstance(self.log_format, str) or self.log_format not in ("text", "json"):
-            print(f"[WARN] server.logging.format={self.log_format!r} invalid, using 'text'")
+            print(f"[WARN] server.logging.format={self.log_format!r} invalid, using 'text'", file=sys.stderr)
             self.log_format = "text"
         _valid_levels = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
         if not isinstance(self.log_level, str) or self.log_level.upper() not in _valid_levels:
-            print(f"[WARN] server.logging.level={self.log_level!r} invalid, using 'INFO'")
+            print(f"[WARN] server.logging.level={self.log_level!r} invalid, using 'INFO'", file=sys.stderr)
             self.log_level = "INFO"
         else:
             self.log_level = self.log_level.upper()
@@ -988,7 +1032,7 @@ class Config:
         """Ensure supported_formats is a non-empty list; fall back to canonical defaults."""
         if isinstance(self.supported_formats, list) and self.supported_formats:
             return
-        print("[WARN] supported_formats is empty or invalid, using defaults")
+        print("[WARN] supported_formats is empty or invalid, using defaults", file=sys.stderr)
         self.supported_formats = list(_DEFAULT_SUPPORTED_FORMATS)
 
     def _validate_lists_and_maps(self) -> None:
@@ -999,29 +1043,29 @@ class Config:
     def _validate_exclude_and_routes(self) -> None:
         """Ensure exclude_patterns is a str-only list and keyword_routes values are lists."""
         if not isinstance(self.exclude_patterns, list):
-            print(f"[WARN] exclude_patterns={self.exclude_patterns!r} invalid, using []")
+            print(f"[WARN] exclude_patterns={self.exclude_patterns!r} invalid, using []", file=sys.stderr)
             self.exclude_patterns = []
         else:
             self.exclude_patterns = [p for p in self.exclude_patterns if isinstance(p, str)]
 
         for cat, keywords in list(self.keyword_routes.items()):
             if not isinstance(keywords, list):
-                print(f"[WARN] keyword_routes.{cat} is not a list, removing")
+                print(f"[WARN] keyword_routes.{cat} is not a list, removing", file=sys.stderr)
                 del self.keyword_routes[cat]
 
     def _validate_query_expansions(self) -> None:
         """Type-check + merge query_expansions with query_expansion_groups."""
         if not isinstance(self.query_expansions, dict):
-            print("[WARN] query_expansions is invalid, using defaults")
+            print("[WARN] query_expansions is invalid, using defaults", file=sys.stderr)
             self.query_expansions = dict(_DEFAULT_QUERY_EXPANSIONS)
 
         for term, synonyms in list(self.query_expansions.items()):
             if not isinstance(term, str) or not isinstance(synonyms, list):
-                print(f"[WARN] query_expansions.{term} is invalid, removing")
+                print(f"[WARN] query_expansions.{term} is invalid, removing", file=sys.stderr)
                 del self.query_expansions[term]
 
         if not isinstance(self.query_expansion_groups, list):
-            print("[WARN] query_expansion_groups is invalid, ignoring")
+            print("[WARN] query_expansion_groups is invalid, ignoring", file=sys.stderr)
             self.query_expansion_groups = []
 
         self.query_expansions = _merge_query_expansion_sources(self.query_expansions, self.query_expansion_groups)
@@ -1035,16 +1079,16 @@ class Config:
         import re as _re
 
         if not isinstance(self.fts5_enabled, bool):
-            print(f"[WARN] fts5_enabled={self.fts5_enabled!r} invalid, using False")
+            print(f"[WARN] fts5_enabled={self.fts5_enabled!r} invalid, using False", file=sys.stderr)
             self.fts5_enabled = False
         if not isinstance(self.fts5_rerank_enabled, bool):
-            print(f"[WARN] fts5_rerank_enabled={self.fts5_rerank_enabled!r} invalid, using False")
+            print(f"[WARN] fts5_rerank_enabled={self.fts5_rerank_enabled!r} invalid, using False", file=sys.stderr)
             self.fts5_rerank_enabled = False
         if not isinstance(self.fts5_min_hits, int) or self.fts5_min_hits < 1:
-            print(f"[WARN] fts5_min_hits={self.fts5_min_hits!r} invalid, using 3")
+            print(f"[WARN] fts5_min_hits={self.fts5_min_hits!r} invalid, using 3", file=sys.stderr)
             self.fts5_min_hits = 3
         if not isinstance(self.fts5_patterns, list):
-            print(f"[WARN] fts5_patterns={self.fts5_patterns!r} invalid, using []")
+            print(f"[WARN] fts5_patterns={self.fts5_patterns!r} invalid, using []", file=sys.stderr)
             self.fts5_patterns = []
         else:
             self.fts5_patterns = [p for p in self.fts5_patterns if isinstance(p, str)]
@@ -1058,14 +1102,19 @@ class Config:
                 )
             if pattern in (r".+", r".*", r"^.+$", r"^.*$"):
                 print(
-                    f"[WARN] fts5_patterns[{idx}]={pattern!r} is overly broad and will classify most queries as lexical"
+                    f"[WARN] fts5_patterns[{idx}]={pattern!r} is overly broad and will classify most queries as lexical",
+                    file=sys.stderr,
                 )
         if not self.fts5_patterns:
-            print("[WARN] fts5_patterns is empty — the FTS5 router will never classify a query as lexical")
+            print(
+                "[WARN] fts5_patterns is empty — the FTS5 router will never classify a query as lexical",
+                file=sys.stderr,
+            )
         elif len(self.fts5_patterns) > 20:
             print(
                 f"[WARN] fts5_patterns has {len(self.fts5_patterns)} entries; "
-                f"high pattern count may impact router performance (recommended <=5)"
+                f"high pattern count may impact router performance (recommended <=5)",
+                file=sys.stderr,
             )
 
     def _warn_missing_documents_dir(self) -> None:
@@ -1075,7 +1124,8 @@ class Config:
             print(
                 f"[WARN] documents_dir '{raw_docs}' resolved to "
                 f"'{self.documents_dir}' which does not exist — creating it. "
-                f"Verify the path in config.yaml if reindex returns 0 files."
+                f"Verify the path in config.yaml if reindex returns 0 files.",
+                file=sys.stderr,
             )
 
     def _ensure_directories(self) -> None:

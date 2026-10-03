@@ -214,8 +214,11 @@ def test_fix5_stale_marker_detected_when_fts5_empty() -> None:
         # 5 rows in FTS5 vs 50k in Chroma → 0.01% populated → marker is lying.
         assert orch._fts5_marker_matches_reality() is False
 
-        # 5000 in FTS5 vs 50k → 10% → marker is credible.
+        # A 90% deficit must remain invalid, even with a complete marker.
         orch.fts5_index = SimpleNamespace(count=lambda: 5000)
+        assert orch._fts5_marker_matches_reality() is False
+
+        orch.fts5_index = SimpleNamespace(count=lambda: 50000)
         assert orch._fts5_marker_matches_reality() is True
 
         # Empty corpus → marker complete is trivially legitimate.

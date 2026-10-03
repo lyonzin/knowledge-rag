@@ -96,7 +96,7 @@ The cross-encoder reranker model is lazy-loaded on the first query. This adds a 
 
 ### Memory usage
 
-With ~200 documents, expect ~300-500MB RAM. The embedding model (~200MB ONNX runtime resident, lazy-loaded on first query since v3.8.0) and reranker (~25MB, lazy-loaded) are loaded into memory only when actually used. For very large knowledge bases (1000+ documents), consider enabling GPU acceleration and using exclude patterns to limit index scope.
+Memory depends on the model, chunk lengths, batch size, corpus, and runtime allocator. The embedding model and reranker load lazily when needed. Measure peak process RSS during indexing; document count alone does not predict it. Reduce `documents.embed_batch_size` to limit ONNX inference memory and use exclude patterns to limit index scope. GPU execution still consumes host RAM and adds VRAM requirements; see [GPU setup](gpu-setup.md) before changing providers.
 
 ### Multiple MCP clients spawn duplicate servers
 

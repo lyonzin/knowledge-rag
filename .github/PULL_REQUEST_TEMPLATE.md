@@ -51,8 +51,8 @@ Closes #
 
 ### 2. Stability
 
-- [ ] All existing tests still pass on Linux + Windows × Python 3.11/3.12
-- [ ] New behavior covered by tests; tests are deterministic (no `time.sleep` / network / OS-scheduler dependencies)
+- [ ] All existing tests pass on Linux, Windows and macOS × Python 3.11/3.12/3.13
+- [ ] New behavior has regression tests; concurrency tests use explicit synchronization and bounded waits
 - [ ] Coverage does not regress (codecov gate)
 - [ ] No tests were skipped, deleted, or marked `xfail` to make the PR pass
 
@@ -68,7 +68,7 @@ Closes #
 - [ ] Works on Linux, Windows, macOS (paths, line endings, locale considered)
 - [ ] Works on Python 3.11, 3.12, 3.13 (no Python-version-specific syntax without fallback)
 - [ ] No hardcoded paths, locales, or encodings (use `pathlib.Path`, `encoding="utf-8"` explicit)
-- [ ] If you touched a parser, all 20 supported formats still parse correctly
+- [ ] If you touched a parser, the format smoke matrix and affected parser tests pass
 
 ### 5. Scalability
 
@@ -88,9 +88,9 @@ RSS @ 1k docs   ___ MB    ___ MB   ___%
 
 ### 6. Versioning
 
-- [ ] If this is user-facing change: bumped version in `pyproject.toml`, `mcp_server/__init__.py`, and `npm/package.json` atomically
+- [ ] Version agrees in `pyproject.toml`, `mcp_server/__init__.py`, and `npm/package.json`; release bumps update all three together
 - [ ] If this is a breaking change: bumped MAJOR, added migration notes in CHANGELOG, marked `BREAKING CHANGE:` in commit footer
-- [ ] CHANGELOG updated with entry under `## Unreleased` in README.md
+- [ ] User-facing changes have an entry under `### Unreleased` in `CHANGELOG.md`
 - [ ] Public API surface (`mcp_server/server.py` MCP tool decorators) unchanged, OR breaking changes documented
 
 ### 7. Quality
@@ -123,7 +123,7 @@ N/A
 
 - [ ] Updated `README.md` (if user-facing)
 - [ ] Updated `docs/` (if applicable)
-- [ ] Added entry to `## Unreleased` in README CHANGELOG section
+- [ ] Added entry to `### Unreleased` in `CHANGELOG.md`
 
 ## Reviewer checklist
 

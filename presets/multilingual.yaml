@@ -6,12 +6,12 @@
 #
 # Opt-in preset for corpora that mix languages other than English —
 # Portuguese, Spanish, French, German, Italian, Russian/Cyrillic, Arabic,
-# Chinese/Japanese/Korean (CJK), and 100+ others supported by the
+# Chinese/Japanese/Korean (CJK), using the
 # ``intfloat/multilingual-e5-large`` embedding model.
 #
 # What changes vs the default (compact) profile:
-#   - Embedding model → intfloat/multilingual-e5-large (1024D, ~2.24 GB
-#     resident once loaded; ~4-5x slower than bge-small-en on CPU).
+#   - Embedding model → intfloat/multilingual-e5-large (1024 dimensions).
+#     Measure memory and throughput on your hardware before switching.
 #   - Query / passage prefixes → "query: " / "passage: " are wired
 #     automatically by the ``multilingual`` profile. The e5 family was
 #     trained with these scoped inputs and quality degrades without them.
@@ -19,12 +19,13 @@
 # Trade-offs to know before you switch:
 #   - Reindex is REQUIRED. Existing chunks were embedded with the previous
 #     model+prefix combo and their vectors are not comparable to the new
-#     ones. Run ``reindex_documents(force=True)`` after adopting.
+#     ones. Build and validate an isolated data directory and metadata store
+#     before switching clients; see docs/reindex-operations.md. A dimension
+#     mismatch can prevent startup before the reindex MCP tool is available.
 #   - The default reranker (``Xenova/ms-marco-MiniLM-L-6-v2``) was trained
-#     on English MS-MARCO. It still improves BM25+semantic RRF ordering on
-#     non-English corpora but the lift is smaller than on English. Consider
-#     ``enabled: false`` if you want to save the ~50-100ms/query and trust
-#     the multilingual embedding alone.
+#     on English MS-MARCO. Compare enabled/disabled retrieval with expected
+#     sources in each corpus language; no non-English improvement or fixed
+#     latency is guaranteed.
 #
 # Usage:  cp presets/multilingual.yaml config.yaml
 
@@ -68,9 +69,9 @@ models:
     # populated automatically from _EMBEDDING_PROFILES["multilingual"].
     # See mcp_server/config.py.
     profile: "multilingual"
-    # ``gpu: true`` cuts multilingual-e5-large reindex time by 5-10x on
-    # NVIDIA CUDA 12 hardware. Requires: pip install knowledge-rag[gpu].
-    # Leave false for CPU-only environments.
+    # GPU requires a compatible runtime, drivers and an effective GPU session.
+    # See docs/gpu-setup.md for installation and actual-provider validation.
+    # Leave false for CPU-only environments; throughput depends on workload.
     gpu: false
 
   reranker:
@@ -111,8 +112,8 @@ keyword_routes: {}
 # QUERY EXPANSION
 # ============================================================================
 # No expansions shipped. The multilingual embedding already handles
-# cross-lingual synonymy — a search in English retrieves passages in
-# Portuguese if they share meaning. Add expansions only for domain-specific
-# acronyms your corpus uses.
+# cross-lingual retrieval. Validate source recall for the language pairs
+# in your corpus. Add expansions for domain-specific acronyms when measured
+# retrieval errors justify them.
 
 query_expansions: {}

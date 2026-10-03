@@ -106,10 +106,10 @@ collection = client.get_or_create_collection(name=config.collection_name)
 print(collection.count())
 """
     env = os.environ.copy()
-    env.setdefault("KNOWLEDGE_RAG_DIR", str(BASE_DIR))
+    env["KNOWLEDGE_RAG_DIR"] = str(BASE_DIR.resolve())
     return subprocess.run(
         [sys.executable, "-c", code],
-        cwd=str(BASE_DIR),
+        cwd=str(BASE_DIR.resolve()),
         env=env,
         text=True,
         stdout=subprocess.PIPE,

@@ -11,14 +11,21 @@ import hashlib
 import json
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime
+from importlib import import_module
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 # PDF support (optional)
 try:
-    import fitz  # PyMuPDF
+    try:
+        fitz = import_module("pymupdf")
+    except ModuleNotFoundError as exc:
+        if exc.name != "pymupdf":
+            raise
+        fitz = import_module("fitz")  # Older PyMuPDF, before the canonical module name.
 
     HAS_PYMUPDF = True
 except ImportError:
@@ -47,11 +54,11 @@ except ImportError:
     HAS_PPTX = False
 
 import csv
-import io
 
 import yaml
 
 from .config import config
+from .security import detect_external_marker, is_path_within
 
 # =============================================
 # LANGUAGE PROFILES FOR CODE PARSING
@@ -231,8 +238,10 @@ class DocumentParser:
     """Multi-format document parser with chunking and metadata extraction"""
 
     def __init__(self, chunk_size: int = None, chunk_overlap: int = None):
-        self.chunk_size = chunk_size or config.chunk_size
-        self.chunk_overlap = chunk_overlap or config.chunk_overlap
+        self.chunk_size = config.chunk_size if chunk_size is None else chunk_size
+        self.chunk_overlap = config.chunk_overlap if chunk_overlap is None else chunk_overlap
+        if self.chunk_size <= 0 or self.chunk_overlap < 0:
+            raise ValueError("chunk_size must be positive and chunk_overlap non-negative")
 
         # Parser dispatch table
         self._parsers = {
@@ -296,9 +305,12 @@ class DocumentParser:
 
         # Parse content and metadata
         content, metadata = self._parsers[key](filepath)
+        marker = detect_external_marker(content)
+        provenance = {"external_source": True, "external_source_uri": marker[0]} if marker else {}
+        metadata.update(provenance)
 
         if not content or not content.strip():
-            print(f"[WARN] Skipping empty file: {filepath}")
+            print(f"[WARN] Skipping empty file: {filepath}", file=sys.stderr)
             return None
 
         # Detect category from path
@@ -323,6 +335,8 @@ class DocumentParser:
             doc.chunks = self._chunk_markdown(content, metadata)
         else:
             doc.chunks = self._chunk_text(content, metadata)
+        for chunk in doc.chunks:
+            chunk.metadata.update(provenance)
 
         return doc
 
@@ -354,39 +368,55 @@ class DocumentParser:
 
         return False
 
-    def parse_directory(self, directory: Path = None) -> List[Document]:
-        """Parse all supported files in a directory recursively (follows symlinks)."""
-        directory = Path(directory) if directory else config.documents_dir
-        documents = []
+    def iter_files(self, directory: Path = None):
+        """Yield supported paths without loading content; follow contained links only."""
+        directory = (Path(directory) if directory else config.documents_dir).expanduser().resolve()
         seen_dirs = set()
+        seen_files = set()
         supported = set(config.supported_formats)
         exclude = config.exclude_patterns
 
         for root, dirs, files in os.walk(directory, followlinks=True):
             real_root = os.path.realpath(root)
-            if real_root in seen_dirs:
+            if real_root in seen_dirs or not is_path_within(directory, Path(root)):
                 dirs.clear()
                 continue
             seen_dirs.add(real_root)
 
             # Filter out excluded directories in-place (prevents os.walk from descending)
-            if exclude:
-                dirs[:] = [d for d in dirs if not self._should_exclude(Path(root) / d, directory, exclude)]
+            dirs[:] = [
+                d
+                for d in dirs
+                if is_path_within(directory, Path(root) / d)
+                and not self._should_exclude(Path(root) / d, directory, exclude)
+            ]
 
             for fname in files:
+                if fname.startswith(".rag-pending-"):
+                    continue
                 filepath = Path(root) / fname
                 # supported_formats holds suffixes (".go") and exact filenames ("Dockerfile")
                 if filepath.suffix.lower() not in supported and fname not in supported:
                     continue
                 if exclude and self._should_exclude(filepath, directory, exclude):
                     continue
-                try:
-                    doc = self.parse_file(filepath)
-                    if doc:
-                        documents.append(doc)
-                except Exception as e:
-                    print(f"[WARN] Failed to parse {filepath}: {e}")
+                if not is_path_within(directory, filepath):
+                    continue
+                resolved = os.path.realpath(filepath)
+                if resolved not in seen_files:
+                    seen_files.add(resolved)
+                    yield filepath
 
+    def parse_directory(self, directory: Path = None) -> List[Document]:
+        """Parse supported files, preserving the public eager list API."""
+        documents = []
+        for filepath in self.iter_files(directory):
+            try:
+                doc = self.parse_file(filepath)
+                if doc:
+                    documents.append(doc)
+            except Exception as e:
+                print(f"[WARN] Failed to parse {filepath}: {e}", file=sys.stderr)
         return documents
 
     # =========================================================================
@@ -395,7 +425,7 @@ class DocumentParser:
 
     def _parse_markdown(self, filepath: Path) -> tuple[str, Dict]:
         """Parse Markdown file, extracting headers as metadata"""
-        content = filepath.read_text(encoding="utf-8", errors="ignore")
+        content = filepath.read_text(encoding="utf-8-sig", errors="ignore")
         metadata = {
             "type": "markdown",
             "headers": [],
@@ -456,7 +486,7 @@ class DocumentParser:
 
     def _parse_text(self, filepath: Path) -> tuple[str, Dict]:
         """Parse plain text file"""
-        content = filepath.read_text(encoding="utf-8", errors="ignore")
+        content = filepath.read_text(encoding="utf-8-sig", errors="ignore")
         metadata = {
             "type": "text",
             "title": filepath.stem,
@@ -785,25 +815,23 @@ class DocumentParser:
             raise ImportError("openpyxl not installed. Install with: pip install openpyxl")
 
         wb = openpyxl.load_workbook(filepath, read_only=True, data_only=True)
-        metadata = {
-            "type": "xlsx",
-            "title": filepath.stem,
-            "file_size": filepath.stat().st_size,
-            "modified": datetime.fromtimestamp(filepath.stat().st_mtime).isoformat(),
-            "sheets": wb.sheetnames,
-        }
-
-        parts = []
-        for sheet_name in wb.sheetnames:
-            ws = wb[sheet_name]
-            parts.append(f"## Sheet: {sheet_name}")
-            for row in ws.iter_rows(values_only=True):
-                cells = [str(c) if c is not None else "" for c in row]
-                line = " | ".join(cells).strip()
-                if line and line != " | " * (len(cells) - 1):
-                    parts.append(line)
-
-        wb.close()
+        try:
+            metadata = {
+                "type": "xlsx",
+                "title": filepath.stem,
+                "file_size": filepath.stat().st_size,
+                "modified": datetime.fromtimestamp(filepath.stat().st_mtime).isoformat(),
+                "sheets": wb.sheetnames,
+            }
+            parts = []
+            for sheet_name in wb.sheetnames:
+                parts.append(f"## Sheet: {sheet_name}")
+                for row in wb[sheet_name].iter_rows(values_only=True):
+                    cells = [str(c) if c is not None else "" for c in row]
+                    if any(cells):
+                        parts.append(" | ".join(cells).strip())
+        finally:
+            wb.close()
         content = "\n\n".join(parts)
         return content, metadata
 
@@ -838,7 +866,6 @@ class DocumentParser:
 
     def _parse_csv(self, filepath: Path) -> tuple[str, Dict]:
         """Parse CSV file as text table."""
-        raw = filepath.read_text(encoding="utf-8", errors="ignore")
         metadata = {
             "type": "csv",
             "title": filepath.stem,
@@ -846,20 +873,23 @@ class DocumentParser:
             "modified": datetime.fromtimestamp(filepath.stat().st_mtime).isoformat(),
         }
 
+        parts = []
         try:
-            rows = list(csv.reader(io.StringIO(raw)))
+            with filepath.open(encoding="utf-8-sig", errors="ignore", newline="") as stream:
+                for row in csv.reader(stream):
+                    if not parts:
+                        metadata["columns"] = len(row)
+                    parts.append(" | ".join(row))
         except csv.Error:
             # Malformed or oversized CSV (e.g. a field larger than csv's
             # field-size limit) raises csv.Error. Index the raw text rather
             # than crash, mirroring _parse_json's fallback on JSONDecodeError.
             metadata["is_valid_csv"] = False
-            return raw, metadata
+            return filepath.read_text(encoding="utf-8-sig", errors="ignore"), metadata
 
         metadata["is_valid_csv"] = True
-        metadata["rows"] = len(rows)
-        metadata["columns"] = len(rows[0]) if rows else 0
-
-        parts = [" | ".join(row) for row in rows]
+        metadata["rows"] = len(parts)
+        metadata.setdefault("columns", 0)
         content = "\n".join(parts)
         return content, metadata
 
@@ -990,6 +1020,9 @@ class DocumentParser:
                 chunks.append(chunk)
                 index += 1
 
+            if end == text_len:
+                break
+
             # Move start position with overlap
             # Ensure we always make forward progress
             new_start = end - self.chunk_overlap
@@ -1025,10 +1058,13 @@ class DocumentParser:
 
         # Step 1: Mask code blocks to prevent splitting on # inside them
         code_blocks = []
+        marker = "__RAG_CODE_BLOCK_"
+        while marker in text:
+            marker = "_" + marker
 
         def mask_code(match):
             code_blocks.append(match.group(0))
-            return f"__CODE_BLOCK_{len(code_blocks) - 1}__"
+            return f"{marker}{len(code_blocks) - 1}__"
 
         masked_text = re.sub(r"```.*?```", mask_code, text, flags=re.DOTALL)
 
@@ -1042,10 +1078,10 @@ class DocumentParser:
             return self._chunk_text(text, metadata)
 
         # Step 3: Restore code blocks in each section
+        placeholder = re.compile(re.escape(marker) + r"(\d+)__")
+
         def restore_code(section_text):
-            for i, block in enumerate(code_blocks):
-                section_text = section_text.replace(f"__CODE_BLOCK_{i}__", block)
-            return section_text
+            return placeholder.sub(lambda match: code_blocks[int(match.group(1))], section_text)
 
         sections = [restore_code(s) for s in sections]
 

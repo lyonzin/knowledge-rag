@@ -112,7 +112,7 @@ class TestProfileResolution:
         # Assert: profile wins, WARN was emitted, dim promoted to 1024
         assert cfg.embedding_model == "BAAI/bge-large-en-v1.5"
         assert cfg.embedding_dim == 1024
-        assert "profile takes precedence" in captured.out
+        assert "profile takes precedence" in captured.err
 
     def test_invalid_profile_falls_back_to_custom(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -137,8 +137,8 @@ class TestProfileResolution:
         assert cfg.embedding_profile == "custom"
         assert cfg.embedding_model == "BAAI/bge-small-en-v1.5"
         assert cfg.embedding_dim == 384
-        assert "Invalid embedding profile" in captured.out
-        assert "does-not-exist" in captured.out
+        assert "Invalid embedding profile" in captured.err
+        assert "does-not-exist" in captured.err
 
     def test_user_prefix_overrides_profile_prefix(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Arrange: profile=multilingual ships "query: "/"passage: " but the

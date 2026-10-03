@@ -131,6 +131,8 @@ class TestHybridCategoryFilter:
         monkeypatch.setattr("mcp_server.server.config.reranker_enabled", False)
 
         class FakeCache:
+            generation = 0
+
             def get(self, *args, **kwargs):
                 return None
 
@@ -269,6 +271,8 @@ class TestKeywordRoutingBehavior:
         docs = self.DOCS
 
         class FakeCache:
+            generation = 0
+
             def get(self, *args, **kwargs):
                 return None
 
@@ -455,6 +459,8 @@ class TestPathAwareRanking:
         monkeypatch.setattr("mcp_server.server.config.reranker_enabled", False)
 
         class FakeCache:
+            generation = 0
+
             def get(self, *args, **kwargs):
                 return None
 
@@ -467,7 +473,6 @@ class TestPathAwareRanking:
 
         class FakeCollection:
             def get(self, ids, include):
-                chunk_id = ids[0]
                 documents = {
                     "chunk_generic": "same keyword content",
                     "chunk_target": "same keyword content",
@@ -486,7 +491,11 @@ class TestPathAwareRanking:
                         "chunk_index": 0,
                     },
                 }
-                return {"documents": [documents[chunk_id]], "metadatas": [metadatas[chunk_id]]}
+                return {
+                    "ids": ids,
+                    "documents": [documents[chunk_id] for chunk_id in ids],
+                    "metadatas": [metadatas[chunk_id] for chunk_id in ids],
+                }
 
         orchestrator = object.__new__(KnowledgeOrchestrator)
         orchestrator.query_cache = FakeCache()
@@ -527,6 +536,8 @@ class TestDoSemanticCandidateMath:
         captured = {}
 
         class FakeCache:
+            generation = 0
+
             def get(self, *args, **kwargs):
                 return None
 
@@ -579,6 +590,8 @@ class TestDoSemanticCandidateMath:
         captured = {}
 
         class FakeCache:
+            generation = 0
+
             def get(self, *args, **kwargs):
                 return None
 

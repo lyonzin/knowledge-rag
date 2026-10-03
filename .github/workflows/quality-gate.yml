@@ -67,35 +67,27 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - run: pip install pip-audit
+      - run: python -m pip install --upgrade "pip>=26.2" pip-audit
       - name: Audit dependency tree (without installing knowledge-rag)
         shell: bash
         # We audit the dependency tree only — NOT the knowledge-rag package
         # itself. Auditing knowledge-rag would always fail on release PRs
         # (the version about to ship is not yet on PyPI), and we already
         # fully exercise the project via the test suite. Resolving deps via
-        # pip download lets pip-audit see the real graph without installing
+        # pip's installation report lets pip-audit see the real graph without installing
         # an editable / not-on-PyPI version.
         run: |
-          # Workaround: pip 26.2 removed pip._internal.utils.compat.stdlib_pkgs
-          # which breaks pip-tools <8 (used below via pip-compile). Pin pip
-          # to 26.1.2 until pip-tools ships a compatible release. Track:
-          # https://github.com/jazzband/pip-tools/issues
-          python -m pip install --upgrade "pip==26.1.2"
           # Materialize the actual dependency closure into a requirements
           # file by asking pip to resolve (without installing) what
-          # `pip install .` would pull. Then audit that file.
-          pip install --upgrade pip-tools
-          pip-compile --quiet --output-file=resolved-deps.txt --strip-extras pyproject.toml
-          # Drop the project itself from the file (pip-compile may include it)
-          grep -v "^knowledge-rag" resolved-deps.txt > resolved-deps.clean.txt || cp resolved-deps.txt resolved-deps.clean.txt
+          # `pip install .` would pull. Ignore installed tools so none of
+          # the transitive dependencies disappear from the audit report.
+          python -m pip install --dry-run --ignore-installed --report deps-report.json .
+          python scripts/audit_requirements.py deps-report.json resolved-deps.clean.txt
 
           # Strict mode fails on any unfixed advisory. Documented exceptions:
-          #   CVE-2026-3219 (pip): tarball symlink TOCTOU — no upstream fix
-          #     as of 2026-05. Does not affect us; users run pip themselves.
           #   CVE-2026-45829/45830/45831/45833 (chromadb 1.5.9): no fix
           #     available as of 2026-09. 1.5.9 is latest. Remove when patched.
-          ignore_args="--ignore-vuln CVE-2026-3219 --ignore-vuln CVE-2026-45829 --ignore-vuln CVE-2026-45830 --ignore-vuln CVE-2026-45831 --ignore-vuln CVE-2026-45833"
+          ignore_args="--ignore-vuln CVE-2026-45829 --ignore-vuln CVE-2026-45830 --ignore-vuln CVE-2026-45831 --ignore-vuln CVE-2026-45833"
           if [ -n "${IGNORE_AUDIT_IDS:-}" ]; then
             for id in ${IGNORE_AUDIT_IDS}; do
               ignore_args="${ignore_args} --ignore-vuln ${id}"
@@ -307,7 +299,7 @@ jobs:
         shell: bash
         # Gradual rollout: only modules already fully annotated. As legacy
         # code earns annotations, append paths here.
-        run: mypy mcp_server/instance_lock.py mcp_server/preflight.py scripts/
+        run: mypy mcp_server/instance_lock.py mcp_server/preflight.py mcp_server/file_transaction.py mcp_server/publication.py scripts/
 
   interrogate:
     name: "Pillar 7 — Docstring coverage"
@@ -481,6 +473,10 @@ jobs:
     name: "Pillar 5 — Performance regression gate (10%)"
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
+    env:
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_HUB_DISABLE_PROGRESS_BARS: "1"
     # Promoted to required at v3.9.0. Bootstrap-resilient: when master
     # does not yet contain bench/, the gate skips with [INFO] message
     # rather than failing.
@@ -502,7 +498,7 @@ jobs:
           TRANSFORMERS_OFFLINE: "1"
           HF_HUB_DISABLE_PROGRESS_BARS: "1"
         run: pytest bench/ --benchmark-only --benchmark-min-rounds=3 --benchmark-json=branch.json
-      - name: Checkout master and bench it
+      - name: Benchmark master in a separate checkout
         shell: bash
         # First-run resilience: if master does not yet contain bench/ (the
         # PR that introduces it), the perf gate is informational. Once bench/
@@ -511,13 +507,22 @@ jobs:
         run: |
           git fetch origin master:master-base
           if git show master-base:bench/test_bench_search.py > /dev/null 2>&1; then
-            git checkout master-base -- bench/ scripts/ mcp_server/
-            pytest bench/ --benchmark-only --benchmark-min-rounds=3 --benchmark-json=master.json || \
-              echo "[WARN] master bench step failed; perf gate becomes informational this run"
-            git checkout HEAD -- bench/ scripts/ mcp_server/
+            git worktree add --detach "$RUNNER_TEMP/knowledge-rag-baseline" master-base
+            cd "$RUNNER_TEMP/knowledge-rag-baseline"
+            PYTHONPATH="$PWD" python -m pytest bench/ --benchmark-only --benchmark-min-rounds=3 \
+              --benchmark-json="$GITHUB_WORKSPACE/master.json"
           else
             echo "[INFO] master does not yet contain bench/; this is the bootstrap PR. Perf gate skipped."
           fi
+      - name: Preserve benchmark measurements and RSS byte samples
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: performance-gate-measurements
+          path: |
+            branch.json
+            master.json
+          if-no-files-found: warn
       - name: Compare and gate
         shell: bash
         env:

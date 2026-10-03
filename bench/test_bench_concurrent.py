@@ -37,7 +37,7 @@ def test_bench_concurrent_10_queries(benchmark, bm25_index_seeded):
         return _run_queries(bm25_index_seeded, 10)
 
     total = benchmark(workload)
-    assert total >= 0
+    assert total == 10 * 5
 
 
 def test_bench_concurrent_50_queries(benchmark, bm25_index_seeded):
@@ -45,7 +45,7 @@ def test_bench_concurrent_50_queries(benchmark, bm25_index_seeded):
         return _run_queries(bm25_index_seeded, 50)
 
     total = benchmark(workload)
-    assert total >= 0
+    assert total == 50 * 5
 
 
 def test_bench_concurrent_100_queries(benchmark, bm25_index_seeded):
@@ -53,4 +53,4 @@ def test_bench_concurrent_100_queries(benchmark, bm25_index_seeded):
         return _run_queries(bm25_index_seeded, 100)
 
     total = benchmark(workload)
-    assert total >= 0
+    assert total == 100 * 5

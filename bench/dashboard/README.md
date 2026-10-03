@@ -37,7 +37,7 @@ python -m http.server 8000 --directory /tmp/dashboard-preview
 
 - **Dark by default.** Executive dashboards live on external monitors and demo rooms — dark reads better in both. Light theme auto-switches via `prefers-color-scheme` and can be forced via the toggle in the header.
 - **Zero build step.** No bundler, no framework, no npm. Chart.js loads from jsDelivr with SRI. Everything else is one HTTP request per file.
-- **Log-scale bars.** A dashboard that mixes µs- and s-scale benchmarks side by side must be log-scale — linear would collapse everything under 10ms into invisibility.
+- **Log-scale latency bars.** Wall-time measurements use a logarithmic scale. Memory measurements are displayed in bytes and are excluded from the latency chart.
 - **Category-driven KPIs.** Instead of showing every benchmark equally, the top of the page picks a representative benchmark per subsystem (search / FTS5 / reindex / indexing / memory / concurrent) and classifies it as healthy / watch / investigate against tuned thresholds.
 - **Print-friendly.** Executives export dashboards. The stylesheet has a `@media print` block that hides interactive controls and adds simple borders so PDF exports are legible.
 
@@ -51,11 +51,13 @@ python -m http.server 8000 --directory /tmp/dashboard-preview
 | **FTS5** | `fts5 / lexical / fast[_-]?path` | 10 ms / 30 ms |
 | **Reindex** | `reindex / rebuild / swap` | 10 s / 60 s |
 | **Indexing** | `index / ingest / parse / chunk` | 100 ms / 500 ms |
-| **Memory** | `memory / rss / cache` | 1 s / 5 s |
+| **Memory** | Explicit `measurement_unit: bytes` overrides name matching | Per-workload RSS budget in bytes |
 | **Concurrent** | `concurrent / thread / parallel` | 100 ms / 500 ms |
 | **Other** | — | 100 ms / 1 s |
 
-New benchmark files under `bench/` are automatically categorized as long as the test name contains one of these keywords. When adding a new subsystem, extend the `CATEGORY_RULES` array in `dashboard.js` and the `HEALTH_THRESHOLDS` map.
+New benchmark files under `bench/` are automatically categorized as long as the test name contains one of these keywords. The first matching pattern wins. Explicit byte measurements always use the memory category. A cache-hit latency benchmark remains a timing measurement rather than a RAM measurement. Timing thresholds are display heuristics, not service-level guarantees.
+
+Memory rows read `rss_peak_delta_bytes`, `rss_retained_delta_bytes`, `rss_budget_bytes` and `rss_sampling_interval_ms` from the benchmark's `extra_info`. Each workload runs five times, sampling process RSS every 5 ms and applying an absolute budget to every run. Older artifacts without byte samples display `not measured` / `unavailable`; elapsed garbage-collection time is never relabeled as memory. Shorter allocation peaks can fall between samples, and RSS includes native allocations and allocator retention.
 
 ## Data schema (`data.json`)
 
@@ -67,6 +69,9 @@ New benchmark files under `bench/` are automatically categorized as long as the 
   "results": [
     {
       "name": "test_bench_search_hybrid",
+      "measurement_unit": "nanoseconds",
+      "measurement_value": 3140000,
+      "workload_version": 1,
       "median_ns": 3140000,
       "stddev_ns": 210000,
       "ops": 318.5,
@@ -77,4 +82,6 @@ New benchmark files under `bench/` are automatically categorized as long as the 
 }
 ```
 
-Flat by design — `dashboard.js` enriches each row with `category`, `category_label`, `category_color`, `status`, and `stddev_pct` in memory at render time.
+For memory rows, `measurement_unit` is `bytes`; `median_ns`, `stddev_ns`, `ops` and `iqr_ratio` are null. `measurement_value` contains sampled peak RSS growth or null when the legacy artifact has no byte sample. The RSS budget and sampling interval are also retained. Sorting groups measurements by unit instead of treating bytes as nanoseconds.
+
+`dashboard.js` enriches each row with `category`, `category_label`, `category_color`, `status`, and `stddev_pct` at render time. `workload_version` identifies changes to the benchmark scenario; the CI gate reports different versions as incomparable and keeps enforcing its 10% threshold for unchanged, comparable scenarios.

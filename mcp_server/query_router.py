@@ -4,9 +4,8 @@ Implements ADR-002: heuristic regex classifier (no LLM, no ML). Patterns are
 pre-compiled at construction time so ``classify()`` stays microsecond-fast and
 never becomes a bottleneck on the FTS5 fast-path.
 
-Phase 2 of the FTS5 lexical fast-path feature. This module is intentionally
-isolated: nothing under ``mcp_server/`` imports it yet. Task 03 wires the
-router into ``KnowledgeOrchestrator`` behind ``config.fts5_enabled``.
+``KnowledgeOrchestrator`` uses this router behind ``config.fts5_enabled``
+to select FTS5 for lexical queries, with hybrid fallback when unavailable.
 """
 
 from __future__ import annotations
