@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Drain in-flight collection readers during final publication, retain source timestamps from before parsing, persist partial orphan-pruning successes, and clean retired collection backups conservatively.
 - Authorize retired-backup expiration only after replacement metadata is committed, using the replacement collection UUID; preserve unmarked or ambiguous backups across restarts.
 - Preserve extensionless Dockerfile, Makefile and Tiltfile parser selection during staged add/update operations, and invalidate cached results after failed mutations and rollback.
+- Preserve the committed document inventory after failed rollback and persist bounded per-source repair records. Incremental indexing retries those sources across restarts, removes failed-add orphans and keeps unconfirmed FTS5 state unavailable until repair commits.
 - Avoid retaining historical BM25 chunk payloads during live mutations when lexical search has not been initialized; count, stream and publish FTS5 migrations under one source snapshot.
 - Skip unchanged files before parsing, bound pending indexing work, validate traversal containment, and prevent duplicate overlap-only chunks.
 - Read and discover long Windows document paths with the extended I/O namespace while preserving public source identities and resolving link targets before containment checks.

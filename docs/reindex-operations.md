@@ -50,6 +50,46 @@ script must not run alongside another writer using the same data directory.
 Foreground execution prevents normal script exit from abandoning a daemon
 worker; it does not protect against termination, power loss or storage failure.
 
+## Recovery after a failed document rollback
+
+A mutation error can be followed by a second error while restoring its vectors.
+The original error remains visible. The server preserves the last committed
+document inventory and records the affected source in `document_repairs.json`,
+next to `index_metadata.json` (normally in `data_dir`). This is an exceptional
+recovery record, separate from the smart-reindex checkpoint.
+
+Run `reindex_documents()` and inspect completion and errors. The next incremental
+scan reprocesses marked sources even when their timestamps are unchanged or a
+checkpoint lists them as completed. It also removes recorded chunks from failed
+new additions whose uncommitted source file no longer exists. Healthy sources
+keep their ordinary unchanged-file fast path. A record is removed only after
+the corrected vectors and document metadata have committed. FTS5 remains
+unavailable while repair is pending; treat retrieval as degraded until the
+repair run has completed and representative sources have been checked.
+
+The record validates the collection, canonical source containment and document
+version IDs. It is limited to 1 MiB, 1,024 affected sources and 16 version IDs per
+source; version IDs are not chunk IDs, so a document may have many more chunks.
+A malformed, oversized or mismatched record causes an explicit startup/reindex
+error and is preserved for inspection. Do not discard the record to hide that
+error: rebuild into isolated data and metadata paths if recovery cannot proceed
+against the existing state.
+
+If saving the record itself fails, the exception explains that recovery is not
+durable. `reindex_documents(force=True)` can use the in-memory repair state in
+the current process. After a restart without a saved record, a protected full
+rebuild may be needed to remove unregistered orphan chunks. Its 90% count gate
+can reject a legitimately reduced corpus; in that case rebuild into a separate
+data directory and retain the old index for inspection, rather than weakening
+the gate or deleting stored data. Use the path-isolation procedure below and
+keep the current embedding profile when recovering without a model change.
+
+A successful staging rebuild clears validated repair records only after
+publication and metadata persistence. A later record-cleanup failure is logged
+as a post-commit cleanup problem; it does not mean the published index was
+rolled back. These records support handled recovery, not an atomic transaction
+across source files, Chroma, FTS5 and metadata or a guarantee against power loss.
+
 ## Smart-reindex checkpoints
 
 Checkpoints are stored as `reindex_checkpoint.json` in the configured data
@@ -153,6 +193,14 @@ does not have a fixed multiplier.
 Staging/backup cleanup uses a 24-hour age threshold and runs at startup and before
 rebuilds. It is not a continuously scheduled timer: an orphan may remain longer
 than one day if no cleanup opportunity occurs.
+
+A retired collection also needs a persisted retirement marker linked to the
+UUID of its successfully committed replacement. Expiration is allowed only
+while that exact replacement remains the primary collection. An empty primary
+created on a later startup does not authorize deleting an older backup.
+Unmarked legacy backups and ambiguous recovery copies remain preserved rather
+than expiring automatically; inspect their data and metadata before deciding
+which copy to restore or remove.
 
 The Python API retains `nuclear_rebuild(swap=False)` as a legacy destructive
 mode. It deletes the active collection before indexing and can leave an empty
