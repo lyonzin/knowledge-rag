@@ -299,7 +299,7 @@ jobs:
         shell: bash
         # Gradual rollout: only modules already fully annotated. As legacy
         # code earns annotations, append paths here.
-        run: mypy mcp_server/instance_lock.py mcp_server/preflight.py mcp_server/file_transaction.py mcp_server/publication.py scripts/
+        run: mypy mcp_server/instance_lock.py mcp_server/preflight.py mcp_server/file_transaction.py mcp_server/publication.py mcp_server/filesystem.py scripts/
 
   interrogate:
     name: "Pillar 7 — Docstring coverage"

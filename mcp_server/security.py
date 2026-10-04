@@ -39,6 +39,8 @@ import re
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Final, Iterable, MutableMapping, Sequence
 
+from .filesystem import resolve_path
+
 __all__ = [
     "PathEscapeError",
     "validate_path_within",
@@ -142,8 +144,8 @@ def validate_path_within(base: Path | str, candidate: Path | str) -> Path:
     _reject_hostile_literals(raw)
 
     try:
-        base_resolved = Path(base).resolve()
-        resolved = (Path(base) / Path(raw)).resolve()
+        base_resolved = resolve_path(Path(base))
+        resolved = resolve_path(Path(base) / Path(raw))
     except (OSError, ValueError, RuntimeError) as exc:  # pragma: no cover - platform specific
         raise PathEscapeError(f"Path could not be resolved: {exc}") from exc
 

@@ -64,6 +64,7 @@ from watchdog.observers import Observer
 from . import __version__
 from .config import config
 from .file_transaction import staged_text_file
+from .filesystem import io_path
 from .fts5_index import Fts5LexicalIndex, Fts5MigrationError, Fts5NotReadyError
 from .ingestion import Document, DocumentParser
 from .metrics import (
@@ -1488,7 +1489,7 @@ class DocumentWatcher(FileSystemEventHandler):
             return True  # unknown file — treat as fresh create/rename
         meta = orch._indexed_docs.get(docid, {})
         try:
-            st = Path(src_path).stat()
+            st = io_path(Path(src_path)).stat()
         except OSError:
             return True  # can't stat — let index_all handle delete detection
         current_mtime = datetime.fromtimestamp(st.st_mtime).isoformat()
@@ -1842,7 +1843,7 @@ class KnowledgeOrchestrator:
                 # A failed parser or inaccessible subtree is not evidence of deletion.
                 if is_path_within(config.documents_dir, source):
                     try:
-                        source.stat()
+                        io_path(source).stat()
                     except FileNotFoundError:
                         pass
                     except OSError:
@@ -1916,7 +1917,7 @@ class KnowledgeOrchestrator:
         """
         try:
             source = doc if isinstance(doc, Path) else doc.source
-            source_stat = source.stat()
+            source_stat = io_path(source).stat()
             if isinstance(doc, Path):
                 existing = path_to_docid.get(str(doc)) or self._source_to_docid.get(str(doc.resolve()))
                 if not force and existing and self._path_unchanged(doc, existing):
@@ -1927,7 +1928,7 @@ class KnowledgeOrchestrator:
                 doc = self.parser.parse_file(doc)
                 if doc is None:
                     raise ValueError("Document has no indexable content")
-                after_parse = source.stat()
+                after_parse = io_path(source).stat()
                 if (source_stat.st_mtime_ns, source_stat.st_size) != (after_parse.st_mtime_ns, after_parse.st_size):
                     raise RuntimeError("Source changed during parsing; retry indexing this document")
             existing_doc_id = self._resolve_existing_or_skip(doc, force, path_to_docid, stats, tracking)
@@ -2009,7 +2010,7 @@ class KnowledgeOrchestrator:
         stored_mtime = existing_meta.get("file_mtime", "")
         stored_size = existing_meta.get("file_size", 0)
         try:
-            current_stat = source.stat()
+            current_stat = io_path(source).stat()
             current_mtime = datetime.fromtimestamp(current_stat.st_mtime).isoformat()
             current_size = current_stat.st_size
         except OSError:
@@ -2029,7 +2030,7 @@ class KnowledgeOrchestrator:
     def _register_indexed_doc(self, doc, chunks_added: int, source_stat=None) -> None:
         """Record the source version actually parsed, before potentially slow inference."""
         try:
-            file_stat = source_stat if source_stat is not None else doc.source.stat()
+            file_stat = source_stat if source_stat is not None else io_path(doc.source).stat()
             file_mtime = datetime.fromtimestamp(file_stat.st_mtime).isoformat()
             file_size = file_stat.st_size
         except OSError:

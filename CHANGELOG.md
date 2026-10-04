@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve ChromaDB data on collection-opening errors; preserve prior document/index state on handled indexing, mutation and rebuild-publication failures.
 - Drain in-flight collection readers during final publication, retain source timestamps from before parsing, persist partial orphan-pruning successes, and clean retired collection backups conservatively.
 - Skip unchanged files before parsing, bound pending indexing work, validate traversal containment, and prevent duplicate overlap-only chunks.
+- Read and discover long Windows document paths with the extended I/O namespace while preserving public source identities and resolving link targets before containment checks.
 - Make FTS5 chunk replay idempotent, index chunk identities for updates, validate migration completion, and synchronize derived lexical state with document/index mutations.
 - Choose embedding batch size from the actual execution provider, validate batch overrides and every output vector, and synchronize lazy model initialization.
 - Preserve full-content cached search results, batch keyword-hit hydration, and rerank the full FTS5 candidate pool before truncating results.

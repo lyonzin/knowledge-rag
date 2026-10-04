@@ -52,7 +52,7 @@ SKIP_TYPES = {"docs", "chore", "ci", "test", "build", "style", "revert"}
 
 
 def _git(*args: str) -> str:
-    return subprocess.check_output(["git", *args], cwd=REPO_ROOT, text=True).strip()
+    return subprocess.check_output(["git", *args], cwd=REPO_ROOT, text=True, encoding="utf-8").strip()
 
 
 def _resolve_pr_title(cli_title: str | None) -> str | None:

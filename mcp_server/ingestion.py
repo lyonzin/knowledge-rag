@@ -9,7 +9,6 @@ JQ, plus extensionless Dockerfile / Makefile / Tiltfile
 import fnmatch
 import hashlib
 import json
-import os
 import re
 import sys
 from dataclasses import dataclass, field
@@ -58,6 +57,7 @@ import csv
 import yaml
 
 from .config import config
+from .filesystem import io_path, resolve_path, walk_document_paths
 from .security import detect_external_marker, is_path_within
 
 # =============================================
@@ -286,7 +286,8 @@ class DocumentParser:
         """Parse a file and return a Document object with chunks"""
         filepath = Path(filepath)
 
-        if not filepath.exists():
+        readable_path = io_path(filepath)
+        if not readable_path.exists():
             raise FileNotFoundError(f"File not found: {filepath}")
 
         suffix = filepath.suffix.lower()
@@ -304,7 +305,7 @@ class DocumentParser:
         doc_id = self._generate_id(filepath)
 
         # Parse content and metadata
-        content, metadata = self._parsers[key](filepath)
+        content, metadata = self._parsers[key](readable_path)
         marker = detect_external_marker(content)
         provenance = {"external_source": True, "external_source_uri": marker[0]} if marker else {}
         metadata.update(provenance)
@@ -370,14 +371,14 @@ class DocumentParser:
 
     def iter_files(self, directory: Path = None):
         """Yield supported paths without loading content; follow contained links only."""
-        directory = (Path(directory) if directory else config.documents_dir).expanduser().resolve()
+        directory = resolve_path((Path(directory) if directory else config.documents_dir).expanduser())
         seen_dirs = set()
         seen_files = set()
         supported = set(config.supported_formats)
         exclude = config.exclude_patterns
 
-        for root, dirs, files in os.walk(directory, followlinks=True):
-            real_root = os.path.realpath(root)
+        for root, dirs, files in walk_document_paths(directory):
+            real_root = str(resolve_path(Path(root)))
             if real_root in seen_dirs or not is_path_within(directory, Path(root)):
                 dirs.clear()
                 continue
@@ -402,7 +403,7 @@ class DocumentParser:
                     continue
                 if not is_path_within(directory, filepath):
                     continue
-                resolved = os.path.realpath(filepath)
+                resolved = str(resolve_path(filepath))
                 if resolved not in seen_files:
                     seen_files.add(resolved)
                     yield filepath
@@ -1233,7 +1234,7 @@ class DocumentParser:
 
     def _generate_id(self, filepath: Path) -> str:
         """Generate unique document ID based on path and modification time"""
-        stat = filepath.stat()
+        stat = io_path(filepath).stat()
         unique_str = f"{filepath}:{stat.st_mtime}:{stat.st_size}"
         return hashlib.sha256(unique_str.encode()).hexdigest()[:16]
 
