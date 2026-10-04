@@ -19,7 +19,8 @@ repos:
     rev: v5.0.0
     hooks:
       - id: trailing-whitespace
-        exclude: '\.md$'  # markdown sometimes uses trailing space for line breaks
+        # Markdown line breaks and the generated Matplotlib SVG retain spaces.
+        exclude: '(\.md$|^docs/star-history\.svg$)'
       - id: end-of-file-fixer
       - id: check-yaml
         args: [--unsafe]  # GHA workflows use !!tags

@@ -366,4 +366,3 @@ Returns `mrr_at_5`, `recall_at_5`, and a per-query breakdown showing which expec
 Use representative, independently selected questions and keep the corpus, model, prefixes, search settings, and test cases fixed when comparing runs. A single expected document per query measures hit rate and rank; it does not measure all relevant documents or establish a universal quality threshold. English BGE models need a separate evaluation for non-English corpora.
 
 ---
-

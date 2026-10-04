@@ -492,4 +492,3 @@ Zero breaking change: usuários que atualizarem SEM tocar em `config.yaml` conti
 - **v1.0.1**: Auto-cleanup orphan folders, removed hardcoded paths
 - **v1.0.0**: Initial release
 </details>
-

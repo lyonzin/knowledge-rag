@@ -145,4 +145,3 @@ hybrid weights.
 - [MCP API](API.md)
 - [Installation](INSTALLATION.md)
 - [Security boundaries](../SECURITY.md)
-
