@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-### Unreleased
+### v4.10.0 (2026-10-04) — Indexing reliability, bounded memory and scoped retrieval
 
 **Fixed:**
 
@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Release native PDF streams retained by failed constructor tracebacks so Windows can clean staged files after invalid PDF writes without changing the original error.
 - Make FTS5 chunk replay idempotent, index chunk identities for updates, validate migration completion, and synchronize derived lexical state with document/index mutations.
 - Choose embedding batch size from the actual execution provider, validate batch overrides and every output vector, and synchronize lazy model initialization.
+- Include the CPU batch-size fix from PR #225: cap CPU embedding batches at 32 by default to reduce allocation failures on large inputs (#224). The proposed 4.9.3 changes are included in this release; 4.9.3 was not published.
 - Preserve full-content cached search results, batch keyword-hit hydration, and rerank the full FTS5 candidate pool before truncating results.
 - Reject cache writes from queries that started before a newer invalidation, preventing old content from repopulating the cache after document updates.
 - Use non-signaling Windows PID checks and a stable OS file lock for stale-PID races and crash recovery; resolve preflight paths and keep diagnostics off the MCP stdio protocol stream.
@@ -46,12 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Correct configuration/API examples, reindex recovery and model migration guidance, FTS5 counters/readiness, multi-client boundaries, and the limitations of security and quality claims.
 - Record measured memory/storage changes, CPU/CUDA/AMD validation boundaries, and the review of open PRs/issues in `docs/audit-2026-10-03.md`.
-
-### v4.9.3 (2026-10-01) — Hotfix: cap FastEmbed batch_size at 32 under CPU execution
-
-**Fixed:**
-
-- **fix(embeddings)** — GH #224: `FastEmbedEmbeddings._embed` now caps FastEmbed's internal `batch_size` at 32 when the active ONNX provider is CPU (previously used FastEmbed's default of 256). ONNXRuntime's BFC arena allocates `batch_size * seq_len * hidden * layers * 4` for intermediate reshape tensors — the worst-case ~500MB allocation (`Failed to allocate memory for requested buffer of size 503316480`) ran out of contiguous heap during ingestion of minified JS and large JSON on Windows, crashing CPU indexing while GPU runs on the same corpus completed cleanly (VRAM is contiguous). The new path dispatches `batch_size=32` for CPU and `batch_size=256` for CUDA, with env var `KNOWLEDGE_RAG_EMBED_BATCH_SIZE` and YAML key `documents.embed_batch_size` as per-workload overrides. Public MCP tool surface unchanged (12 tools, same signatures). CPU throughput reduced ~20–30% in exchange for unblocking users who previously saw 100% ingestion failure on affected corpora; GPU users see no change. 3 new regression tests pin CPU default, CUDA default, and env override behavior.
+- Document the GitHub release trigger and NPM OIDC publisher configuration, and distinguish publication success for PyPI, NPM and Docker.
 
 ### v4.9.2 (2026-09-29) — Post-review hotfix: rename atomicity, real-thread test guard, operating-model docs
 

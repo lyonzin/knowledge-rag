@@ -21,14 +21,16 @@ import sqlite3
 import sys
 import tempfile
 import threading
+from contextlib import AbstractContextManager, nullcontext
 from datetime import datetime, timezone
 from itertools import islice
 from pathlib import Path
-from typing import Callable, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Iterable, List, Optional, Sequence, Tuple
 
 ChunkRow = Tuple[str, str, str, str]
 ChunkIterFactory = Callable[[], Iterable[ChunkRow]]
 ProgressCallback = Callable[[int, int], None]
+SourceSnapshot = Callable[[], AbstractContextManager[Optional[Tuple[int, Iterable[ChunkRow]]]]]
 
 _FTS5_TOKENIZER = "unicode61 remove_diacritics 2 tokenchars '-_.'"
 
@@ -107,7 +109,7 @@ class Fts5MigrationState:
     def path(self) -> Path:
         return self._path
 
-    def read(self) -> Optional[dict]:
+    def read(self) -> Optional[dict[str, Any]]:
         """Return the persisted payload, or ``None`` if the file is missing.
 
         Silently returns ``None`` on JSON decode failure — callers treat a
@@ -122,7 +124,7 @@ class Fts5MigrationState:
             return None
         return data if isinstance(data, dict) else None
 
-    def write(self, payload: dict) -> None:
+    def write(self, payload: dict[str, Any]) -> None:
         """Persist ``payload`` atomically (tempfile + fsync + os.replace)."""
         if not isinstance(payload, dict):
             raise TypeError("payload must be a dict")
@@ -145,7 +147,7 @@ class Fts5MigrationState:
 
     def is_complete(self) -> bool:
         data = self.read()
-        return bool(data) and data.get("status") == "complete"
+        return data is not None and data.get("status") == "complete"
 
 
 class Fts5LexicalIndex:
@@ -279,7 +281,9 @@ class Fts5LexicalIndex:
         except sqlite3.OperationalError as exc:
             raise Fts5CorruptError(f"SQLite build lacks FTS5 support or schema drift detected: {exc}") from exc
 
-    def search(self, query: str, top_k: int = 20) -> List[Tuple[str, float]]:
+    def search(
+        self, query: str, top_k: int = 20, *, allowed_ids: Optional[frozenset[str]] = None
+    ) -> List[Tuple[str, float]]:
         """Return ``[(chunk_id, score)]`` sorted by best rank.
 
         Mirrors ``BM25Index.search`` signature (score is positive; higher is
@@ -291,17 +295,26 @@ class Fts5LexicalIndex:
             return []
         if top_k <= 0:
             return []
+        if allowed_ids is not None and not allowed_ids:
+            return []
         escaped = _escape_fts5_query(query)
         if not escaped:
             return []
+        scope_sql = (
+            "AND rowid IN (SELECT rowid FROM fts5_chunk_ids WHERE chunk_id IN (SELECT value FROM json_each(?))) "
+            if allowed_ids is not None
+            else ""
+        )
         sql = (
             "SELECT chunk_id, bm25(fts5_documents) AS rank "
-            "FROM fts5_documents WHERE fts5_documents MATCH ? "
-            "ORDER BY rank LIMIT ?"
+            "FROM fts5_documents WHERE fts5_documents MATCH ? " + scope_sql + "ORDER BY rank LIMIT ?"
+        )
+        parameters = (
+            (escaped, json.dumps(sorted(allowed_ids)), int(top_k)) if allowed_ids is not None else (escaped, int(top_k))
         )
         try:
             with self._fts5_lock:
-                cur = self._conn.execute(sql, (escaped, int(top_k)))
+                cur = self._conn.execute(sql, parameters)
                 rows = cur.fetchall()
         except sqlite3.OperationalError:
             # Malformed MATCH survived escaping (defensive) — treat as no hits.
@@ -388,6 +401,7 @@ class Fts5LexicalIndex:
         *,
         resume_from: int = 0,
         on_progress: Optional[ProgressCallback] = None,
+        source_snapshot: Optional[SourceSnapshot] = None,
     ) -> threading.Thread:
         """Start one retained worker; overlapping callers receive that same thread."""
         if type(docs_total) is not int or type(resume_from) is not int or not 0 <= resume_from <= docs_total:
@@ -403,14 +417,41 @@ class Fts5LexicalIndex:
                 "in_progress", docs_total, resume_from, datetime.now(timezone.utc).isoformat(), None, None
             )
             thread = threading.Thread(
-                target=self._migration_worker,
-                args=(chunk_iter_factory, docs_total, resume_from, on_progress),
+                target=self._migration_with_snapshot,
+                args=(chunk_iter_factory, docs_total, resume_from, on_progress, source_snapshot),
                 name="fts5-migration",
                 daemon=False,
             )
             self._migration_thread = thread
             thread.start()
             return thread
+
+    def _migration_with_snapshot(
+        self,
+        chunk_iter_factory: ChunkIterFactory,
+        docs_total: int,
+        resume_from: int,
+        on_progress: Optional[ProgressCallback],
+        source_snapshot: Optional[SourceSnapshot],
+    ) -> None:
+        """Keep count, rows and completion in one stable source generation."""
+        try:
+            context = source_snapshot() if source_snapshot else nullcontext((docs_total, chunk_iter_factory()))
+            with context as snapshot:
+                if snapshot is None or self._migration_stop.is_set():
+                    return
+                count, rows = snapshot
+                self._migration_worker(lambda: rows, count, resume_from, on_progress)
+        except Exception as exc:  # source acquisition failures must remain visible
+            self._write_state(
+                "failed",
+                docs_total,
+                resume_from,
+                datetime.now(timezone.utc).isoformat(),
+                None,
+                f"{exc.__class__.__name__}: {exc}",
+            )
+            print(f"[FTS5] migration snapshot failed: {exc}", file=sys.stderr)
 
     def _migration_worker(
         self,

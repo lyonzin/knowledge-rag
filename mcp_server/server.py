@@ -34,6 +34,7 @@ import sys
 import threading
 import time
 from collections import OrderedDict, deque
+from contextlib import contextmanager
 from copy import copy, deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -81,6 +82,8 @@ from .metrics import (
 from .publication import PublicationLock, collection_publication, collection_reader
 from .query_router import QueryRouter
 from .ratelimit import rate_limited
+from .search_candidates import select_rerank_candidates
+from .search_scope import FolderScope, ScopeKey
 from .security import (
     BearerAuthMiddleware,
     PathEscapeError,
@@ -111,7 +114,7 @@ class QueryCache:
     def __init__(self, max_size: int = 100, ttl_seconds: int = 300):
         self.max_size = max_size
         self.ttl_seconds = ttl_seconds
-        self._cache: OrderedDict[Tuple[str, int, Optional[str], float, str], Tuple[float, Any, bool]] = OrderedDict()
+        self._cache: OrderedDict[tuple, Tuple[float, Any, bool]] = OrderedDict()
         self._lock = threading.Lock()
         self._hits = 0
         self._misses = 0
@@ -177,14 +180,16 @@ class QueryCache:
         category: Optional[str],
         hybrid_alpha: float,
         search_method: str = "auto",
-    ) -> Tuple[str, int, Optional[str], float, str]:
+        folder_scope: Optional[ScopeKey] = None,
+    ) -> tuple:
         """Generate cache key from query parameters.
 
         Structured keys preserve parameter boundaries and distinguish ``None``
         from the literal category ``"None"``. Omitted search methods retain
         the same key as an explicit ``"auto"``.
         """
-        return query, max_results, category, hybrid_alpha, search_method
+        key = query, max_results, category, hybrid_alpha, search_method
+        return (*key, folder_scope) if folder_scope else key
 
     def get(
         self,
@@ -193,9 +198,11 @@ class QueryCache:
         category: Optional[str],
         hybrid_alpha: float,
         search_method: str = "auto",
+        *,
+        folder_scope: Optional[ScopeKey] = None,
     ) -> Optional[Any]:
         """Get cached result if exists and not expired"""
-        key = self._make_key(query, max_results, category, hybrid_alpha, search_method)
+        key = self._make_key(query, max_results, category, hybrid_alpha, search_method, folder_scope)
 
         with self._lock:
             entry = self._cache.get(key)
@@ -222,6 +229,7 @@ class QueryCache:
         search_method: str = "auto",
         *,
         expected_generation: Optional[int] = None,
+        folder_scope: Optional[ScopeKey] = None,
     ) -> None:
         """Store result in cache.
 
@@ -233,7 +241,7 @@ class QueryCache:
         """
         if self.max_size <= 0:
             return
-        key = self._make_key(query, max_results, category, hybrid_alpha, search_method)
+        key = self._make_key(query, max_results, category, hybrid_alpha, search_method, folder_scope)
         snapshot = self._clone_result(result)
         flat_rows = self._has_flat_rows(snapshot)
         with self._lock:
@@ -1170,7 +1178,9 @@ class BM25Index:
         self._index_built = True
         self._snapshot = _BM25Snapshot(tuple(self.corpus_ids), inverted, idf, doc_lengths, avgdl)
 
-    def search(self, query: str, top_k: int = 20) -> List[Tuple[str, float]]:
+    def search(
+        self, query: str, top_k: int = 20, *, allowed_ids: Optional[frozenset[str]] = None
+    ) -> List[Tuple[str, float]]:
         """
         Search the BM25 index with query expansion.
 
@@ -1203,6 +1213,8 @@ class BM25Index:
             if posting is None:
                 continue
             for doc_idx, tf in posting:
+                if allowed_ids is not None and corpus_ids[doc_idx] not in allowed_ids:
+                    continue
                 dl = doc_len[doc_idx]
                 num = tf * (k1 + 1.0)
                 den = tf + k1 * (1.0 - b + b * dl / avgdl)
@@ -2236,7 +2248,11 @@ class KnowledgeOrchestrator:
 
         if unique_ids:
             self._add_chunks_batched(unique_ids, unique_docs, unique_metas)
-            self.bm25_index.add_documents(unique_ids, unique_docs)
+            # Live writes only dirty the derived index. Appending every revision
+            # retains obsolete texts indefinitely when callers use semantic-only
+            # retrieval. Staging is a fresh, bounded corpus assembled once.
+            if getattr(self, "_collect_staging_bm25", False):
+                self.bm25_index.add_documents(unique_ids, unique_docs)
             self._fts5_sync_add(unique_ids, unique_docs, unique_metas)
 
         return len(unique_ids), dedup_skipped
@@ -2486,6 +2502,7 @@ class KnowledgeOrchestrator:
     # A rebuild takes minutes to hours; 24h is a very safe upper bound while
     # still preventing orphan accumulation from crashed rebuilds.
     _STAGING_TTL_SECONDS = 24 * 60 * 60
+    _RETIRED_BY_KEY = "knowledge_rag_retired_by"
 
     def _cleanup_stale_staging_collections(self) -> Dict[str, int]:
         """Remove staging collections older than ``_STAGING_TTL_SECONDS``.
@@ -2505,10 +2522,15 @@ class KnowledgeOrchestrator:
             print(f"[STAGING] list_collections failed (non-fatal): {e}", file=sys.stderr)
             return stats
 
-        primary_exists = any(getattr(coll, "name", "") == config.collection_name for coll in existing)
+        primary_id = next(
+            (str(coll.id) for coll in existing if getattr(coll, "name", "") == config.collection_name), None
+        )
         for coll in existing:
             if getattr(coll, "name", "").startswith(backup_prefix):
-                if not primary_exists:
+                # A newly created empty primary is not proof of a committed swap.
+                # Only the replacement that durably retired this backup may age it out.
+                retired_by = (getattr(coll, "metadata", None) or {}).get(self._RETIRED_BY_KEY)
+                if primary_id is None or retired_by != primary_id:
                     stats["scanned"] += 1
                     stats["preserved"] += 1
                     continue
@@ -2576,6 +2598,7 @@ class KnowledgeOrchestrator:
         staged._publication_lock = PublicationLock()
         staged._bm25_build_lock = threading.Lock()
         staged.bm25_index = BM25Index()
+        staged._collect_staging_bm25 = True
         staged._bm25_initialized = True
         staged._indexed_docs = {}
         staged._source_to_docid = {}
@@ -2792,8 +2815,7 @@ class KnowledgeOrchestrator:
 
         stats = self.index_all(force=True)
 
-        self.bm25_index.build_index()
-        self._bm25_initialized = True
+        self._ensure_bm25_index()
         # ADR-008: FTS5 is a derived index; drop and repopulate from the
         # freshly-rebuilt Chroma corpus so the lexical fast-path stays
         # consistent with the vector store.
@@ -2853,11 +2875,17 @@ class KnowledgeOrchestrator:
             self._rollback_and_cleanup_staging(prod_name, ts, saved)
             raise
         self._staged_state = None
-        try:
-            self.chroma_client.delete_collection(f"{prod_name}__old_{ts}")
-        except Exception as exc:
-            print(f"[SWAP] Previous collection retained for cleanup: {exc}", file=sys.stderr)
+        self._retire_previous_collection(prod_name, ts)
         self._fts5_reset_and_rebuild()
+
+    def _retire_previous_collection(self, prod_name: str, ts: int) -> None:
+        """Record committed replacement identity before retiring recovery vectors."""
+        try:
+            previous = self.chroma_client.get_collection(f"{prod_name}__old_{ts}")
+            previous.modify(metadata={**(previous.metadata or {}), self._RETIRED_BY_KEY: str(self.collection.id)})
+            self.chroma_client.delete_collection(previous.name)
+        except Exception as exc:
+            print(f"[SWAP] Previous collection retained after retirement failure: {exc}", file=sys.stderr)
 
     def _finalize_swap_stats(self, stats: Dict[str, Any], start_time: float) -> Dict[str, Any]:
         """Stamp elapsed_seconds and emit the completion banner."""
@@ -3022,6 +3050,7 @@ class KnowledgeOrchestrator:
             docs_total,
             resume_from=resume_from,
             on_progress=self._fts5_migration_progress,
+            source_snapshot=lambda: self._fts5_source_snapshot(index),
         )
 
     def _fts5_marker_matches_reality(self) -> bool:
@@ -3041,6 +3070,18 @@ class KnowledgeOrchestrator:
         try:
             if not index._migration_stop.is_set():
                 yield from self._iter_chroma_chunks_for_fts5()
+        finally:
+            self._index_lock.release()
+
+    @contextmanager
+    def _fts5_source_snapshot(self, index):
+        """Hold count, streamed rows and ready publication under the mutation lock."""
+        while not self._index_lock.acquire(timeout=0.1):
+            if index._migration_stop.is_set():
+                yield None
+                return
+        try:
+            yield self.collection.count(), self._iter_chroma_chunks_for_fts5()
         finally:
             self._index_lock.release()
 
@@ -3162,6 +3203,7 @@ class KnowledgeOrchestrator:
         max_results: int,
         category_filter: Optional[str],
         search_method: str,
+        allowed_ids: Optional[frozenset[str]] = None,
     ) -> Tuple[Optional[List[Dict[str, Any]]], str]:
         """Decide whether to serve the query from the FTS5 fast-path.
 
@@ -3182,7 +3224,9 @@ class KnowledgeOrchestrator:
                     "FTS5 index is not ready (migration in progress). "
                     "Suggestion: use search_method='auto' to fallback gracefully."
                 )
-            return self._run_fts5_search(query_text, max_results, category_filter, skip_min_hits=True), "fts5"
+            return self._run_fts5_search(
+                query_text, max_results, category_filter, skip_min_hits=True, allowed_ids=allowed_ids
+            ), "fts5"
         if search_method == "hybrid":
             return None, "hybrid"
         if self.query_router is None or self.query_router.classify(query_text) != "lexical":
@@ -3191,7 +3235,9 @@ class KnowledgeOrchestrator:
             metrics.inc(FAST_PATH_FALLBACK_TOTAL, '{reason="disabled"}')
             return None, "fallback"
         try:
-            result = self._run_fts5_search(query_text, max_results, category_filter, skip_min_hits=False)
+            result = self._run_fts5_search(
+                query_text, max_results, category_filter, skip_min_hits=False, allowed_ids=allowed_ids
+            )
         except Fts5NotReadyError:
             raise
         except Exception as exc:  # noqa: BLE001 — every FTS5 failure must fall back
@@ -3212,6 +3258,7 @@ class KnowledgeOrchestrator:
         category_filter: Optional[str],
         *,
         skip_min_hits: bool,
+        allowed_ids: Optional[frozenset[str]] = None,
     ) -> Optional[List[Dict[str, Any]]]:
         """Execute the FTS5 search + result formatting, tracking latency.
 
@@ -3229,7 +3276,8 @@ class KnowledgeOrchestrator:
         candidates = max(max_results * 3, 20)
         start = time.monotonic()
         try:
-            hits = self.fts5_index.search(query_text, top_k=candidates)
+            filters = {"allowed_ids": allowed_ids} if allowed_ids is not None else {}
+            hits = self.fts5_index.search(query_text, top_k=candidates, **filters)
         finally:
             metrics.observe(FAST_PATH_LATENCY_SECONDS, time.monotonic() - start)
         if not skip_min_hits and len(hits) < config.fts5_min_hits:
@@ -3336,6 +3384,8 @@ class KnowledgeOrchestrator:
         category_filter: Optional[str] = None,
         hybrid_alpha: float = 0.5,
         search_method: str = "auto",
+        include_folders: Optional[List[str]] = None,
+        exclude_folders: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Hybrid search with RRF fusion + cross-encoder reranking.
@@ -3351,22 +3401,47 @@ class KnowledgeOrchestrator:
         - ``"fts5"``: skip the router; force the FTS5 fast-path. Raises
           ``Fts5NotReadyError`` when the feature is disabled or the index is
           not ready — the MCP wrapper surfaces the error to the caller.
+
+        ``include_folders`` and ``exclude_folders`` are recursive directories
+        relative to documents_dir. Every backend selects only eligible chunks
+        before top-k ranking; exclusions win. Empty lists preserve global search.
         """
         max_results = max_results or config.default_results
+        scope = (
+            FolderScope.create(config.documents_dir, include_folders, exclude_folders)
+            if (include_folders is not None or exclude_folders is not None)
+            else None
+        )
+        scope_key = scope.key if scope is not None and scope.active else None
 
         # Cache lookup (5-tuple key includes search_method — different paths
         # produce different result sets, they MUST NOT share cache entries).
         cache_generation = self.query_cache.generation
-        cached = self.query_cache.get(query_text, max_results, category_filter, hybrid_alpha, search_method)
+        cached = self.query_cache.get(
+            query_text, max_results, category_filter, hybrid_alpha, search_method, folder_scope=scope_key
+        )
         if cached is not None:
             return cached
+
+        where_filter = {"category": category_filter} if category_filter else None
+        if scope_key:
+            document_ids = scope.document_ids(self._indexed_docs)
+            if not document_ids:
+                return []
+            source_filter = {"doc_id": {"$in": document_ids}}
+            where_filter = {"$and": [where_filter, source_filter]} if where_filter else source_filter
+        allowed_ids = None
+        if where_filter:
+            allowed_ids = frozenset(self.collection.get(where=where_filter, include=[])["ids"])
+            if not allowed_ids:
+                return []
 
         # FTS5 dispatch (feature-gated). When the toggle is off, this whole
         # block short-circuits — zero cost on the hybrid path.
         hybrid_path_label = "hybrid"
         if config.fts5_enabled:
             fast_path_result, hybrid_path_label = self._maybe_dispatch_fts5(
-                query_text, max_results, category_filter, search_method
+                query_text, max_results, category_filter, search_method, allowed_ids
             )
             if fast_path_result is not None:
                 self.query_cache.put(
@@ -3377,6 +3452,7 @@ class KnowledgeOrchestrator:
                     fast_path_result,
                     search_method=search_method,
                     expected_generation=cache_generation,
+                    folder_scope=scope_key,
                 )
                 return fast_path_result
         elif search_method == "fts5":
@@ -3393,15 +3469,9 @@ class KnowledgeOrchestrator:
         # the top-level `security` bucket. Users who want a hard filter still get it
         # by passing `category_filter=...` explicitly.
         routed_category = self._route_by_keywords(query_text)
-        where_filter = None
-        if category_filter:
-            where_filter = {"category": category_filter}
 
         def _matches_category(metadata: Dict[str, Any]) -> bool:
-            if not where_filter:
-                return True
-            expected_category = where_filter.get("category")
-            return not expected_category or metadata.get("category") == expected_category
+            return not category_filter or metadata.get("category") == category_filter
 
         # Parallel Semantic + BM25 search (threaded for latency reduction)
         from concurrent.futures import ThreadPoolExecutor
@@ -3413,7 +3483,10 @@ class KnowledgeOrchestrator:
             r = {}
             if hybrid_alpha > 0:
                 try:
-                    n_candidates = min(max_results * 3, config.max_results)
+                    # The public response cap must not truncate the reranker's
+                    # candidate pool before it can inspect relevant passages.
+                    multiplier = max(3, config.reranker_top_k_multiplier) if config.reranker_enabled else 3
+                    n_candidates = max_results * multiplier
                     results = self.collection.query(
                         query_texts=[query_text],
                         n_results=n_candidates,
@@ -3436,21 +3509,8 @@ class KnowledgeOrchestrator:
             r = {}
             if hybrid_alpha < 1.0:
                 try:
-                    bm25_top_k = max_results * (20 if where_filter else 3)
-                    bm25_hits = self.bm25_index.search(query_text, top_k=bm25_top_k)
-
-                    if where_filter:
-                        chunk_ids = [chunk_id for chunk_id, _ in bm25_hits]
-                        metadata_by_id = {}
-                        if chunk_ids:
-                            fetched = self.collection.get(ids=chunk_ids, include=["metadatas"])
-                            metadata_by_id = dict(zip(fetched.get("ids", []), fetched.get("metadatas", [])))
-
-                        bm25_hits = [
-                            (chunk_id, bm25_score)
-                            for chunk_id, bm25_score in bm25_hits
-                            if _matches_category(metadata_by_id.get(chunk_id) or {})
-                        ]
+                    filters = {"allowed_ids": allowed_ids} if allowed_ids is not None else {}
+                    bm25_hits = self.bm25_index.search(query_text, top_k=max_results * 3, **filters)
 
                     for rank, (chunk_id, bm25_score) in enumerate(bm25_hits[: max_results * 3]):
                         r[chunk_id] = {"rank": rank + 1, "bm25_score": bm25_score}
@@ -3478,6 +3538,8 @@ class KnowledgeOrchestrator:
         )
 
         for chunk_id in all_chunk_ids:
+            if allowed_ids is not None and chunk_id not in allowed_ids:
+                continue
             semantic_rank = semantic_results.get(chunk_id, {}).get("rank", 1000)
             bm25_rank = bm25_results.get(chunk_id, {}).get("rank", 1000)
 
@@ -3506,7 +3568,10 @@ class KnowledgeOrchestrator:
 
         # Sort by RRF score — take extra candidates for reranker
         reranker_k = max_results * config.reranker_top_k_multiplier if config.reranker_enabled else max_results
-        sorted_results = sorted(combined_scores.items(), key=lambda x: x[1]["rrf_score"], reverse=True)[:reranker_k]
+        if config.reranker_enabled:
+            sorted_results = select_rerank_candidates(list(combined_scores.items()), reranker_k, max_results)
+        else:
+            sorted_results = sorted(combined_scores.items(), key=lambda x: x[1]["rrf_score"], reverse=True)[:reranker_k]
 
         # Cross-encoder reranking
         if config.reranker_enabled and sorted_results:
@@ -3584,6 +3649,7 @@ class KnowledgeOrchestrator:
             formatted,
             search_method=search_method,
             expected_generation=cache_generation,
+            folder_scope=scope_key,
         )
         if config.fts5_enabled:
             get_metrics().inc(FAST_PATH_HITS_TOTAL, f'{{path="{hybrid_path_label}"}}')
@@ -3806,7 +3872,10 @@ class KnowledgeOrchestrator:
             content = sanitize_external_content(content, external_source)
 
         with self._index_lock:
-            result = self._store_document_content(full_path, content, category)
+            try:
+                result = self._store_document_content(full_path, content, category)
+            finally:
+                self.query_cache.invalidate()
         if "error" not in result:
             result["chunks_added"] = result.pop("new_chunks_added")
             result["category"] = category
@@ -3818,7 +3887,7 @@ class KnowledgeOrchestrator:
         old_info = self._indexed_docs.get(old_id)
         previous = self._snapshot_document_chunks(old_id)
         with staged_text_file(path, content) as staged:
-            doc = self.parser.parse_file(staged.path)
+            doc = self.parser.parse_file(staged.path, logical_filename=path.name)
             if not doc:
                 return {"error": "Failed to parse document content"}
             temporary_stem = staged.path.stem
@@ -3885,7 +3954,10 @@ class KnowledgeOrchestrator:
         with self._index_lock:
             if not filepath.exists():
                 return {"error": f"File not found: {filepath}"}
-            return self._store_document_content(filepath, content, None)
+            try:
+                return self._store_document_content(filepath, content, None)
+            finally:
+                self.query_cache.invalidate()
 
     def remove_document_by_path(self, filepath: str, delete_file: bool = False) -> Dict[str, Any]:
         """Remove a document from the index. Optionally delete from disk.
@@ -3900,7 +3972,12 @@ class KnowledgeOrchestrator:
             return {"error": f"Filepath rejected: {exc}"}
 
         with self._index_lock:
-            return self._remove_document_by_path(resolved_path, delete_file)
+            try:
+                return self._remove_document_by_path(resolved_path, delete_file)
+            finally:
+                # Reject both cached and still-running queries of intermediate state,
+                # even if restoring the previous chunks or metadata also raises.
+                self.query_cache.invalidate()
 
     def _remove_document_by_path(self, path: Path, delete_file: bool) -> Dict[str, Any]:
         """Keep metadata consistent with failed backend deletion and honest file status."""
@@ -4426,6 +4503,8 @@ def search_knowledge(
     min_score: float = 0.0,
     snippet_mode: bool = True,
     search_method: str = "auto",
+    include_folders: Optional[List[str]] = None,
+    exclude_folders: Optional[List[str]] = None,
 ) -> str:
     """
     Hybrid search combining semantic search + BM25 keyword search with cross-encoder reranking.
@@ -4452,6 +4531,11 @@ def search_knowledge(
             — debug/testing; errors out when the feature is disabled or the index is not ready).
             Default ``"auto"`` preserves pre-v4.8.2 behavior byte-for-byte when the fast-path is
             disabled in config.
+        include_folders: Optional list of directories relative to documents_dir, recursively included
+            before candidate selection (e.g. ["manuals/product-a", "runbooks"]). Omit for all folders.
+        exclude_folders: Optional recursive directory exclusions, applied before candidate selection.
+            Exclusions override inclusions. Paths use / or \\, have exact component boundaries,
+            and cannot be absolute, contain '..', or resolve outside documents_dir. Maximum 32 each.
 
     Returns:
         JSON string with results including content chunks, source filepath, relevance score, and
@@ -4490,7 +4574,11 @@ def search_knowledge(
             category_filter=category,
             hybrid_alpha=hybrid_alpha,
             search_method=search_method,
+            include_folders=include_folders,
+            exclude_folders=exclude_folders,
         )
+    except ValueError as exc:
+        return json.dumps({"status": "error", "message": str(exc)})
     except Fts5NotReadyError as exc:
         # Surface the fast-path error verbatim + always add the auto-fallback
         # suggestion so debug users can recover without hunting docs.

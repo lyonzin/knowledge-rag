@@ -282,30 +282,43 @@ class DocumentParser:
             "Tiltfile": self._parse_code_generic,
         }
 
-    def parse_file(self, filepath: Path) -> Optional[Document]:
-        """Parse a file and return a Document object with chunks"""
+    def _select_parser_key(self, filepath: Path, logical_filename: Optional[str]) -> str:
+        """Select the logical format without letting it redirect physical reads."""
+        if logical_filename is not None:
+            logical = Path(logical_filename)
+            if (
+                not logical_filename
+                or logical.name != logical_filename
+                or any(separator in logical_filename for separator in ("/", "\\", "\x00"))
+            ):
+                raise ValueError("The logical filename must be a single filename")
+            if logical.suffix.lower() != filepath.suffix.lower():
+                raise ValueError("The logical filename must preserve the physical suffix")
+            filepath = logical
+        suffix = filepath.suffix.lower()
+        if suffix in self._parsers:
+            return suffix
+        if filepath.name in self._parsers:
+            return filepath.name
+        raise ValueError(f"Unsupported format: {suffix or filepath.name}")
+
+    def parse_file(self, filepath: Path, *, logical_filename: Optional[str] = None) -> Optional[Document]:
+        """Parse physical bytes; a staging filename may select the logical format."""
         filepath = Path(filepath)
 
         readable_path = io_path(filepath)
         if not readable_path.exists():
             raise FileNotFoundError(f"File not found: {filepath}")
 
-        suffix = filepath.suffix.lower()
-        name = filepath.name
-
-        # Check extension first, then fall back to filename for extensionless files
-        if suffix in self._parsers:
-            key = suffix
-        elif name in self._parsers:
-            key = name
-        else:
-            raise ValueError(f"Unsupported format: {suffix or name}")
+        key = self._select_parser_key(filepath, logical_filename)
 
         # Generate unique ID
         doc_id = self._generate_id(filepath)
 
         # Parse content and metadata
         content, metadata = self._parsers[key](readable_path)
+        if key == "Tiltfile":
+            metadata["language"] = "starlark"
         marker = detect_external_marker(content)
         provenance = {"external_source": True, "external_source_uri": marker[0]} if marker else {}
         metadata.update(provenance)
@@ -332,7 +345,7 @@ class DocumentParser:
         )
 
         # Chunk the content (markdown-aware for .md files)
-        if suffix == ".md":
+        if key == ".md":
             doc.chunks = self._chunk_markdown(content, metadata)
         else:
             doc.chunks = self._chunk_text(content, metadata)

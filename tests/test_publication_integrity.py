@@ -136,12 +136,12 @@ def test_orphan_failure_preserves_failed_doc_and_persists_successes(isolated_orc
     assert orch.collection.count() == 1
 
 
-def test_ttl_cleans_retired_backup_when_production_exists(isolated_orchestrator, monkeypatch):
+def test_ttl_cleans_backup_retired_by_current_production(isolated_orchestrator, monkeypatch):
     orch = isolated_orchestrator
     now = 2_000_000_000
     monkeypatch.setattr(server.time, "time", lambda: now)
     stale = f"{server.config.collection_name}__old_{now - orch._STAGING_TTL_SECONDS - 1}"
-    orch.chroma_client.create_collection(stale)
+    orch.chroma_client.create_collection(stale, metadata={orch._RETIRED_BY_KEY: str(orch.collection.id)})
     stats = orch._cleanup_stale_staging_collections()
     assert stats["removed"] == 1
     assert stale not in {collection.name for collection in orch.chroma_client.list_collections()}
