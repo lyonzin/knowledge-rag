@@ -9,6 +9,7 @@
 - [Installation guide →](INSTALLATION.md)
 - [Architecture →](ARCHITECTURE.md)
 - [Troubleshooting →](TROUBLESHOOTING.md)
+- [Folder scope and retrieval quality →](search-quality.md)
 
 ---
 
@@ -27,6 +28,8 @@ Search using semantic retrieval and BM25 with optional cross-encoder reranking, 
 | `min_score` | float | 0.0 | Minimum relevance score (0.0-1.0) to include a result. Use 0.2-0.4 to cut noise |
 | `snippet_mode` | bool | true | Truncate content to ~500 chars at natural break points. Adds `content_length` field |
 | `search_method` | string | "auto" | `auto`, `hybrid`, or `fts5`; explicit `fts5` requires the feature to be enabled and ready |
+| `include_folders` | list[string] | null | Recursively search only these directories relative to `documents_dir`, before top-k selection |
+| `exclude_folders` | list[string] | null | Recursively exclude these directories before top-k; exclusions override inclusions |
 
 `auto` uses the configured lexical router only when FTS5 is enabled. It falls back to hybrid search when the lexical index is unavailable, fails, or returns too few useful hits. `hybrid` always bypasses that router. An explicit `fts5` request returns a structured error if the index is disabled or not ready; it does not silently switch methods. `hybrid_alpha` controls the hybrid path, not FTS5 ranking. Scores are ranking signals, not calibrated probabilities, and should not be compared as confidence across methods.
 
@@ -66,6 +69,12 @@ Search using semantic retrieval and BM25 with optional cross-encoder reranking, 
 - `fts5`: Retrieved through the lexical fast path; optional reranking retains this label
 
 The `routed_by` field reports category keyword routing for diagnostics. It does not impose a category filter or boost. Pass `category` explicitly to restrict results.
+
+Folder filters intersect with `category` and apply consistently to semantic,
+BM25, FTS5 and cached results. They accept at most 32 relative directories each;
+absolute paths, `..`, alternate data streams and escaping links are rejected.
+See [scope examples and evaluation limits](search-quality.md) for recursive
+matching, missing folders, platform path conventions and candidate selection.
 
 ---
 

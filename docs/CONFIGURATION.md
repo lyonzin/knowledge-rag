@@ -7,6 +7,7 @@
 - [Installation guide →](INSTALLATION.md)
 - [Architecture →](ARCHITECTURE.md)
 - [Troubleshooting →](TROUBLESHOOTING.md)
+- [Folder scope and retrieval quality →](search-quality.md)
 
 **Quick links:**
 - [Quick Start](#quick-start) · [Full YAML template](#configyaml-structure) · [Presets](#presets) · [Field reference table](#configuration-reference) · [Hybrid tuning](#hybrid-search-tuning) · [FTS5 fast-path](#search-method-v482)
@@ -28,6 +29,11 @@ cp config.example.yaml config.yaml
 ```
 
 Restart the knowledge-rag process after changing `config.yaml`. For a shared HTTP deployment, restart the server process; restarting a client alone does not reload server configuration.
+
+`include_folders` and `exclude_folders` are optional `search_knowledge` arguments,
+not persistent YAML settings. They restrict all retrieval backends before
+candidate selection without changing categories or requiring a rebuild.
+See [folder scope and multilingual evaluation](search-quality.md).
 
 ### config.yaml Structure
 
