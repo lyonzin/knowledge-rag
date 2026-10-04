@@ -1,24 +1,17 @@
-# FTS5 Lexical Fast-Path
+# FTS5 lexical fast path
 
-**Status:** Opt-in in v4.8.2. Default flip to `enabled: true` is gated on the
-CI perf-gate procedure documented in ADR-009 and reserved for v4.9.0.
+FTS5 is an optional SQLite index for lexical queries such as identifiers and
+error codes. The current default is `enabled: false`; earlier plans to flip the
+default were conditional and do not describe current behavior.
 
-## Overview
+The index avoids embedding inference for a successful lexical lookup, but total
+request latency also includes ChromaDB hydration, optional reranking, adjacent
+context and serialization. Measure those stages on the intended corpus rather
+than treating historical benchmark timings as a service guarantee.
 
-The lexical fast-path is a dedicated SQLite FTS5 index optimised for exact
-identifier queries — CVE IDs, MITRE ATT&CK codes, VRT/CWE codes, file hashes,
-bug-bounty report IDs, error strings. When a query looks lexical, the
-`KnowledgeOrchestrator` dispatches to the FTS5 index and skips the full
-hybrid pipeline (BM25 + semantic + RRF + reranker), returning results in
-under ~10ms cold / ~2ms hot on a 3865-doc corpus.
+## Enable and verify
 
-Non-lexical queries continue to flow through the existing hybrid pipeline
-byte-for-byte — the fast-path only intercepts what its regex router
-classifies as lexical.
-
-## Quick Start
-
-1. Add the block to your `config.yaml`:
+Add this block to the effective configuration and restart the server:
 
 ```yaml
 search:
@@ -26,136 +19,123 @@ search:
     enabled: true
 ```
 
-2. Restart the server. On first start with the flag on, a background
-   daemon thread rebuilds the FTS5 index from your existing ChromaDB
-   corpus. Progress is checkpointed every 100 rows to
-   `data/fts5_migration.state`; queries during migration transparently
-   fall back to the hybrid pipeline.
+The server builds the derived index from existing ChromaDB chunks in a background
+thread when migration is required. The configured data directory contains
+`fts5_index.db` and `fts5_migration.state`. The migration counters and marker
+fields named `docs_indexed` and `docs_total` count **chunks**.
 
-3. Check readiness:
+During migration, `search_method="auto"` can fall back to hybrid retrieval.
+Explicit `search_method="fts5"` requires a ready index and otherwise returns a
+structured error. Test readiness with a known indexed identifier, then verify
+its source. A completed marker or matching progress gauges alone are not a
+complete integrity check; compare chunk counts and representative queries.
 
-```bash
-curl -s http://127.0.0.1:9179/metrics | grep knowledge_rag_fast_path
-```
+If metrics are enabled, inspect the configured metrics endpoint. Its bind and
+access controls are separate from MCP HTTP authentication; see
+[configuration](../CONFIGURATION.md#server).
 
-`knowledge_rag_fast_path_migration_docs_indexed` reaching
-`_docs_total` marks the fast-path as live.
+## Configuration
 
-## Configuration Reference
-
-Full field docs live in `config.example.yaml` under
-`search.lexical_fast_path`. The five knobs:
-
-| Field            | Default | What it controls                                              |
-| ---------------- | ------- | ------------------------------------------------------------- |
-| `enabled`        | `false` | Master toggle. Off → zero runtime cost, no FTS5 index open.   |
-| `min_hits`       | `3`     | Minimum FTS5 hits to skip hybrid fallback (recall safety).    |
-| `rerank_enabled` | `false` | Layer cross-encoder rerank on FTS5 hits. ADR-003 keeps off.   |
-| `patterns`       | *(see)* | First-match-wins regex list that classifies "lexical".        |
-
-Default `patterns`:
+| Field under `search.lexical_fast_path` | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `false` | Open and maintain the optional lexical index |
+| `min_hits` | `3` | Minimum raw FTS5 hits before accepting the auto path |
+| `rerank_enabled` | `false` | Rerank the hydrated candidate pool with the cross-encoder |
+| `patterns` | Below | Regexes that classify auto queries as lexical |
 
 ```yaml
 patterns:
-  - "[A-Z]{2,}-\\d+"    # H1-P4-XXX, MDR-AD002, CWE-79, MS17-010
-  - "CVE-\\d{4}-\\d+"   # canonical CVE identifiers
-  - "^[a-f0-9]{32,64}$" # md5/sha1/sha256 file hashes
+  - "[A-Z]{2,}-\\d+"
+  - "CVE-\\d{4}-\\d+"
+  - "^[a-f0-9]{32,64}$"
 ```
 
-Add project-specific taxonomies at the end of the list — ordering matters
-(PRD OQ-2), first match wins.
+Patterns use case-sensitive Python regex matching and are tested in order.
+The first match classifies the query as lexical; it does not assign a category.
+These expressions do not cover every product's identifier syntax. For example,
+`MDR-AD002` needs an additional pattern such as `"MDR-[A-Z]+[0-9]+"`.
+Validate custom patterns against both positive and negative examples.
 
-## How It Works
+## Query behavior
 
-Query flow when the fast-path is enabled:
+1. `auto` uses the regex router. Semantic queries go directly to hybrid search.
+2. Lexical queries retrieve FTS5 candidates ordered by SQLite BM25.
+3. Fewer raw hits than `min_hits` cause an auto fallback. ChromaDB hydrates
+   candidates and applies an explicit category filter; an empty useful result
+   also triggers fallback.
+4. Optional reranking operates on the candidate pool before final truncation.
+   The default skips this model cost.
+5. Adjacent chunks add context to the selected results.
 
-1. `QueryRouter.classify(query)` runs the regex list. Returns `"lexical"` on
-   first hit, else `"semantic"` (empty query defaults to `"semantic"`).
-2. `"semantic"` → hybrid pipeline unchanged.
-3. `"lexical"` → `Fts5LexicalIndex.search(query, top_k)` (SQLite FTS5 `MATCH`
-   + `bm25()` ordering). Returns `[(chunk_id, score)]`.
-4. If result count `< min_hits` → fall back to hybrid, increment
-   `knowledge_rag_fast_path_fallback_total{reason="low_hits"}`.
-5. Else → optional rerank pass (only if `rerank_enabled: true`), then
-   adjacent-chunk expansion identical to the hybrid path.
+The `search_knowledge` override has three values:
 
-The `search_knowledge` MCP tool exposes an override:
-`search_method: Literal["auto", "hybrid", "fts5"] = "auto"`.
+| Value | Behavior |
+| --- | --- |
+| `auto` | Router chooses; unavailable or insufficient lexical results fall back |
+| `hybrid` | Bypass FTS5 and use the hybrid pipeline |
+| `fts5` | Bypass router and `min_hits`; report unavailability explicitly |
 
-- `"auto"` (default) — router decides.
-- `"hybrid"` — force full hybrid pipeline, ignore router.
-- `"fts5"` — force fast-path even for prosa queries. When the index is not
-  ready, returns a structured JSON error envelope with a `suggestion` field
-  pointing back at `"auto"`.
+Category filtering happens after the bounded FTS5 candidate retrieval. It is not
+a folder prefilter, and sparse categories can require a different query or the
+semantic path. `hybrid_alpha` does not affect FTS5 ranking.
 
-See ADR-006 for the API surface diff (LEI 1 compatible — additive tail
-kwarg, all existing calls unchanged).
+## Metrics and troubleshooting
 
-## Troubleshooting
+The metric prefix is `knowledge_rag_fast_path_`:
 
-**1. All queries fall back to hybrid, fast-path never fires.**
-Check `knowledge_rag_fast_path_fallback_total{reason="disabled"}`. Non-zero
-means `enabled: false` — verify the config path and restart. If
-`{reason="migration_pending"}` is climbing, the background rebuild is still
-running; see `_migration_docs_indexed / _docs_total` gauges for progress.
+| Metric | Interpretation |
+| --- | --- |
+| `hits_total{path="fts5"}` | Successful uncached FTS5 path executions |
+| `fallback_total{reason="low_hits"}` | Insufficient or no useful lexical hits |
+| `fallback_total{reason="disabled"}` | Router selected lexical but the index handle was not ready |
+| `fallback_total{reason="error"}` | FTS5 execution failed and auto used hybrid |
+| `errors_total{error_class="..."}` | Execution errors classified by exception name |
+| `latency_seconds_bucket` | SQLite lexical search duration buckets |
+| `migration_docs_indexed`, `migration_docs_total` | Migration progress in chunks |
 
-**2. Lexical query returns `NO_RESULTS` but hybrid finds the chunk.**
-Router probably misclassified. Confirm with an explicit
-`search_method="fts5"` call — if that returns hits, the pattern list is
-right and `min_hits` may be too aggressive; lower to `1`. If the forced
-`"fts5"` call also empty, the FTS5 index does not contain that chunk — run
-`python scripts/build_fts5_index.py --data-dir <path> --force` to rebuild
-from ChromaDB.
+When the feature is disabled, dispatch short-circuits; absence of fallback
+metrics does not prove the feature is enabled. Cached results also bypass these
+execution counters.
 
-**3. Latency higher than the 10ms budget.**
-Check `knowledge_rag_fast_path_latency_seconds_bucket`. Latency above the
-`le="0.010"` bucket generally means `rerank_enabled: true` — the
-cross-encoder adds 40-80ms per query (ADR-003). Set `rerank_enabled:
-false` and re-measure.
+The lexical latency histogram times the SQLite search itself. It excludes
+hydration, reranking and response handling, so it cannot establish end-to-end
+request p95. Compare client timings as well.
 
-**4. `Fts5NotReadyError` in logs after restart.**
-Index migration failed. Inspect `data/fts5_migration.state` (JSON marker
-file). `state: "failed"` includes the exception. Remedy: run the standalone
-rebuild helper:
+If an explicit FTS5 query misses content found by hybrid search, check the
+indexed text, tokenization, selected category and migration state. A miss does
+not by itself prove router misclassification or index corruption. Do not lower
+`min_hits` solely to make the fast path appear more frequently; check relevance.
+
+## Recovery and lifecycle
+
+Incremental indexing and document mutations synchronize the derived index.
+Replaying a chunk ID updates that chunk instead of adding a duplicate. A full
+rebuild refreshes FTS5 from the published ChromaDB state.
+
+For a failed or inconsistent migration, stop the server before a standalone
+forced rebuild, then run from a source checkout:
 
 ```bash
-python scripts/build_fts5_index.py --data-dir ./data --force --foreground
+python scripts/build_fts5_index.py --data-dir /absolute/path/to/data --force --foreground
 ```
 
-**5. Storage doubled after enabling.**
-Expected during migration — the FTS5 index is a full copy of the corpus in
-a dedicated SQLite database. After migration completes, expect
-`fts5_index.db` to sit at roughly 30-60% of ChromaDB's on-disk size on a
-typical mixed corpus.
+Use the directory containing the existing `chroma_db/`, not the documents
+directory. `--force` rebuilds the derived FTS5 data; preserve the ChromaDB source.
+Check the exit status and verify known queries after restart. Detailed recovery,
+marker inspection and count checks are in the
+[migration runbook](../runbooks/fts5_migration.md).
 
-## When to Use vs. Not
+FTS5 adds its own database and temporary migration/WAL space. The ratio to
+ChromaDB size depends on text, metadata and vector storage; no fixed percentage
+is guaranteed.
 
-**Enable when:**
-- Your corpus is dominated by exact identifiers (CVEs, CWEs, MITRE codes,
-  hashes, bug-bounty report IDs, error codes).
-- You measure hybrid-path latency and see the semantic branch adding
-  cost you do not need for identifier lookups.
-- You want deterministic ranking on identifier queries — BM25 alone is
-  reproducible; RRF + semantic can drift as embedding models change.
+## Choosing whether to enable it
 
-**Leave off when:**
-- Your corpus is prose-heavy and identifier queries are rare (< 5% of
-  traffic).
-- You depend on the cross-encoder reranker for lexical queries too
-  (recall over latency) — the fast-path skips rerank by default.
-- You cannot afford the one-time migration cost (5-30 minutes on 3865
-  docs, longer on larger corpora).
+Enable FTS5 when lexical identifiers are common and measured retrieval quality
+remains acceptable. Keep the default while evaluating prose-heavy or unfamiliar
+corpora. If cross-encoder reranking materially improves the relevant queries,
+test `rerank_enabled` and account for its model and latency costs.
 
-## References
-
-- ADR-001 — storage layout (`data/fts5_index.db`, PRAGMAs)
-- ADR-002 — regex router (first-match-wins, unanchored)
-- ADR-003 — rerank OFF default (empirical basis)
-- ADR-004 — v4.9.0 default-flip conditional gate
-- ADR-005 — tokenizer (`unicode61 remove_diacritics 2 tokenchars '-_.'`)
-- ADR-006 — `search_method` MCP tool surface diff
-- ADR-008 — CRUD sync + lazy migration (Fase 4)
-- ADR-009 — bench gate deferred to CI
-- `docs/runbooks/fts5_migration.md` — operator runbook
-- `.compozy/tasks/fts5-lexical-fast-path/bench_v4_9_0_gate.md` — gate
-  procedure and result template
+Historical design records are in the repository's FTS5 task documentation.
+For current behavior, use this guide, [the API](../API.md), the effective
+configuration and the tests for the version being deployed.

@@ -15,6 +15,7 @@ This guide explains how to propose changes, what we check, and what to expect fr
 - [Running tests](#running-tests)
 - [Pull request lifecycle](#pull-request-lifecycle)
 - [Commit message convention](#commit-message-convention)
+- [Publishing a release](#publishing-a-release)
 - [Reporting bugs](#reporting-bugs)
 - [Reporting security issues](#reporting-security-issues)
 - [Code of Conduct](#code-of-conduct)
@@ -56,7 +57,9 @@ Every PR is automatically evaluated against seven pillars. All must pass before 
 | 6 | **Versioning** | Atomic version sync, API surface stability, CHANGELOG enforcement | pre-commit hook, griffe, conventional commits, backwards-compat tests |
 | 7 | **Quality** | Style, types, docstrings, complexity, dead code | ruff, mypy strict, interrogate, radon, vulture |
 
-Your PR will show 7 status checks at the bottom — one per pillar. If any is ❌, fix it before requesting review. If you genuinely cannot fix one (e.g., a regression that is intentional), explain why in the PR description and tag `@lyonzin` for an override discussion.
+Your PR runs multiple checks across these seven pillars. Fix failing checks
+before requesting review. If a regression is intentional, explain its impact
+and discuss it with the maintainer before changing any acceptance threshold.
 
 ---
 
@@ -70,9 +73,12 @@ python >= 3.11
 pip install -e .
 
 # Development
-pip install ruff pytest pytest-cov pytest-rerunfailures pytest-memray
+pip install ruff pytest pytest-cov pytest-rerunfailures
 pip install mypy interrogate radon vulture
 pip install pre-commit hypothesis
+
+# Linux/macOS only; memray does not support Windows
+pip install pytest-memray
 
 # Optional (only if you touch benchmarks)
 pip install pytest-benchmark
@@ -93,7 +99,9 @@ examples/           # Sample MCP client configs
 
 ## Pre-commit hooks
 
-`pre-commit` runs lightweight checks before each commit. **Required** — PRs that bypass pre-commit will fail CI on the same checks.
+`pre-commit` runs lightweight checks before each commit. Run the hooks locally;
+CI independently enforces its configured checks and does not run every hook
+from `.pre-commit-config.yaml`.
 
 ```bash
 pre-commit install              # install once
@@ -190,6 +198,29 @@ Use the [Bug Report template](https://github.com/lyonzin/knowledge-rag/issues/ne
 - Reproduction steps
 - Expected vs actual behavior
 - Logs / stack traces (sanitize secrets)
+
+## Publishing a release
+
+Keep `pyproject.toml`, `mcp_server/__init__.py`, and `npm/package.json` on the
+same version, update the changelog, and pass the complete CI matrix before
+publishing the matching `vX.Y.Z` GitHub release. Publishing the release starts
+`.github/workflows/release.yml`; creating a tag alone does not start it.
+
+PyPI uses its trusted publisher in the GitHub `release` environment. NPM uses
+OIDC from the same environment with Node 24 and npm 11.5.1 or newer. In the NPM
+package settings, configure a GitHub Actions trusted publisher for user
+`lyonzin`, repository `knowledge-rag`, workflow filename `release.yml`, and
+environment `release`, with direct `npm publish` allowed. The workflow does not
+need `NPM_TOKEN` for publication. See the
+[NPM trusted publishing guide](https://docs.npmjs.com/trusted-publishers/) for
+account setup and exact, case-sensitive matching requirements.
+
+After publication, verify all three jobs and the public package versions:
+PyPI, NPM, and `ghcr.io/lyonzin/knowledge-rag`. A successful GitHub release or
+PyPI upload does not prove that NPM or Docker publication succeeded. If one
+channel fails, inspect that job and retry only the failed jobs after fixing
+the cause; do not overwrite an already published package version. Historical
+versions are not yanked or deprecated as part of a normal release.
 
 ---
 

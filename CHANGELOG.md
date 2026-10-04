@@ -1,4 +1,4 @@
-successfully downloaded text file (SHA: bf3039601aff729e487a1178c6abd69c4dc61a9b)[Resource from github at repo://lyonzin/knowledge-rag/sha/6ef97ce3bab9e8d05f904e5d68f42b52cf2cab98/contents/CHANGELOG.md] # Changelog
+# Changelog
 
 All notable changes to **knowledge-rag** are documented in this file.
 
@@ -13,7 +13,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-### Unreleased
+### v4.10.0 (2026-10-04) — Indexing reliability, bounded memory and scoped retrieval
+
+**Fixed:**
+
+- Bound metric histogram memory to aggregates per series and emit valid labeled Prometheus samples.
+- Preserve ChromaDB data on collection-opening errors; preserve prior document/index state on handled indexing, mutation and rebuild-publication failures.
+- Drain in-flight collection readers during final publication, retain source timestamps from before parsing, persist partial orphan-pruning successes, and clean retired collection backups conservatively.
+- Authorize retired-backup expiration only after replacement metadata is committed, using the replacement collection UUID; preserve unmarked or ambiguous backups across restarts.
+- Preserve extensionless Dockerfile, Makefile and Tiltfile parser selection during staged add/update operations, and invalidate cached results after failed mutations and rollback.
+- Preserve the committed document inventory after failed rollback and persist bounded per-source repair records. Incremental indexing retries those sources across restarts, removes failed-add orphans and keeps unconfirmed FTS5 state unavailable until repair commits.
+- Avoid retaining historical BM25 chunk payloads during live mutations when lexical search has not been initialized; count, stream and publish FTS5 migrations under one source snapshot.
+- Skip unchanged files before parsing, bound pending indexing work, validate traversal containment, and prevent duplicate overlap-only chunks.
+- Read and discover long Windows document paths with the extended I/O namespace while preserving public source identities and resolving link targets before containment checks.
+- Release native PDF streams retained by failed constructor tracebacks so Windows can clean staged files after invalid PDF writes without changing the original error.
+- Make FTS5 chunk replay idempotent, index chunk identities for updates, validate migration completion, and synchronize derived lexical state with document/index mutations.
+- Choose embedding batch size from the actual execution provider, validate batch overrides and every output vector, and synchronize lazy model initialization.
+- Include the CPU batch-size fix from PR #225: cap CPU embedding batches at 32 by default to reduce allocation failures on large inputs (#224). The proposed 4.9.3 changes are included in this release; 4.9.3 was not published.
+- Preserve full-content cached search results, batch keyword-hit hydration, and rerank the full FTS5 candidate pool before truncating results.
+- Keep the internal semantic candidate pool independent of the public result limit and retain candidates from both retrieval channels within the bounded reranking budget; preserve explicit single-channel weights.
+- Reject cache writes from queries that started before a newer invalidation, preventing old content from repopulating the cache after document updates.
+- Use non-signaling Windows PID checks and a stable OS file lock for stale-PID races and crash recovery; resolve preflight paths and keep diagnostics off the MCP stdio protocol stream.
+- Handle absent Chroma metadata in retrieval, avoid loading BM25 for semantic-only searches, and preserve cache invalidation when post-commit backup cleanup fails.
+- Respect configured custom Chroma directories in the standalone FTS5 builder unless an explicit data-directory override is supplied.
+- Match retrieval evaluation sources by path components across Windows and Unix instead of arbitrary substrings.
+- Share repeated BM25 vocabulary strings within each index and publish coherent scoring snapshots without blocking lazy reads behind ingestion.
+- Preserve invalid installer JSON, honor the chosen Python executable, make dry-run side-effect free, and safely forward arguments on PowerShell 5.1 and Bash 3.2-compatible shells.
+- Include the multilingual preset in the wheel and synchronize bundled templates; detect additional breaking call-shape changes in the public API gate.
+- Measure RSS in bytes separately from benchmark duration and retain explicit workload identities and raw measurements in CI artifacts.
+
+**Added:**
+
+- Optional recursive `include_folders` and `exclude_folders` arguments for `search_knowledge`, applied before top-k selection across Chroma, BM25 and FTS5, intersected with category filters and included in cache identity (#232).
+- Recognize bounded UTF-8 PDF text extractions with explicit `[Page N]` markers and provenance metadata; retain native parsing and diagnostics for binary or invalid PDFs.
+- Explicit Windows DirectML embedding mode with a required adapter index, effective-session safety checks, serialized inference and CPU fallback. Automatic GPU selection remains CUDA/CPU.
+- An opt-in real indexing/retrieval audit harness with temporary ChromaDB/FTS5 storage, CPU/GPU selection, corpus/model hashes, mutation/reopen checks and measured query quality.
+
+**Documentation:**
+
+- Correct configuration/API examples, reindex recovery and model migration guidance, FTS5 counters/readiness, multi-client boundaries, and the limitations of security and quality claims.
+- Record measured memory/storage changes, CPU/CUDA/AMD validation boundaries, and the review of open PRs/issues in `docs/audit-2026-10-03.md`.
+- Record the additional independent review, retrieval measurements and multilingual model comparison in `docs/audit-2026-10-04.md`; document folder scopes, evidence-based evaluation and the verified external-weights cache workaround in `docs/search-quality.md`.
+- Document the GitHub release trigger and NPM OIDC publisher configuration, and distinguish publication success for PyPI, NPM and Docker.
+- Incorporate the multi-client documentation from PR #226 and the dependency updates from PRs #222 and #227–231 into the same release candidate and CI validation.
 
 ### v4.9.2 (2026-09-29) — Post-review hotfix: rename atomicity, real-thread test guard, operating-model docs
 
@@ -451,4 +493,3 @@ Zero breaking change: usuários que atualizarem SEM tocar em `config.yaml` conti
 - **v1.0.1**: Auto-cleanup orphan folders, removed hardcoded paths
 - **v1.0.0**: Initial release
 </details>
-

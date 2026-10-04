@@ -213,7 +213,7 @@ class TestCheckpointLoad:
         result = orch._load_checkpoint()
         assert result is None
         captured = capsys.readouterr()
-        assert "Corrupt checkpoint" in captured.out
+        assert "Corrupt checkpoint" in captured.err
 
     def test_future_version_returns_none_with_warn(self, tmp_path, capsys):
         orch = _fresh_orchestrator(tmp_path)
@@ -230,7 +230,7 @@ class TestCheckpointLoad:
         result = orch._load_checkpoint()
         assert result is None
         captured = capsys.readouterr()
-        assert "version" in captured.out.lower()
+        assert "version" in captured.err.lower()
 
     def test_config_signature_mismatch_invalidates(self, tmp_path, capsys):
         """Embedding model / chunk config changed → checkpoint invalid, WARN emitted."""
@@ -258,7 +258,7 @@ class TestCheckpointLoad:
 
         assert result is None
         captured = capsys.readouterr()
-        assert "config_signature mismatch" in captured.out
+        assert "config_signature mismatch" in captured.err
 
     def test_not_dict_payload_returns_none(self, tmp_path, capsys):
         orch = _fresh_orchestrator(tmp_path)
@@ -268,7 +268,7 @@ class TestCheckpointLoad:
         result = orch._load_checkpoint()
         assert result is None
         captured = capsys.readouterr()
-        assert "not a dict" in captured.out
+        assert "not a dict" in captured.err
 
 
 # =============================================================================
@@ -349,7 +349,7 @@ class TestResumeKwarg:
 
         server.reindex_documents(force=False, full_rebuild=False, resume=True)
         captured = capsys.readouterr()
-        assert "no valid checkpoint" in captured.out
+        assert "no valid checkpoint" in captured.err
         _, kwargs = mock_orch.start_reindex_background.call_args
         assert kwargs.get("resume_state") is None
 

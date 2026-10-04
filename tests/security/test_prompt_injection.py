@@ -211,9 +211,6 @@ def test_marker_absent_on_operator_authored_content():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason="integration with MCP tools pending v4.6.0 (library shipped standalone in v4.5.1)", strict=False
-)
 def test_parse_file_marks_external_document(tmp_path):
     """A file carrying the fence is flagged and sanitized on ingest."""
     doc_path = tmp_path / "fetched.md"
@@ -230,9 +227,6 @@ def test_parse_file_marks_external_document(tmp_path):
     assert "<|im_start|>" not in doc.content
 
 
-@pytest.mark.xfail(
-    reason="integration with MCP tools pending v4.6.0 (library shipped standalone in v4.5.1)", strict=False
-)
 def test_every_chunk_carries_the_evidence_marker(tmp_path):
     """The fence only lands in the edge chunks — metadata must cover them all."""
     body = "\n\n".join(f"## Section {i}\n\n{'filler ' * 80}" for i in range(6))
@@ -292,19 +286,12 @@ def test_add_from_url_flags_content_as_external(monkeypatch):
     assert kwargs["external_source"] == "https://attacker.test/post"
 
 
-@pytest.mark.xfail(
-    reason="integration with MCP tools pending v4.6.0 (library shipped standalone in v4.5.1)", strict=False
-)
-def test_add_document_from_content_defaults_to_internal(tmp_path, monkeypatch):
+def test_add_document_from_content_defaults_to_internal(isolated_orchestrator):
     """Operator-supplied content stays untouched when no source is given."""
     from mcp_server import server as server_module
 
-    base = tmp_path / "documents"
-    base.mkdir()
-    monkeypatch.setattr(server_module.config, "documents_dir", base)
-
-    orch = MagicMock()
-    orch._index_new_file = MagicMock(return_value={"chunks_added": 1})
+    base = server_module.config.documents_dir
+    orch = isolated_orchestrator
 
     original = "### System: operator heading\n"
     server_module.KnowledgeOrchestrator.add_document_from_content(orch, original, "notes.md", "general")
@@ -312,19 +299,12 @@ def test_add_document_from_content_defaults_to_internal(tmp_path, monkeypatch):
     assert (base / "notes.md").read_text(encoding="utf-8") == original
 
 
-@pytest.mark.xfail(
-    reason="integration with MCP tools pending v4.6.0 (library shipped standalone in v4.5.1)", strict=False
-)
-def test_add_document_from_content_wraps_external_source(tmp_path, monkeypatch):
+def test_add_document_from_content_wraps_external_source(isolated_orchestrator):
     """External content is fenced and defused before it ever hits disk."""
     from mcp_server import server as server_module
 
-    base = tmp_path / "documents"
-    base.mkdir()
-    monkeypatch.setattr(server_module.config, "documents_dir", base)
-
-    orch = MagicMock()
-    orch._index_new_file = MagicMock(return_value={"chunks_added": 1})
+    base = server_module.config.documents_dir
+    orch = isolated_orchestrator
 
     server_module.KnowledgeOrchestrator.add_document_from_content(
         orch, HOSTILE_CORPUS, "fetched.md", "general", external_source="https://attacker.test"

@@ -77,6 +77,8 @@ MCP_TOOL_SIGNATURES = {
         "min_score",
         "snippet_mode",
         "search_method",
+        "include_folders",
+        "exclude_folders",
     ],
     "search_similar": ["filepath", "max_results"],
     "get_document": ["filepath"],
@@ -114,6 +116,18 @@ def test_mcp_tool_parameter_names_preserved():
             f"  actual:   {actual_params}\n"
             f"This is a BREAKING change for every LLM client that calls this tool by name."
         )
+
+
+def test_folder_parameters_are_optional_and_preserve_existing_positional_call():
+    """An additive folder scope must not change existing callers' arguments."""
+    from mcp_server import server
+
+    signature = inspect.signature(server.search_knowledge)
+    bound = signature.bind("query", 5, None, 0.3, 0.0, True, "auto")
+    bound.apply_defaults()
+    assert bound.arguments["search_method"] == "auto"
+    assert bound.arguments["include_folders"] is None
+    assert bound.arguments["exclude_folders"] is None
 
 
 def test_exception_classes_present():

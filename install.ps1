@@ -1,4 +1,4 @@
-<#
+﻿<#
 ╔═══════════════════════════════════════════════════════════════════╗
 ║                                                                   ║
 ║             KNOWLEDGE RAG — INSTALLER v3.0 (PowerShell)           ║
@@ -7,7 +7,7 @@
 ╚═══════════════════════════════════════════════════════════════════╝
 
 .SYNOPSIS
-    Thin PowerShell wrapper. Finds (or installs) a supported Python 3.11/3.12
+    Thin PowerShell wrapper. Finds Python 3.11/3.12/3.13 (or installs 3.12)
     and delegates all installation logic to install.py.
 
 .DESCRIPTION
@@ -15,12 +15,12 @@
     embedding model pre-download) lives in install.py so Windows, macOS,
     and Linux share one implementation. This wrapper only:
 
-      1. Locates or installs Python 3.11/3.12 (winget preferred, python.org fallback)
+      1. Locates Python 3.11/3.12/3.13 or installs 3.12 (winget preferred)
       2. Refreshes PATH so the new python is visible in this session
       3. Runs   python install.py  <args>
 
-    See   .\install.ps1 -- --help   for the full flag list (any arg after `--`
-    is forwarded to install.py verbatim).
+    See   .\install.ps1 --help   for the full flag list. Python flags are
+    forwarded to install.py without an extra `--` separator.
 
 .PARAMETER SkipPython
     Do not attempt to install Python; only look for an existing installation.
@@ -29,18 +29,18 @@
     Override the default Python installer URL (advanced).
 
 .PARAMETER Args
-    Remaining args forwarded to install.py. Use `--` to separate them clearly.
+    Remaining args forwarded to install.py (for example --dry-run).
 
 .EXAMPLE
     .\install.ps1
     Full install (auto-detects LLM clients, registers knowledge-rag in each).
 
 .EXAMPLE
-    .\install.ps1 -- --dry-run --for cursor,claude-code
+    .\install.ps1 --dry-run --for cursor,claude-code
     Dry-run against Cursor + Claude Code only.
 
 .EXAMPLE
-    .\install.ps1 -- --from-source --install-path C:\dev\knowledge-rag
+    .\install.ps1 --from-source --install-path C:\dev\knowledge-rag
     Install from local source into a custom path.
 
 .NOTES
@@ -49,13 +49,17 @@
     Data:    2026-07-02
 #>
 
-[CmdletBinding()]
 param(
     [switch]$SkipPython,
-    [string]$PythonInstaller = "https://www.python.org/ftp/python/3.12.7/python-3.12.7-amd64.exe",
-    [Parameter(ValueFromRemainingArguments=$true)]
-    [string[]]$Args = @()
+    [string]$PythonInstaller = "https://www.python.org/ftp/python/3.12.7/python-3.12.7-amd64.exe"
 )
+
+# Keep this a simple script: advanced parameter binding rejects Python's
+# double-dash flags on Windows PowerShell 5.1 before forwarding can run.
+$installerArgs = @($args)
+if ($installerArgs.Count -gt 0 -and $installerArgs[0] -eq "--") {
+    $installerArgs = @($installerArgs | Select-Object -Skip 1)
+}
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference    = "SilentlyContinue"
@@ -80,21 +84,24 @@ function Get-ExistingPython {
     $candidates = @(
         "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",
         "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe",
+        "$env:LOCALAPPDATA\Programs\Python\Python313\python.exe",
         "C:\Program Files\Python312\python.exe",
         "C:\Program Files\Python311\python.exe",
+        "C:\Program Files\Python313\python.exe",
         "C:\Python312\python.exe",
-        "C:\Python311\python.exe"
+        "C:\Python311\python.exe",
+        "C:\Python313\python.exe"
     )
     foreach ($p in $candidates) {
         if (Test-Path $p) {
             $ver = (& $p -c "import sys;print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>$null).Trim()
-            if ($ver -eq "3.11" -or $ver -eq "3.12") { return (Resolve-Path $p).Path }
+            if ($ver -in @("3.11", "3.12", "3.13")) { return (Resolve-Path $p).Path }
         }
     }
 
     # 2) py launcher
     if (Get-Command py -ErrorAction SilentlyContinue) {
-        foreach ($v in @("3.12", "3.11")) {
+        foreach ($v in @("3.12", "3.11", "3.13")) {
             try {
                 $pyExe = (& py "-$v" -c "import sys;print(sys.executable)" 2>$null).Trim()
                 if ($pyExe -and (Test-Path $pyExe)) { return $pyExe }
@@ -103,11 +110,11 @@ function Get-ExistingPython {
     }
 
     # 3) PATH
-    foreach ($name in @("python3.12", "python3.11", "python3", "python")) {
+    foreach ($name in @("python3.12", "python3.11", "python3.13", "python3", "python")) {
         $cmd = Get-Command $name -ErrorAction SilentlyContinue
         if ($cmd) {
             $ver = (& $cmd.Source -c "import sys;print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>$null).Trim()
-            if ($ver -eq "3.11" -or $ver -eq "3.12") { return $cmd.Source }
+            if ($ver -in @("3.11", "3.12", "3.13")) { return $cmd.Source }
         }
     }
     return $null
@@ -143,7 +150,7 @@ function Install-Python312 {
     Invoke-WebRequest -Uri $PythonInstaller -OutFile $tmp -UseBasicParsing
 
     W-Info "Running Python installer (per-user, silent) ..."
-    Start-Process -FilePath $tmp -ArgumentList "/quiet InstallAllUsers=0 PrependPath=1 Include_test=0" -Wait
+    Start-Process -FilePath $tmp -ArgumentList "/quiet InstallAllUsers=0 PrependPath=1 Include_test=0" -WindowStyle Hidden -Wait
     Remove-Item $tmp -Force -ErrorAction SilentlyContinue
 
     Refresh-Path
@@ -154,12 +161,12 @@ function Install-Python312 {
 
 # ─── Main ────────────────────────────────────────────────────────────────
 try {
-    W-Info "Locating a supported Python interpreter (3.11 or 3.12) ..."
+    W-Info "Locating a tested Python interpreter (3.11, 3.12, or 3.13) ..."
     $python = Get-ExistingPython
 
     if (-not $python) {
-        if ($SkipPython) {
-            W-Err "No supported Python found and -SkipPython was set."
+        if ($SkipPython -or $installerArgs -contains "--dry-run") {
+            W-Err "No supported Python found; -SkipPython/--dry-run prevents installing one."
             W-Info "Install manually: winget install Python.Python.3.12"
             exit 1
         }
@@ -169,7 +176,7 @@ try {
 
     # Forward every remaining flag to install.py verbatim
     W-Info "Delegating to install.py ..."
-    & $python $installPy @Args
+    & $python $installPy @installerArgs
     $code = $LASTEXITCODE
     if ($code -ne 0) { exit $code }
 

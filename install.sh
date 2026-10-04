@@ -6,7 +6,7 @@
 # ║                                                                   ║
 # ╚═══════════════════════════════════════════════════════════════════╝
 #
-# Thin wrapper that finds a supported Python (3.11 or 3.12) and delegates
+# Thin wrapper that finds a tested Python (3.11, 3.12, or 3.13) and delegates
 # every installation step to install.py. See install.py --help for flags.
 #
 # Autor:   Ailton Rocha (Lyon.)
@@ -47,19 +47,20 @@ find_python() {
     local uname_s
     uname_s="$(uname -s 2>/dev/null || echo unknown)"
 
-    local candidates=("python3.12" "python3.11")
+    local candidates=("python3.12" "python3.11" "python3.13")
 
     if [ "$uname_s" = "Linux" ]; then
         candidates+=(
-            "/usr/bin/python3.12" "/usr/bin/python3.11"
-            "/usr/local/bin/python3.12" "/usr/local/bin/python3.11"
+            "/usr/bin/python3.12" "/usr/bin/python3.11" "/usr/bin/python3.13"
+            "/usr/local/bin/python3.12" "/usr/local/bin/python3.11" "/usr/local/bin/python3.13"
         )
     elif [ "$uname_s" = "Darwin" ]; then
         candidates+=(
-            "/opt/homebrew/bin/python3.12" "/opt/homebrew/bin/python3.11"
+            "/opt/homebrew/bin/python3.12" "/opt/homebrew/bin/python3.11" "/opt/homebrew/bin/python3.13"
             "/usr/local/opt/python@3.12/bin/python3.12"
             "/usr/local/opt/python@3.11/bin/python3.11"
-            "/usr/local/bin/python3.12" "/usr/local/bin/python3.11"
+            "/usr/local/opt/python@3.13/bin/python3.13"
+            "/usr/local/bin/python3.12" "/usr/local/bin/python3.11" "/usr/local/bin/python3.13"
         )
     fi
     candidates+=("python3" "python")
@@ -70,7 +71,7 @@ find_python() {
             continue
         fi
         version=$("$cmd" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || true)
-        if [ "$version" = "3.11" ] || [ "$version" = "3.12" ]; then
+        if [ "$version" = "3.11" ] || [ "$version" = "3.12" ] || [ "$version" = "3.13" ]; then
             echo "$cmd"
             return 0
         fi
@@ -80,7 +81,7 @@ find_python() {
 
 print_python_install_hints() {
     echo ""
-    warn "No supported Python (3.11 or 3.12) found. Install one first:"
+    warn "No tested Python (3.11, 3.12, or 3.13) found. Install one first:"
     if command -v apt >/dev/null 2>&1; then
         echo "  Ubuntu/Debian: sudo apt update && sudo apt install python3.12 python3.12-venv python3.12-dev"
     fi
@@ -97,7 +98,7 @@ print_python_install_hints() {
         echo "  macOS:         brew install python@3.12"
     fi
     echo "  Any platform:  pyenv install 3.12 && pyenv global 3.12"
-    printf "%bNOTE: Python 3.13+ is NOT supported (onnxruntime).%b\n" "$C_RED" "$C_RESET"
+    echo "Tested Python versions: 3.11, 3.12, and 3.13. Newer versions are not selected automatically."
 }
 
 # ─── Main ────────────────────────────────────────────────────────────────

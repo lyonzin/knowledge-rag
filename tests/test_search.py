@@ -131,6 +131,8 @@ class TestHybridCategoryFilter:
         monkeypatch.setattr("mcp_server.server.config.reranker_enabled", False)
 
         class FakeCache:
+            generation = 0
+
             def get(self, *args, **kwargs):
                 return None
 
@@ -138,7 +140,7 @@ class TestHybridCategoryFilter:
                 return None
 
         class FakeBM25:
-            def search(self, query, top_k):
+            def search(self, query, top_k, *, allowed_ids=None):
                 return [("chunk_report", 10.0), ("chunk_code", 9.0)]
 
         class FakeCollection:
@@ -163,7 +165,11 @@ class TestHybridCategoryFilter:
                 },
             }
 
-            def get(self, ids, include):
+            def get(self, ids=None, include=(), where=None):
+                if ids is None:
+                    ids = [
+                        cid for cid, metadata in self._metadatas.items() if metadata["category"] == where["category"]
+                    ]
                 return {
                     "ids": ids,
                     "documents": [self._docs[chunk_id] for chunk_id in ids] if "documents" in include else None,
@@ -269,6 +275,8 @@ class TestKeywordRoutingBehavior:
         docs = self.DOCS
 
         class FakeCache:
+            generation = 0
+
             def get(self, *args, **kwargs):
                 return None
 
@@ -276,11 +284,13 @@ class TestKeywordRoutingBehavior:
                 return None
 
         class FakeBM25:
-            def search(self, query, top_k):
+            def search(self, query, top_k, *, allowed_ids=None):
                 return bm25_hits
 
         class FakeCollection:
-            def get(self, ids, include):
+            def get(self, ids=None, include=(), where=None):
+                if ids is None:
+                    ids = [cid for cid, metadata in metadatas.items() if metadata["category"] == where["category"]]
                 return {
                     "ids": ids,
                     "documents": [docs[cid] for cid in ids] if "documents" in include else None,
@@ -455,6 +465,8 @@ class TestPathAwareRanking:
         monkeypatch.setattr("mcp_server.server.config.reranker_enabled", False)
 
         class FakeCache:
+            generation = 0
+
             def get(self, *args, **kwargs):
                 return None
 
@@ -467,7 +479,6 @@ class TestPathAwareRanking:
 
         class FakeCollection:
             def get(self, ids, include):
-                chunk_id = ids[0]
                 documents = {
                     "chunk_generic": "same keyword content",
                     "chunk_target": "same keyword content",
@@ -486,7 +497,11 @@ class TestPathAwareRanking:
                         "chunk_index": 0,
                     },
                 }
-                return {"documents": [documents[chunk_id]], "metadatas": [metadatas[chunk_id]]}
+                return {
+                    "ids": ids,
+                    "documents": [documents[chunk_id] for chunk_id in ids],
+                    "metadatas": [metadatas[chunk_id] for chunk_id in ids],
+                }
 
         orchestrator = object.__new__(KnowledgeOrchestrator)
         orchestrator.query_cache = FakeCache()
@@ -527,6 +542,8 @@ class TestDoSemanticCandidateMath:
         captured = {}
 
         class FakeCache:
+            generation = 0
+
             def get(self, *args, **kwargs):
                 return None
 
@@ -570,7 +587,7 @@ class TestDoSemanticCandidateMath:
             f"expression in server.py::_do_semantic."
         )
 
-    def test_semantic_pool_is_bounded_by_config_max_results(self, monkeypatch):
+    def test_semantic_pool_is_not_truncated_by_public_response_limit(self, monkeypatch):
         """When max_results * 3 exceeds config.max_results, the config value wins."""
         monkeypatch.setattr("mcp_server.server.config.reranker_enabled", False)
         # Cap intentionally small so max_results * 3 > cap.
@@ -579,6 +596,8 @@ class TestDoSemanticCandidateMath:
         captured = {}
 
         class FakeCache:
+            generation = 0
+
             def get(self, *args, **kwargs):
                 return None
 
@@ -610,10 +629,10 @@ class TestDoSemanticCandidateMath:
         orch._route_by_keywords = lambda query: None
         orch._expand_with_adjacent_chunks = lambda results: results
 
-        # 20 * 3 = 60, but config.max_results = 50 → min() clamps to 50
+        # Candidate recall must remain independent of the public response cap.
         _ = orch.query("test query", max_results=20, hybrid_alpha=1.0)
 
-        assert captured["n_results"] == 50
+        assert captured["n_results"] == 60
 
 
 # =============================================================================

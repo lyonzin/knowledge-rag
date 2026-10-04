@@ -29,7 +29,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import venv
 from pathlib import Path
 from typing import Any, Callable
 
@@ -51,7 +50,7 @@ SERVER_NAME = "knowledge-rag"
 EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 REQUIREMENTS_FILE = "requirements.txt"
 PYPI_PACKAGE = "knowledge-rag"
-SUPPORTED_PY = {"3.11", "3.12"}
+SUPPORTED_PY = {"3.11", "3.12", "3.13"}
 DEFAULT_INSTALL_DIRNAME = "knowledge-rag"
 BACKUP_SUFFIX = ".knowledge-rag.bak"
 
@@ -320,23 +319,28 @@ CLIENTS: list[Client] = [
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
+    """Read a client object; invalid or unsupported content must never be replaced."""
     if not path.exists():
         return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as e:
-        warn(f"{path} contains invalid JSON ({e}) — leaving it untouched")
-        return None
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
+    if not isinstance(data, dict):
+        raise ValueError("the JSON root must be an object")
+    return data
 
 
 def _write_json_atomic(path: Path, data: dict[str, Any]) -> None:
     """Write JSON without BOM, atomically (write to tmp then replace)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=path.parent, suffix=".tmp") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-        f.write("\n")
-        tmp_name = f.name
-    os.replace(tmp_name, path)
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=path.parent, suffix=".tmp") as f:
+            tmp_path = Path(f.name)
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
 
 
 def _backup(path: Path) -> Path | None:
@@ -361,8 +365,18 @@ def register_client(
     if config is None:
         return False, f"platform unsupported for {client.display}"
 
-    existing = _read_json(config) or {}
+    try:
+        loaded = _read_json(config)
+    except (OSError, ValueError) as exc:
+        message = f"cannot safely read {config} ({exc}) — leaving it untouched"
+        warn(message)
+        return False, message
+    existing = loaded if loaded is not None else {}
     parent = existing.setdefault(client.json_key, {})
+    if not isinstance(parent, dict):
+        message = f"{config}: {client.json_key} must be an object — leaving it untouched"
+        warn(message)
+        return False, message
     new_spec = client.spec_fn(install_path, venv_python)
 
     current_spec = parent.get(SERVER_NAME)
@@ -398,47 +412,46 @@ def python_version_short(exe: str | Path) -> str | None:
 def find_python() -> Path:
     step("PYTHON DETECTION")
 
-    candidates: list[str] = []
+    candidates: list[tuple[str, ...]] = []
 
     # Explicit versioned binaries first
-    for v in ("3.12", "3.11"):
-        candidates.append(f"python{v}")
+    for v in ("3.12", "3.11", "3.13"):
+        candidates.append((f"python{v}",))
         if IS_LINUX:
-            candidates += [f"/usr/bin/python{v}", f"/usr/local/bin/python{v}"]
+            candidates += [(f"/usr/bin/python{v}",), (f"/usr/local/bin/python{v}",)]
         if IS_MACOS:
             candidates += [
-                f"/opt/homebrew/bin/python{v}",
-                f"/usr/local/opt/python@{v}/bin/python{v}",
-                f"/usr/local/bin/python{v}",
+                (f"/opt/homebrew/bin/python{v}",),
+                (f"/usr/local/opt/python@{v}/bin/python{v}",),
+                (f"/usr/local/bin/python{v}",),
             ]
         if IS_WINDOWS:
             local = os.environ.get("LOCALAPPDATA", "")
             major_minor_flat = v.replace(".", "")
             candidates += [
-                f"{local}\\Programs\\Python\\Python{major_minor_flat}\\python.exe",
-                f"C:\\Program Files\\Python{major_minor_flat}\\python.exe",
-                f"C:\\Python{major_minor_flat}\\python.exe",
+                (f"{local}\\Programs\\Python\\Python{major_minor_flat}\\python.exe",),
+                (f"C:\\Program Files\\Python{major_minor_flat}\\python.exe",),
+                (f"C:\\Python{major_minor_flat}\\python.exe",),
             ]
 
     # Windows py launcher
     if IS_WINDOWS:
-        candidates += ["py -3.12", "py -3.11"]
+        candidates += [("py", "-3.12"), ("py", "-3.11"), ("py", "-3.13")]
 
     # Generic fallbacks (checked last)
-    candidates += ["python3", "python"]
+    candidates += [(sys.executable,), ("python3",), ("python",)]
 
-    seen: set[str] = set()
+    seen: set[tuple[str, ...]] = set()
     for cand in candidates:
         if cand in seen:
             continue
         seen.add(cand)
 
-        # Handle "py -3.12" split form
-        parts = cand.split()
-        exe = shutil.which(parts[0]) if not os.path.isabs(parts[0]) else parts[0]
+        # Keep executable paths intact; only launchers have separate arguments.
+        exe = shutil.which(cand[0]) if not os.path.isabs(cand[0]) else cand[0]
         if not exe or not Path(exe).exists():
             continue
-        cmd = [exe] + parts[1:]
+        cmd = [exe, *cand[1:]]
 
         try:
             out = subprocess.check_output(
@@ -485,7 +498,7 @@ def _print_python_install_hints() -> None:
         print("  Windows:       winget install Python.Python.3.12")
         print("                 (or download from python.org)")
     print("  Any platform:  pyenv install 3.12 && pyenv global 3.12")
-    print(_c("31", "\nNOTE: Python 3.13+ is NOT supported (onnxruntime incompatibility)"))
+    print("\nTested Python versions: 3.11, 3.12, and 3.13. Newer versions are not selected automatically.")
 
 
 # ============================================================================
@@ -533,6 +546,7 @@ def setup_venv(
 ) -> Path:
     step("VIRTUAL ENVIRONMENT")
 
+    source = _source_checkout(install_path) if from_source else None
     venv_dir = install_path / "venv"
     venv_py = venv_python_path(venv_dir)
 
@@ -542,7 +556,7 @@ def setup_venv(
 
     if not venv_py.exists():
         info(f"Creating virtual environment with {python} ...")
-        venv.EnvBuilder(with_pip=True, upgrade_deps=False, clear=False).create(venv_dir)
+        subprocess.check_call([str(python), "-m", "venv", str(venv_dir)])
         ok("Virtual environment created")
     else:
         ok("Virtual environment exists")
@@ -550,16 +564,9 @@ def setup_venv(
     info("Upgrading pip ...")
     subprocess.check_call([str(venv_py), "-m", "pip", "install", "--upgrade", "pip", "--quiet"])
 
-    if from_source:
-        req_here = Path.cwd() / REQUIREMENTS_FILE
-        req_installed = install_path / REQUIREMENTS_FILE
-        req = req_installed if req_installed.exists() else req_here
-        if not req.exists():
-            err(f"{REQUIREMENTS_FILE} not found in {install_path} nor {Path.cwd()}")
-            err("Clone the repo first, or drop --from-source to install from PyPI")
-            sys.exit(1)
-        info(f"Installing from {req} ...")
-        subprocess.check_call([str(venv_py), "-m", "pip", "install", "-r", str(req), "--quiet"])
+    if source is not None:
+        info(f"Installing editable source checkout from {source} ...")
+        subprocess.check_call([str(venv_py), "-m", "pip", "install", "--editable", str(source), "--quiet"])
     else:
         target = PYPI_PACKAGE if not pypi_version else f"{PYPI_PACKAGE}=={pypi_version}"
         info(f"Installing {target} from PyPI ...")
@@ -567,6 +574,16 @@ def setup_venv(
 
     ok("Dependencies installed")
     return venv_py
+
+
+def _source_checkout(install_path: Path) -> Path:
+    """Find real package source before modifying an existing virtual environment."""
+    for candidate in (install_path, Path.cwd()):
+        if (candidate / "pyproject.toml").is_file() and (candidate / "mcp_server/server.py").is_file():
+            return candidate.resolve()
+    err(f"Source checkout not found in {install_path} nor {Path.cwd()}")
+    err("Clone the repo first, or drop --from-source to install from PyPI")
+    raise SystemExit(1)
 
 
 # ============================================================================
@@ -705,7 +722,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument(
         "--from-source",
         action="store_true",
-        help="Install from local requirements.txt instead of PyPI",
+        help="Install the local source checkout in editable mode instead of PyPI",
     )
     p.add_argument(
         "--pypi-version",
@@ -803,7 +820,10 @@ def main(argv: list[str] | None = None) -> int:
     py_version = python_version_short(python) or "?"
 
     # 2. Project layout
-    setup_project_structure(install_path)
+    if args.dry_run:
+        skip(f"Would create project directories under {install_path}")
+    else:
+        setup_project_structure(install_path)
 
     # 3. Venv + install
     if args.dry_run:

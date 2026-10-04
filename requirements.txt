@@ -1,6 +1,6 @@
 # Knowledge RAG System - Python Dependencies
 # ==========================================
-# Requires Python 3.11+ (3.11, 3.12, 3.13, 3.14 supported)
+# Requires Python 3.11+; CI validates Python 3.11, 3.12 and 3.13.
 
 # Vector Database (uses new PersistentClient API)
 chromadb>=1.4.0
@@ -19,8 +19,8 @@ fastembed[reranking]>=0.4.0
 # transitive dep count and pushes idle RSS +20% vs the pre-migration baseline.
 mcp>=2.0.0,<3.0.0
 
-# BM25 for Hybrid Search (keyword + semantic)
-rank-bm25>=0.2.2
+# Vector math for the built-in BM25 and embedding validation
+numpy>=1.24.0
 
 # URL content fetching (add_from_url tool)
 requests>=2.33.0
@@ -46,8 +46,8 @@ watchdog>=4.0.0
 #    (no manual setup required, unlike Ollama)
 #
 # 2. Default embedding model: BAAI/bge-small-en-v1.5 (384-dim)
-#    Cached in ~/.cache/fastembed/
+#    Cached in the configured paths.models_cache_dir.
 #
-# 3. Python 3.13+ is supported since v3.5.1
-#    (onnxruntime now ships wheels for 3.13 and 3.14)
+# 3. Newer Python versions depend on wheels for the complete dependency tree;
+#    they are not covered by the project's current release CI matrix.
 # ==========================================

@@ -48,6 +48,30 @@ def _pct_or_none(numerator: float, denominator: float) -> float | None:
         return None
 
 
+def _memory_fields(bench: dict[str, Any]) -> dict[str, Any]:
+    """Keep RSS byte samples separate from pytest's wall-clock statistics."""
+    extra = bench.get("extra_info") or {}
+    name = bench.get("fullname", bench.get("name", "")).replace("\\", "/")
+    is_memory = extra.get("measurement") == "rss_peak_delta_bytes" or (
+        "test_bench_memory.py" in name
+        or bench.get("name") in {"test_bench_orchestrator_idle_rss", "test_bench_query_cache_5000_entries"}
+    )
+    if not is_memory:
+        return {}
+    return {
+        "measurement_unit": "bytes",
+        "measurement_value": extra.get("rss_peak_delta_bytes"),
+        "rss_retained_delta_bytes": extra.get("rss_retained_delta_bytes"),
+        "rss_budget_bytes": extra.get("rss_budget_bytes"),
+        "rss_sampling_interval_ms": extra.get("rss_sampling_interval_ms"),
+        "measurement_note": "Sampled peak RSS growth; legacy runs without byte samples are unavailable.",
+        "median_ns": None,
+        "stddev_ns": None,
+        "ops": None,
+        "iqr_ratio": None,
+    }
+
+
 def build_payload(
     raw: dict[str, Any],
     commit: str,
@@ -72,6 +96,9 @@ def build_payload(
         rows.append(
             {
                 "name": _short_name(b.get("name") or b.get("fullname") or "?"),
+                "measurement_unit": "nanoseconds",
+                "measurement_value": median * 1_000_000_000,
+                "workload_version": (b.get("extra_info") or {}).get("workload_version", 1),
                 "median_ns": median * 1_000_000_000,
                 "stddev_ns": stddev * 1_000_000_000,
                 "ops": ops,
@@ -80,9 +107,10 @@ def build_payload(
                     float(stats.get("iqr", 0.0)) * 1_000_000_000,
                     median * 1_000_000_000,
                 ),
+                **_memory_fields(b),
             }
         )
-    rows.sort(key=lambda r: r["median_ns"])
+    rows.sort(key=lambda r: (r["measurement_unit"], r["measurement_value"] or 0))
 
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),

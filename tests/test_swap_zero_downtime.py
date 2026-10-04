@@ -133,6 +133,7 @@ def _fresh_orch(prod_collection_name: str = "knowledge_base") -> KnowledgeOrches
     __init__ is bypassed so no FastEmbed/ChromaDB is touched.
     """
     orch = object.__new__(KnowledgeOrchestrator)
+    orch._index_lock = threading.RLock()
     orch.embed_fn = MagicMock()
     orch.bm25_index = BM25Index()
     orch._bm25_initialized = False
@@ -291,8 +292,8 @@ class TestSwap:
         assert staging.name == "kb"
         # The client returns that object under "kb".
         assert orch.collection is staging
-        # __old_1 was cleaned up.
-        assert "kb__old_1" not in by_name
+        # Keep the old collection until durable metadata publication succeeds.
+        assert "kb__old_1" in by_name
 
     def test_bm25_rebuilt_only_after_swap_success(self, monkeypatch):
         """Failed validate -> BM25 NOT rebuilt, no _ensure_bm25_index call."""

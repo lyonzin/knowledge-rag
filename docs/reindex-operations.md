@@ -1,132 +1,244 @@
-# Reindex Operations Guide (v4.8.0+)
+# Reindex operations guide
 
-## Sync vs. Async APIs
+Use the mode that matches the required work. The MCP tool returns immediately;
+the worker runs in the server process and stops if that process exits.
 
-The MCP tool `reindex_documents(force=True, full_rebuild=True)` returns immediately after spawning a daemon thread that performs the rebuild in the background. This is intentional for the MCP protocol (the client shouldn't block for hours waiting on a large reindex), BUT it has a subtle failure mode:
+| MCP call | Work performed | Recovery |
+| --- | --- | --- |
+| `reindex_documents()` | Scan paths, skip unchanged files, index changes and prune deleted sources | Repeat the incremental scan |
+| `reindex_documents(force=True)` | Reprocess and re-embed every discovered file, including unchanged files | Smart-reindex checkpoint |
+| `reindex_documents(resume=True)` | Resume a compatible smart checkpoint; otherwise start a fresh smart run | Smart-reindex checkpoint |
+| `reindex_documents(full_rebuild=True)` | Populate and validate a staging collection, then replace the live collection | Preserve/inspect the previous collection and retry; no smart checkpoint |
 
-**If the Python process running the MCP server dies mid-rebuild** (crash, OOM kill, `Ctrl+C`, remote SSH disconnect, laptop suspend, etc.), the daemon thread dies with it — leaving the ChromaDB collection **deleted but never repopulated**. Result: RAG returns zero results until the operator manually re-runs the reindex.
+`resume=True` and `full_rebuild=True` are incompatible. The wrapper rejects
+that combination before starting a worker.
 
-**Rule of thumb:**
+## Observe completion
 
-- **MCP tool calls:** use `reindex_documents(...)` as documented — the async wrapper is correct. The whole point of MCP is that clients (Claude, Cursor, etc.) get a response inside the request budget.
-- **CLI scripts / one-off jobs:** prefer `get_orchestrator().nuclear_rebuild()` (sync) directly. This guarantees the rebuild completes before Python exits. If the script gets killed, at least the collection is not in a half-destroyed state.
-- **Long-running rebuilds on unstable connections:** use `reindex_documents(force=True)` (smart reindex, not full rebuild) and rely on the resume checkpoint (see below) to recover.
+After a call returns `status: "started"`, poll `get_reindex_status()`.
+When `reindex.active` becomes false, inspect both `last_error` and
+`last_result.errors`. A stopped worker or an HTTP/MCP success response does not
+prove all documents were indexed.
 
-## Resume Kwarg (v4.8.0+)
+Inspect representative sources and retrieval results after a large operation.
+A parser error should retain the previous indexed content for that source and
+be reported as an error; it must not be treated as a file deletion.
 
-`reindex_documents(resume=True)` recovers from `data/reindex_checkpoint.json` after an interrupted smart reindex.
+Storage consistency and retrieval quality are separate checks. Before a large
+validation run, choose questions, expected sources and required evidence from
+the original documents. Keep that set unchanged when comparing configurations,
+and retain failed-to-ingest sources in the end-to-end denominator. A matching
+filename does not prove that the returned chunks contain the answer. When a
+source is relevant but its retrieved context is incomplete, use `get_document`
+to inspect that source. Record nearest-neighbor results for unanswerable queries
+separately; a nonempty search result is not itself an answered question.
 
-**Rules:**
+For an operator-owned foreground script, `get_orchestrator().nuclear_rebuild()`
+waits for completion in that process:
 
-- `resume=True` is only valid when `full_rebuild=False`. The combination `full_rebuild=True + resume=True` is rejected up front with a structured error — nuclear rebuild has no meaningful checkpoint semantic because the entire collection is thrown away and rebuilt from scratch, so "resuming" would leave a partial collection with no coherent state.
-- `resume=True` implicitly forces `mode='smart_reindex'`, even when `force=False` was passed. An interrupted smart reindex must be resumed with smart, not silently downgraded to `incremental` (which would ignore the checkpoint entirely).
-- When no valid checkpoint exists, `resume=True` prints an informational log and starts a fresh smart reindex.
+```python
+from mcp_server.server import get_orchestrator
 
-**Checkpoint cadence:** written every 500 docs OR every 30 seconds, whichever comes first.
-
-- 500-doc cadence covers fast runs (small markdown docs mostly cached by mtime skip, thousands per minute).
-- 30-second cadence covers slow runs (one PDF with 5000 chunks could take longer than 30s, leaving too long a gap between checkpoints).
-
-**Checkpoint invalidation:** the checkpoint stores a `config_signature` — an SHA256 hash of the current `embedding_model | embedding_dim | chunk_size | chunk_overlap` tuple. If any of those config values change between checkpoint write and resume load, the checkpoint is discarded with a WARN and the reindex starts fresh. This prevents a mixed collection (partial old vectors with the previous model + partial new vectors with the current one) which would silently degrade retrieval quality.
-
-**Checkpoint lifecycle:**
-
-- Written every 500 docs / 30s during a smart reindex, alongside a metadata flush so `_indexed_docs` on disk stays in sync with the checkpoint's `indexed_doc_ids` list.
-- Cleared automatically on successful reindex completion.
-- Cleared automatically if `_load_checkpoint()` returns None on a `resume=True` attempt (missing/corrupt/version-mismatch/signature-mismatch).
-
-## Progress Fields (v4.8.0+)
-
-`get_reindex_status()` returns these fields while a reindex is active:
-
-| Field                 | Type    | Meaning                                                                                       |
-| --------------------- | ------- | --------------------------------------------------------------------------------------------- |
-| `chunks_processed`    | int     | Chunks committed to ChromaDB so far                                                           |
-| `chunks_total`        | int     | Rolling estimate (0 during warmup, then running average from completed docs × total_files)    |
-| `throughput_cps`      | float   | Chunks per second, sliding window (last 30s OR 100 samples, whichever smaller — for stability) |
-| `eta_seconds`         | int     | Estimated seconds to completion, derived from throughput + remaining chunks                   |
-| `checkpoint_saved_at` | str/None | ISO timestamp of the last checkpoint write (None until first checkpoint)                     |
-| `resumed`             | bool    | True when this run recovered from a checkpoint via `resume=True`                              |
-
-**Warmup behavior:** `chunks_total` starts at 0 (or an estimate from previously indexed docs if any exist) and is refined each iteration using the running average across docs already processed. `throughput_cps` stays at 0.0 until at least 2 samples land in the sliding window. `eta_seconds` stays at 0 during throughput warmup and near completion (when `chunks_processed` catches up to the estimate).
-
-**Sliding window rationale:** using a fixed-size deque bounded at 100 entries AND pruning entries older than 30 seconds keeps the throughput number stable during transient stalls (e.g. one giant PDF that takes 60s to embed) without diluting current speed with ancient samples from the start of the run.
-
-## Example Recovery Flow
-
-```
-# Terminal 1: start a smart reindex (say, 5000 docs)
-mcp> reindex_documents(force=True)
-{"status": "started", "operation": "smart_reindex", ...}
-
-# ... 3 minutes in, laptop crashes at doc 2100 / 5000 ...
-
-# Terminal 1 restart: check if a checkpoint survived
-$ ls data/reindex_checkpoint.json
-data/reindex_checkpoint.json
-
-# Resume from where it stopped
-mcp> reindex_documents(resume=True)
-{"status": "started", "operation": "smart_reindex", ...}
-[REINDEX] Resuming smart reindex from checkpoint (2100 docs already processed, 12345 chunks)
-
-# Poll status — resumed=True marker + chunks_processed continues from checkpoint
-mcp> get_reindex_status()
-{
-  "active": true,
-  "operation": "smart_reindex",
-  "progress": "2103/5000",
-  "chunks_processed": 12360,
-  "chunks_total": 29400,
-  "throughput_cps": 45.2,
-  "eta_seconds": 377,
-  "resumed": true,
-  ...
-}
+result = get_orchestrator().nuclear_rebuild()
+print(result)
+if result.get("errors") or result.get("error"):
+    raise SystemExit(1)
 ```
 
-## Zero-downtime Rebuild (v4.8.0 Fase 5+)
+Configure the intended data directory before importing the server. A standalone
+script must not run alongside another writer using the same data directory.
+Foreground execution prevents normal script exit from abandoning a daemon
+worker; it does not protect against termination, power loss or storage failure.
 
-`nuclear_rebuild(swap=True)` (the new default) uses a staging collection to eliminate the RAG downtime window that the destructive rebuild (`swap=False`) creates.
+## Recovery after a failed document rollback
 
-**Workflow:**
+A mutation error can be followed by a second error while restoring its vectors.
+The original error remains visible. The server preserves the last committed
+document inventory and records the affected source in `document_repairs.json`,
+next to `index_metadata.json` (normally in `data_dir`). This is an exceptional
+recovery record, separate from the smart-reindex checkpoint.
 
-1. **Cleanup** — sweep staging collections older than 24h (crash-orphaned by a previous rebuild).
-2. **Snapshot** — save `self.collection`, `self.bm25_index`, `self._bm25_initialized`, `self._indexed_docs`, `self._source_to_docid` so populate/validate/swap failures can rollback to exact pre-call state.
-3. **Create staging** — `{collection_name}__staging_{unix_ts}` (timestamp avoids collisions with concurrent or previously-crashed rebuilds; same embedding function as prod so the swap is dimensionally compatible).
-4. **Populate** — temporary orchestrator rebind: `self.collection` points at staging, `self.bm25_index` is a throwaway `BM25Index()` so production BM25 keeps serving queries throughout the rebuild window. Full `index_all(force=True)` path runs against staging with byte-identical logic (no code fork).
-5. **Validate** (three gates, all must pass):
-   - `staging.count() >= baseline_count * 0.9` (10% loss threshold accommodates a small number of parser-skipped docs; larger loss indicates regression → abort).
-   - 4 of 5 canonical queries (`readme`, `function`, `import`, `return`, `class`) return at least one hit each. Threshold is 4/5 (not 5/5) so a genuinely small corpus that legitimately lacks e.g. `return` still passes.
-   - No query() call raises (catches embedding dim mismatches and other backend corruption that a raw count check would miss).
-6. **Atomic swap** — two-step `Collection.modify(name=...)`:
-   - Step 1: prod → `{prod}__old_{ts}` (frees the production name).
-   - Step 2: staging → `{prod}` (staging assumes the production name).
-   - Step 3: delete `__old_{ts}` (non-fatal — cleanup helper ages it out later if it fails).
-   - Race window between step 1 and step 2 is a single Python statement (~microseconds); if step 2 raises, rollback renames prod back so the previous state is still queryable.
-7. **Post-swap BM25 rebuild** — reconnect `self.collection` to the new prod, clear + rebuild BM25 from the swapped-in ChromaDB contents, invalidate query cache.
+Run `reindex_documents()` and inspect completion and errors. The next incremental
+scan reprocesses marked sources even when their timestamps are unchanged or a
+checkpoint lists them as completed. It also removes recorded chunks from failed
+new additions whose uncommitted source file no longer exists. Healthy sources
+keep their ordinary unchanged-file fast path. A record is removed only after
+the corrected vectors and document metadata have committed. FTS5 remains
+unavailable while repair is pending; treat retrieval as degraded until the
+repair run has completed and representative sources have been checked.
 
-**Failure modes:**
+The record validates the collection, canonical source containment and document
+version IDs. It is limited to 1 MiB, 1,024 affected sources and 16 version IDs per
+source; version IDs are not chunk IDs, so a document may have many more chunks.
+A malformed, oversized or mismatched record causes an explicit startup/reindex
+error and is preserved for inspection. Do not discard the record to hide that
+error: rebuild into isolated data and metadata paths if recovery cannot proceed
+against the existing state.
 
-| Failure                  | Effect on production                                             |
-| ------------------------ | ---------------------------------------------------------------- |
-| Validate fails           | Staging kept for inspection; snapshot restored; prod untouched   |
-| Swap step 1 fails        | Nothing renamed; snapshot restored; prod untouched               |
-| Swap step 2 fails        | Rollback of step 1; snapshot restored; prod queryable at old name if inner rollback fails |
-| Python crash mid-populate | Staging orphaned; next Orchestrator boot cleans it (24h TTL)     |
+If saving the record itself fails, the exception explains that recovery is not
+durable. `reindex_documents(force=True)` can use the in-memory repair state in
+the current process. After a restart without a saved record, a protected full
+rebuild may be needed to remove unregistered orphan chunks. Its 90% count gate
+can reject a legitimately reduced corpus; in that case rebuild into a separate
+data directory and retain the old index for inspection, rather than weakening
+the gate or deleting stored data. Use the path-isolation procedure below and
+keep the current embedding profile when recovering without a model change.
 
-**Storage impact:**
+A successful staging rebuild clears validated repair records only after
+publication and metadata persistence. A later record-cleanup failure is logged
+as a post-commit cleanup problem; it does not mean the published index was
+rolled back. These records support handled recovery, not an atomic transaction
+across source files, Chroma, FTS5 and metadata or a guarantee against power loss.
 
-- **During rebuild:** ~2x storage temporarily (both prod and staging on disk).
-- **After swap:** back to 1x (`__old_{ts}` deleted at end of swap).
-- **Stale cleanup:** 24h TTL — a staging orphan sits at most one day before automatic reclaim.
+## Smart-reindex checkpoints
 
-**Backwards compat:**
+Checkpoints are stored as `reindex_checkpoint.json` in the configured data
+directory. `resume=True` selects smart reindex even if `force` was omitted.
+Missing, malformed, incompatible or mismatched checkpoints are ignored and a
+fresh smart run begins.
 
-`nuclear_rebuild(swap=False)` preserves the legacy destructive behavior byte-for-byte (delete prod collection first, wipe SQLite files, rebuild from scratch, ~4min–40h window of empty queries). Preserved for tests, forced-cleanup edge cases, and situations where the 2x storage overhead of staging is unacceptable.
+The checkpoint records completed document IDs, a chunk counter, timestamps,
+operation, schema version and a configuration signature. The signature covers
+the embedding model, dimensions, query and passage prefixes, chunk size and
+overlap. Changing any of them invalidates the checkpoint. This validation is not
+a migration mechanism for existing vectors.
 
-## Escalation Rules of Thumb
+Checkpoint cadence is checked **between documents**: every 500 processed
+documents or after 30 seconds since the last save. One large document can take
+longer than 30 seconds, so this is not a strict wall-clock persistence guarantee.
+Metadata is saved alongside checkpoint progress, with each JSON file written
+through a temporary sibling and replacement. The pair of files is not one
+cross-file database transaction.
 
-- Reindex started, hours later still `active: false`? Check `last_error` in status. If Python was killed, the collection may be half-populated — run `reindex_documents(resume=True)` if the operation was smart, or `reindex_documents(force=True, full_rebuild=True)` if it was nuclear.
-- Getting `resume=True is only valid for smart reindex` error? Drop `full_rebuild=True`. Nuclear rebuild does not support resume by design (see above).
-- Checkpoint keeps invalidating with "config_signature mismatch"? Something in `config.yaml` (or the effective merged config) changed embedding model / dim / chunk size / chunk overlap between runs. Either revert the config or accept that the next reindex will start fresh.
+A successful smart run clears the checkpoint. A run with partial indexing errors
+retains progress so completed work need not be repeated while failed documents
+are retried. Keep the source corpus and effective configuration stable during
+recovery; validate changed sources afterwards.
+
+Example MCP sequence:
+
+```python
+reindex_documents(force=True)
+# Poll get_reindex_status() while active.
+
+# If the process was interrupted, restart the same configuration, then:
+reindex_documents(resume=True)
+# Poll again and inspect last_error and last_result.errors.
+```
+
+## Progress fields
+
+| Field inside `reindex` | Meaning |
+| --- | --- |
+| `operation` | Incremental, smart reindex or nuclear rebuild |
+| `progress`, `percent` | File-level progress |
+| `indexed`, `skipped`, `errors` | Document processing counters |
+| `chunks_processed` | Chunks committed by the running operation |
+| `chunks_total` | Rolling estimate, not a final count |
+| `throughput_cps` | Recent chunk throughput |
+| `eta_seconds` | Estimate based on remaining estimated chunks and throughput |
+| `checkpoint_saved_at` | Last checkpoint timestamp, or null |
+| `resumed` | Whether a compatible checkpoint was loaded |
+
+During warmup, throughput and ETA may be zero. Estimates change as documents with
+different sizes are processed. The throughput window retains at most 100 samples
+and drops samples older than 30 seconds; it does not measure GPU utilization.
+
+## Staging rebuild and rollback
+
+`nuclear_rebuild(swap=True)` is the default underlying full-rebuild operation:
+
+1. Clean up sufficiently old staging/backup collections from earlier operations.
+2. Preserve the current live state and create a separate staging collection.
+3. Populate staging using isolated document maps and BM25 state. The production
+   collection remains available for queries.
+4. Validate staging counts and backend queries. With a nonempty baseline, the
+   existing count gate requires at least 90% of the old chunk count, and at least
+   four of five sanity queries must return a result.
+5. Rename the production collection to a backup name and staging to the
+   production name. Publish the replacement state and persist metadata.
+6. Delete the old collection only after successful publication. Refresh derived
+   FTS5 state and invalidate query caches.
+
+The count and sanity-query gates catch gross failures. They are not a retrieval
+quality evaluation, and semantic queries returning any nearest neighbor do not
+prove the expected source was found. Use an independent set of expected-source
+queries for release validation.
+
+The renames and metadata publication are separate operations, **not one atomic
+ChromaDB transaction**. Handled failures restore the previous state while its
+vectors are still available. An abrupt crash between operations can leave
+staging or backup collections requiring inspection.
+
+| Failure point | Expected handling |
+| --- | --- |
+| Parsing/population or validation | Abort publication and retain the previous live state |
+| First rename | Keep the original collection |
+| Promotion rename | Attempt to restore the production name; report rollback failures |
+| State publication/metadata persistence | Restore the previous collection and maps while its backup still exists |
+| Cleanup after successful publication | Report/retain a leftover backup for later cleanup |
+| Process termination | Inspect persisted names and metadata before retrying; Python rollback did not run |
+
+Do not delete the data directory to resolve a generic opening error. Collection
+initialization now preserves stored data and reports the failure so permissions,
+model mismatches and storage errors can be investigated.
+
+## Storage and legacy mode
+
+Budget space for the old and new vector collections during staging, plus
+metadata, FTS5 and database journal/WAL overhead. Two similarly sized collections
+can approximately double their vector storage, but the complete directory size
+does not have a fixed multiplier.
+
+Staging/backup cleanup uses a 24-hour age threshold and runs at startup and before
+rebuilds. It is not a continuously scheduled timer: an orphan may remain longer
+than one day if no cleanup opportunity occurs.
+
+A retired collection also needs a persisted retirement marker linked to the
+UUID of its successfully committed replacement. Expiration is allowed only
+while that exact replacement remains the primary collection. An empty primary
+created on a later startup does not authorize deleting an older backup.
+Unmarked legacy backups and ambiguous recovery copies remain preserved rather
+than expiring automatically; inspect their data and metadata before deciding
+which copy to restore or remove.
+
+The Python API retains `nuclear_rebuild(swap=False)` as a legacy destructive
+mode. It deletes the active collection before indexing and can leave an empty
+or partial index if interrupted. It is not the default MCP rebuild path.
+Use a verified backup and an exclusive maintenance window if this legacy mode
+is deliberately chosen.
+
+## Changing the embedding model
+
+The embedding model, vector dimensions and passage prefix define the stored
+vector space. Incremental indexing cannot safely mix profiles. Even models
+with the same dimensions can produce incompatible vectors.
+
+A model change can prevent the old collection from opening before an MCP tool is
+available. A safe migration therefore uses a separate data directory:
+
+1. Preserve the old configuration and index. Create a migration configuration
+   using the new model, dimensions and required query/passage prefixes.
+2. Keep `paths.documents_dir` pointing to the existing source corpus. Set
+   `paths.data_dir` to a new empty directory; ChromaDB, document metadata,
+   checkpoints and FTS5 must all be isolated. Merely changing
+   `search.collection_name` is not sufficient isolation.
+3. Start the migration instance with its own working/configuration directory.
+   Disable its watcher while validating, and avoid document mutation tools
+   against the shared source corpus.
+4. Index the corpus, inspect errors and verify counts, expected sources and
+   retrieval quality. Confirm the actual embedding provider and memory use.
+5. Point clients to the validated replacement configuration. Retain the old
+   index until the migration is accepted; reverting clients then provides a
+   straightforward rollback.
+
+See [configuration](CONFIGURATION.md) for path resolution and
+[GPU setup](gpu-setup.md) for provider-specific requirements. The multilingual
+preset also requires its matching query and passage prefixes.
+
+## FTS5 recovery is separate
+
+FTS5 is derived from ChromaDB. Its migration marker and chunk counters are
+separate from the smart-reindex checkpoint. See
+[the FTS5 migration runbook](runbooks/fts5_migration.md) before rebuilding or
+removing that derived database.

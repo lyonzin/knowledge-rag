@@ -26,20 +26,16 @@ set -euo pipefail
 
 REPO_RAW="https://raw.githubusercontent.com/lyonzin/knowledge-rag/master/skills"
 
-# Skill → category mapping (matches the folder layout)
-declare -A SKILL_CATEGORY=(
-  ["rag-check-first"]="foundation"
-  ["rag-cite-sources"]="foundation"
-  ["rag-onboard-context"]="foundation"
-  ["rag-deep-dive"]="workflow"
-  ["rag-web-fallback"]="workflow"
-  ["rag-troubleshoot"]="workflow"
-  ["rag-code-review"]="workflow"
-  ["rag-index-decisions"]="maintenance"
-  ["rag-evaluate-quality"]="maintenance"
-  ["rag-security-first"]="domain"
-)
-REPO_TARBALL="https://github.com/lyonzin/knowledge-rag/archive/refs/heads/master.tar.gz"
+# macOS ships Bash 3.2, which has indexed arrays but no associative arrays.
+skill_category() {
+  case "$1" in
+    rag-check-first|rag-cite-sources|rag-onboard-context) printf '%s' foundation ;;
+    rag-deep-dive|rag-web-fallback|rag-troubleshoot|rag-code-review) printf '%s' workflow ;;
+    rag-index-decisions|rag-evaluate-quality) printf '%s' maintenance ;;
+    rag-security-first) printf '%s' domain ;;
+    *) return 1 ;;
+  esac
+}
 
 SKILLS=(
   "rag-check-first"
@@ -182,7 +178,8 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 SOURCE_MODE=""
-TMP_DIR=""
+pending_temp=""
+trap 'if [ -n "$pending_temp" ]; then rm -f -- "$pending_temp"; fi' EXIT
 
 if [ -f "$SCRIPT_DIR/foundation/rag-check-first/SKILL.md" ]; then
   SOURCE_MODE="local"
@@ -248,38 +245,48 @@ for skill in "${TO_INSTALL[@]}"; do
     continue
   fi
 
-  cat="${SKILL_CATEGORY[$skill]}"
+  category="$(skill_category "$skill")"
+
+  if [ -d "$dest" ]; then
+    warn "Destination is a directory: $dest — skipping"
+    SKIPPED=$((SKIPPED+1))
+    continue
+  fi
+
+  # Same-directory temporary file keeps replacements atomic and preserves an
+  # existing skill if a copy or download fails after writing partial content.
+  pending_temp="$(mktemp "$TARGET/.${skill}.XXXXXX")"
+  transferred=false
 
   if [ "$SOURCE_MODE" = "local" ]; then
-    src="$SOURCE_DIR/${cat}/${skill}/SKILL.md"
+    src="$SOURCE_DIR/${category}/${skill}/SKILL.md"
     if [ ! -f "$src" ]; then
       warn "Source missing: $src — skipping"
-      SKIPPED=$((SKIPPED+1))
-      continue
+    elif cp "$src" "$pending_temp"; then
+      transferred=true
     fi
-    cp "$src" "$dest"
-    ok "installed $skill.md"
-    COPIED=$((COPIED+1))
   else
-    url="$REPO_RAW/${cat}/${skill}/SKILL.md"
+    url="$REPO_RAW/${category}/${skill}/SKILL.md"
     if command -v curl >/dev/null 2>&1; then
-      if curl -fsSL --retry 3 "$url" -o "$dest"; then
-        ok "downloaded $skill.md"
-        COPIED=$((COPIED+1))
-      else
-        warn "download failed: $url — skipping"
-        SKIPPED=$((SKIPPED+1))
+      if curl -fsSL --retry 3 "$url" -o "$pending_temp"; then
+        transferred=true
       fi
     else
-      if wget -q -O "$dest" "$url"; then
-        ok "downloaded $skill.md"
-        COPIED=$((COPIED+1))
-      else
-        warn "download failed: $url — skipping"
-        SKIPPED=$((SKIPPED+1))
+      if wget -q -O "$pending_temp" "$url"; then
+        transferred=true
       fi
     fi
   fi
+
+  if $transferred && [ -s "$pending_temp" ] && mv -f -- "$pending_temp" "$dest"; then
+    ok "installed $skill.md"
+    COPIED=$((COPIED+1))
+  else
+    warn "Transfer failed for $skill — existing skill preserved"
+    rm -f -- "$pending_temp"
+    SKIPPED=$((SKIPPED+1))
+  fi
+  pending_temp=""
 done
 
 # ----------------------------------------------------------------------------

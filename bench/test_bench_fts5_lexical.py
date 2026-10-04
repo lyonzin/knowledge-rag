@@ -1,6 +1,6 @@
 """FTS5 lexical fast-path microbenchmarks (Fase 5, ADR-004 gate).
 
-Tracked metrics for the v4.9.0 default-flip gate:
+Historical metric names for the v4.9.0 default-flip gate:
     bench_fts5_lexical_cold_p95           BENCH-001 target p95 <= 10ms
     bench_fts5_lexical_hot_p95            BENCH-002 target p95 <=  2ms
 
@@ -14,7 +14,10 @@ BENCH-003 and BENCH-004 are executed by re-running the existing
 ``bench/test_bench_search.py`` suite with the FTS5 feature toggled via
 env override (see ``bench_v4_9_0_gate.md`` for the CI procedure). They
 are documented here — not duplicated — so the baseline metric IDs stay
-stable between comparisons.
+stable between comparisons. These pytest-benchmark runs compare medians;
+they do not enforce p95 acceptance targets. Calibration/repeated rounds
+warm SQLite caches even for the historical ``cold`` test name. Neither
+test measures an operating-system cold-cache query.
 
 The ``corpus_3865_docs`` fixture from PRD ``_tests.md`` was not shipped
 as a shared fixture in earlier fases; this file builds an equivalent
@@ -41,7 +44,7 @@ def _seed_fts5_corpus(index: Fts5LexicalIndex) -> None:
     ranker without dominating latency with row-materialisation cost.
     """
     for i in range(_CORPUS_SIZE):
-        marker = _LEXICAL_QUERIES[i % len(_LEXICAL_QUERIES)] if i % 100 == 0 else ""
+        marker = _LEXICAL_QUERIES[(i // 100) % len(_LEXICAL_QUERIES)] if i % 100 == 0 else ""
         content = f"document {i} kerberoast bloodhound impacket privilege escalation lateral movement notes on {marker}"
         index.add_document(
             chunk_id=f"chunk-{i}",
@@ -66,31 +69,24 @@ def fts5_index(tmp_path_factory):
 
 @pytest.mark.parametrize("query", _LEXICAL_QUERIES)
 def test_bench_fts5_lexical_cold(benchmark, fts5_index, query):
-    """BENCH-001 — cold FTS5 lookup on a 3865-doc corpus (rerank OFF default).
-
-    Target: p95 <= 10ms per ADR-004 gate G1 (measured post-run by
-    ``scripts/check_perf_regression.py`` against the hybrid baseline).
-    """
+    """BENCH-001 — repeated FTS5 lookups without an explicit warm-up call."""
 
     def run():
         return fts5_index.search(query, top_k=10)
 
+    benchmark.extra_info["workload_version"] = 2
     result = benchmark(run)
-    assert isinstance(result, list)
+    assert 9 <= len(result) <= 10
 
 
 @pytest.mark.parametrize("query", _LEXICAL_QUERIES)
 def test_bench_fts5_lexical_hot(benchmark, fts5_index, query):
-    """BENCH-002 — hot FTS5 lookup (SQLite page-cache warmed by BENCH-001).
-
-    Target: p95 <= 2ms. Ordering matters — this test relies on the
-    ``fts5_index`` module-scoped fixture having been queried already by
-    BENCH-001, so pytest's default file-order collection preserves the
-    warm-cache semantics.
-    """
+    """BENCH-002 — repeated FTS5 lookups with an explicit warm-up call."""
 
     def run():
         return fts5_index.search(query, top_k=10)
 
+    fts5_index.search(query, top_k=10)
+    benchmark.extra_info["workload_version"] = 2
     result = benchmark(run)
-    assert isinstance(result, list)
+    assert 9 <= len(result) <= 10

@@ -18,7 +18,7 @@ Run this skill:
 - **After a major reindex** (the corpus content changed under you)
 - **When the user says "I just indexed new docs"** or similar
 
-**Do NOT run repeatedly** — once per session is usually enough. The `query_cache` keeps it cheap even if you do.
+**Do NOT run repeatedly** — once per session is usually enough. The query cache applies to searches; it does not cache every inspection tool.
 
 ---
 
@@ -40,7 +40,7 @@ That mental map informs every subsequent decision: whether to search first, whet
    ```
    get_index_stats()
    ```
-   Note: `documents_count`, `chunks_count`, `cache_hit_rate`, `embedding_model`, `embedding_dim`.
+   Read the nested `stats` object: `total_documents`, `total_chunks`, `query_cache.hit_rate`, `embedding_model`, and `embedding_dim`.
 
 2. **Enumerate categories:**
    ```
@@ -55,14 +55,15 @@ That mental map informs every subsequent decision: whether to search first, whet
 
 4. **Optionally, if you need concrete file names,** call:
    ```
-   list_documents(category="<top-category>", limit=10)
+   list_documents(category="<top-category>")
    ```
+   This tool has no `limit` argument and returns the whole category. For a large category, prefer a targeted `search_knowledge` call with `max_results=3`.
 
 5. **Store the summary internally** — do not necessarily surface it to the user unless they ask. The value is that YOU now know:
    - "The corpus has 15K chunks across 8 categories"
    - "Biggest categories are security (5K), development (3K), research (2K)"
    - "Search for `mitre attack` returned 3 solid hits — MITRE content is well indexed"
-   - "Search for `kubernetes` returned nothing — no k8s docs indexed, defer to general knowledge"
+   - "Search for `kubernetes` returned nothing — try synonyms or inspect relevant categories before concluding the topic is absent"
 
 6. **From here on, `rag-check-first` handles every subsequent request** with this context in mind.
 
@@ -77,7 +78,7 @@ User: *"Hi. I want to add a new REST endpoint."*
 Agent (internal, before answering):
 ```
 get_index_stats() → 12,043 chunks / 3,214 docs, cache hit 0%, model bge-small-en-v1.5
-list_categories() → {development: 1200, security: 800, general: 214, adrs: 45}
+list_categories() → categories {development: 1200, security: 800, general: 1169, adrs: 45}
 search_knowledge(query="REST endpoint", max_results=3) → 3 hits, top score 0.71
 
 Now I know: this project has ADRs indexed. I should look at those before designing the endpoint.
@@ -93,8 +94,8 @@ User: *"We have a suspected LSASS dump alert. Can you help triage?"*
 Agent (internal):
 ```
 get_index_stats() → 45,000 chunks / 5,800 docs
-list_categories() → {redteam: 12000, blueteam: 8000, ctf: 5000, mitre: 4200}
-search_knowledge(query="LSASS credential dump", max_results=5) → 8 hits, top score 0.89
+list_categories() → categories {redteam: 2400, blueteam: 1800, ctf: 1000, mitre: 600}
+search_knowledge(query="LSASS credential dump", max_results=5) → 5 hits
 
 Now I know: this is a security-focused RAG. LSASS is well-covered. Full triage is
 going to be corpus-driven.
@@ -122,10 +123,10 @@ would you like to point me at your docs folder so we can index them first?"
 
 ## Edge cases
 
-- **Very large corpus (>100K chunks)** — the probing queries stay fast (RAG is designed for this), no worry.
-- **Cache warm from prior session** — `get_index_stats` returns cache_hit_rate > 0, meaning past queries are cached. That is fine and useful, no action needed.
+- **Very large corpus (>100K chunks)** — keep probes bounded and measure response time. First-use embedding/BM25 initialization and available RAM can affect latency.
+- **Cache already used** — `stats.query_cache.hit_rate > 0` describes hits during this process lifetime. It does not prove an entry for the next query remains valid; the cache is in memory and has a TTL.
 - **User immediately asks a task-specific question** — do onboarding silently in the background and continue answering. Do not stall the user with a "let me look around first" message unless the corpus is empty.
-- **Categories are empty (`{}`)** — the user has not enabled `category_mappings` in `config.yaml`. Fall back to unbounded searches; do not filter by category.
+- **Categories are empty (`{}`)** — inspect index counts and indexing errors. An empty category map alone does not identify the cause. Search without a category filter while keeping `max_results` bounded.
 
 ---
 

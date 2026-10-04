@@ -4,10 +4,77 @@ Mocks embeddings and ChromaDB to avoid model downloads in CI.
 """
 
 import sys
+import threading
+import uuid
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+
+@pytest.fixture
+def isolated_orchestrator(tmp_path, monkeypatch):
+    """Real Chroma mutations with deterministic vectors and isolated corpus files."""
+    import chromadb
+
+    from mcp_server import server
+    from mcp_server.ingestion import DocumentParser
+
+    class Embeddings:
+        value = 1.0
+        fail = False
+
+        def __call__(self, input):
+            if self.fail:
+                raise RuntimeError("embedding failure")
+            return [[self.value, 1.0] for _ in input]
+
+        @staticmethod
+        def name():
+            return "test-lifecycle"
+
+        def embed_query(self, input):
+            return self(input)
+
+        @staticmethod
+        def is_legacy():
+            return True
+
+    docs = tmp_path / "documents"
+    docs.mkdir()
+    monkeypatch.setattr(server.config, "documents_dir", docs)
+    monkeypatch.setattr(server.config, "data_dir", tmp_path / "data")
+    monkeypatch.setattr(server.config, "embedding_dim", 2)
+    monkeypatch.setattr(server.config, "fts5_enabled", False)
+    monkeypatch.setattr(server.config, "collection_name", "test-" + uuid.uuid4().hex)
+    orch = object.__new__(server.KnowledgeOrchestrator)
+    orch._index_lock = threading.RLock()
+    orch._publication_lock = server.PublicationLock()
+    orch._bm25_build_lock = threading.Lock()
+    orch._staging_target = None
+    orch.embed_fn = Embeddings()
+    orch.chroma_client = chromadb.EphemeralClient()
+    orch.collection = orch.chroma_client.create_collection(
+        server.config.collection_name, embedding_function=orch.embed_fn
+    )
+    orch.parser = DocumentParser()
+    orch.bm25_index = server.BM25Index()
+    orch._bm25_initialized = False
+    orch._indexed_docs = {}
+    orch._source_to_docid = {}
+    orch.query_cache = server.QueryCache()
+    orch._reindex_progress = {"active": False}
+    orch._metadata_file = tmp_path / "data" / "index_metadata.json"
+    orch._checkpoint_file = tmp_path / "data" / "reindex_checkpoint.json"
+    orch.fts5_index = None
+    orch.query_router = None
+    yield orch
+    if orch.fts5_index is not None:
+        orch.fts5_index.close()
+    for collection in orch.chroma_client.list_collections():
+        if collection.name.startswith(server.config.collection_name):
+            orch.chroma_client.delete_collection(collection.name)
+
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))

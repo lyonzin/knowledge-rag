@@ -6,8 +6,8 @@
 # Run on the whole repo manually:
 #     pre-commit run --all-files
 #
-# CI runs the same hooks via .github/workflows/quality-gate.yml so contributors
-# can never bypass them by skipping pre-commit locally.
+# CI independently runs its configured lint, security and project gates.
+# Run these local hooks too; CI does not execute every hook in this file.
 
 default_install_hook_types: [pre-commit, commit-msg]
 default_stages: [pre-commit]
@@ -19,7 +19,8 @@ repos:
     rev: v5.0.0
     hooks:
       - id: trailing-whitespace
-        exclude: '\.md$'  # markdown sometimes uses trailing space for line breaks
+        # Markdown line breaks and the generated Matplotlib SVG retain spaces.
+        exclude: '(\.md$|^docs/star-history\.svg$)'
       - id: end-of-file-fixer
       - id: check-yaml
         args: [--unsafe]  # GHA workflows use !!tags
@@ -34,7 +35,7 @@ repos:
 
   # ── Ruff: lint + format (Python) ──────────────────────────────────────────
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.14.4
+    rev: v0.16.10
     hooks:
       - id: ruff
         args: [--fix]

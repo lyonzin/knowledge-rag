@@ -15,10 +15,9 @@ harmless but rebuild progress becomes fuzzy.
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 import time
-from datetime import datetime, timezone
+from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -55,9 +54,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def _resolve_data_dir(cli_arg: Path | None) -> Path:
     if cli_arg is not None:
-        cli_arg.mkdir(parents=True, exist_ok=True)
-        os.environ["KRAG_DATA_DIR"] = str(cli_arg)
-        return cli_arg
+        return cli_arg.expanduser().resolve()
     from mcp_server.config import config
 
     return Path(config.data_dir)
@@ -71,31 +68,24 @@ def _drop_existing(data_dir: Path) -> None:
             path.unlink(missing_ok=True)
             print(f"[BUILD-FTS5] removed {path}")
         except OSError as exc:
-            print(f"[BUILD-FTS5] could not remove {path}: {exc}")
+            raise RuntimeError(f"Could not remove {path}: {exc}") from exc
 
 
-def _iter_chroma_chunks(collection: Any) -> list[tuple[str, str, str, str]]:
-    count = collection.count()
-    if count == 0:
-        return []
-    fetched = collection.get(include=["documents", "metadatas"], limit=count)
-    ids = fetched.get("ids") or []
-    docs = fetched.get("documents") or []
-    metas = fetched.get("metadatas") or []
-    rows: list[tuple[str, str, str, str]] = []
-    for chunk_id, content, meta in zip(sorted(ids), docs, metas):
-        # Preserve alignment with sorted ids
-        idx = ids.index(chunk_id)
-        meta_i = metas[idx] or {}
-        rows.append(
-            (
+def _iter_chroma_chunks(collection: Any) -> Iterator[tuple[str, str, str, str]]:
+    """Keep documents and metadata aligned while streaming bounded pages."""
+    batch_size = 500
+    for offset in range(0, collection.count(), batch_size):
+        fetched = collection.get(include=["documents", "metadatas"], limit=batch_size, offset=offset)
+        for chunk_id, content, meta in zip(
+            fetched.get("ids") or [], fetched.get("documents") or [], fetched.get("metadatas") or []
+        ):
+            metadata = meta or {}
+            yield (
                 str(chunk_id),
-                str(docs[idx] or ""),
-                str(meta_i.get("filename", "")),
-                str(meta_i.get("category", "")),
+                str(content or ""),
+                str(metadata.get("filename", "")),
+                str(metadata.get("category", "")),
             )
-        )
-    return rows
 
 
 def _open_index(data_dir: Path) -> "Fts5LexicalIndex":
@@ -106,39 +96,31 @@ def _open_index(data_dir: Path) -> "Fts5LexicalIndex":
     return Fts5LexicalIndex(db_path=db, state_path=state)
 
 
-def _open_collection(data_dir: Path) -> Any:
+def _open_collection(data_dir: Path | None) -> Any:
+    """Honor the configured Chroma path unless a data-directory override is explicit."""
     import chromadb
 
     from mcp_server.config import config
 
-    client = chromadb.PersistentClient(path=str(config.chroma_dir))
-    return client.get_or_create_collection(name=config.collection_name)
+    chroma_dir = Path(config.chroma_dir) if data_dir is None else data_dir / "chroma_db"
+    if not (chroma_dir / "chroma.sqlite3").is_file():
+        raise FileNotFoundError(f"No existing ChromaDB database at {chroma_dir}")
+    client = chromadb.PersistentClient(path=str(chroma_dir))
+    return client.get_collection(name=config.collection_name, embedding_function=None)
 
 
-def _run_migration_sync(index: "Fts5LexicalIndex", rows: list[tuple[str, str, str, str]], verbose: bool) -> None:
-    total = len(rows)
-    started_at = datetime.now(timezone.utc).isoformat()
-    index._write_state("in_progress", total, 0, started_at, None, None)  # noqa: SLF001
-    docs_indexed = 0
-    batch: list[tuple[str, str, str, str]] = []
-    last_percent = -10
-    for row in rows:
-        batch.append(row)
-        if len(batch) >= 100:
-            index._populate_batch(batch)  # noqa: SLF001
-            docs_indexed += len(batch)
-            batch = []
-            index._write_state("in_progress", total, docs_indexed, started_at, None, None)  # noqa: SLF001
-            percent = int(100 * docs_indexed / max(1, total))
-            if verbose or percent >= last_percent + 10:
-                print(f"[BUILD-FTS5] {percent}% ({docs_indexed}/{total})")
-                last_percent = percent
-    if batch:
-        index._populate_batch(batch)  # noqa: SLF001
-        docs_indexed += len(batch)
-    completed_at = datetime.now(timezone.utc).isoformat()
-    index._write_state("complete", total, docs_indexed, started_at, completed_at, None)  # noqa: SLF001
-    print(f"[BUILD-FTS5] complete: {docs_indexed} docs indexed")
+def _run_migration_sync(index: "Fts5LexicalIndex", collection: Any, verbose: bool) -> None:
+    """Reuse transactional migration and its failure/checkpoint handling."""
+    from mcp_server.fts5_index import Fts5MigrationError
+
+    def report(done: int, total: int) -> None:
+        if verbose:
+            print(f"[BUILD-FTS5] {done}/{total}")
+
+    index._migration_worker(lambda: _iter_chroma_chunks(collection), collection.count(), 0, report)  # noqa: SLF001
+    state = index.state.read() or {}
+    if state.get("status") != "complete":
+        raise Fts5MigrationError(str(state.get("error", "FTS5 rebuild did not complete")))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -146,19 +128,14 @@ def main(argv: list[str] | None = None) -> int:
     data_dir = _resolve_data_dir(args.data_dir)
     print(f"[BUILD-FTS5] data_dir={data_dir} force={args.force}")
 
+    start = time.time()
+    collection = _open_collection(None if args.data_dir is None else data_dir)
     if args.force:
         _drop_existing(data_dir)
 
-    start = time.time()
-    collection = _open_collection(data_dir)
-    rows = _iter_chroma_chunks(collection)
-    if not rows:
-        print("[BUILD-FTS5] corpus is empty — nothing to index")
-        return 0
-
     index = _open_index(data_dir)
     try:
-        _run_migration_sync(index, rows, args.verbose)
+        _run_migration_sync(index, collection, args.verbose)
     finally:
         index.close()
 

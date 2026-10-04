@@ -62,7 +62,7 @@ def test_ut033_string_enabled_falls_back_to_default(monkeypatch, capsys):
         {"search": {"lexical_fast_path": {"enabled": "true"}}},
     )
     assert cfg.fts5_enabled is False
-    captured = capsys.readouterr().out
+    captured = capsys.readouterr().err
     assert "wrong type" in captured or "invalid" in captured
 
 
@@ -73,7 +73,7 @@ def test_ut034_empty_patterns_list_warns(monkeypatch, capsys):
         {"search": {"lexical_fast_path": {"enabled": True, "patterns": []}}},
     )
     assert cfg.fts5_patterns == []
-    captured = capsys.readouterr().out
+    captured = capsys.readouterr().err
     assert "empty" in captured.lower() or "will never" in captured.lower()
 
 
@@ -106,7 +106,7 @@ def test_ut037_overly_broad_pattern_warns(monkeypatch, capsys):
     """UT-037: pattern '.+' logs a broad-pattern warning."""
     yaml_payload = {"search": {"lexical_fast_path": {"patterns": [".+"]}}}
     _reload_config(monkeypatch, yaml_payload)
-    captured = capsys.readouterr().out
+    captured = capsys.readouterr().err
     assert "overly broad" in captured or "broad" in captured.lower()
 
 
@@ -115,5 +115,5 @@ def test_ut038_high_pattern_count_warns(monkeypatch, capsys):
     patterns = [rf"CODE{i}-\d+" for i in range(25)]
     yaml_payload = {"search": {"lexical_fast_path": {"patterns": patterns}}}
     _reload_config(monkeypatch, yaml_payload)
-    captured = capsys.readouterr().out
+    captured = capsys.readouterr().err
     assert "high pattern count" in captured.lower() or "25" in captured

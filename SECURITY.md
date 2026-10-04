@@ -20,12 +20,12 @@ Anything requiring the attacker to already own the local filesystem is **out of 
 
 | Vector | CWE / OWASP | Mitigation | Since |
 |---|---|---|---|
-| Path traversal in `add_document`, `update_document`, `remove_document`, `get_document`, `search_similar`, `add_document_from_file` | CWE-22 | `security.validate_path_within(base, candidate)` — `Path.resolve()` + `is_relative_to()`. Rejects `..`, absolute paths, NUL bytes, NTFS alternate data streams. Applied to **every** CRUD tool. | v4.6.0 |
-| Symlink escape via `os.walk(followlinks=True)` | CWE-59 | Every walk yield **and** every file candidate is containment-checked against the base with a `Path.is_symlink()` fast-path `lstat` so the non-symlink case costs one syscall. `followlinks=True` is preserved — option (a) was rejected because `open()` follows symlinks regardless. | v4.6.0 |
+| Path traversal in document CRUD and retrieval tools | CWE-22 | `security.validate_path_within(base, candidate)` resolves the candidate against the documents directory and checks containment. Traversal and absolute paths outside that directory, NUL bytes, and NTFS alternate data streams are rejected. Absolute paths inside the corpus are supported. There is no public `add_document_from_file` MCP tool. | v4.6.0 |
+| Symlink escape or directory cycles during discovery | CWE-59 | Check resolved walk roots, child directories, and file candidates against the corpus root; track visited directories to terminate cycles. Links contained within the corpus remain supported. | Current unreleased audit fixes; the previous v4.6.0 claim was not backed by active integration tests |
 | Bearer auth was declared but never enforced — operators believed the SSE/HTTP transport was protected when it was not | CWE-287 | Stdlib ASGI middleware (`security.BearerAuthMiddleware`) enforces `Authorization: Bearer <token>` with `hmac.compare_digest` (constant-time). Returns `401 + WWW-Authenticate: Bearer realm="knowledge-rag"` on missing/wrong tokens. `lifespan`/`websocket` scopes pass through. Empty token → `WARN "bearer auth disabled"` (backwards compatible for pre-4.6 users who set the field but had never really been protected). | v4.6.0 |
-| Prompt injection via externally sourced content (`add_from_url`, PDFs, DOCX, HTML) — retrieved text carries model control tokens or "ignore previous instructions" framing, and the *consuming* LLM executes it | OWASP **LLM01:2025** | Three-layer defense in `mcp_server/security.py`: **(1)** neutralize known injection sentinels (`<\|im_start\|>`, `<\|system\|>`, `[INST]`, `<<SYS>>`, `### system:`, forged `</external_content>`) by inserting `​` after the first character — idempotent, human-readable, tokenizer-broken; **(2)** wrap chunks in `<external_content source="..." sha256="...">…</external_content>` so provenance survives restart + reindex; **(3)** emit `external_source: true` + `content_hash` on retrieval so the calling LLM can weight external content differently. **Ordering is pinned by a regression test** — neutralize **before** wrap, otherwise a payload can ship `</external_content>` and escape its own fence. | v4.6.0 |
-| Sensitive data indexed by accident (`.env`, credentials files) | (design — whitelist) | Ingestion uses an explicit allowlist (`_SUPPORTED_SUFFIXES` in `mcp_server/config.py`). `.env`, `.pem`, `.key`, dotfiles, and anything else outside the 18 supported suffixes are **never** enumerated by the walker. User awareness in docs — do not commit `data/` (ChromaDB indices may contain sensitive text) or `documents/` if it contains sensitive material. | v4.0+ |
-| Rate limiting on MCP endpoints | CWE-770 (partial) | Token-bucket limiter (`mcp_server/ratelimit.py`) — configurable `requests_per_minute` + `burst`. Off by default; recommended on for public-facing SSE/HTTP transports. Applied via the `@rate_limited` decorator on MCP tools. | v4.0+ |
+| Prompt injection through externally sourced content | OWASP **LLM01:2025** | `add_from_url` neutralizes a finite set of known control-token sentinels before wrapping the stored document in a provenance fence. Parsing preserves detected provenance on documents and chunks. Ordinary files without that marker are not automatically rewritten. These measures do not reliably detect arbitrary instructions or make retrieved text trustworthy; the consuming client must treat retrieved content as data. | URL sanitization v4.6.0; parser propagation verified by the current audit |
+| Sensitive data indexed by accident | (design — allowlist) | Discovery uses configured supported extensions/filenames and exclusion patterns. This is not a secret scanner: a supported `.json`, `.yaml`, `.txt`, or hidden `.md` file can contain credentials. Keep sensitive material outside the corpus or explicitly exclude it, and do not publish index data. | v4.0+ |
+| Rate limiting on MCP endpoints | CWE-770 (partial) | A sliding-window counter in `mcp_server/ratelimit.py` bounds tool calls to `requests_per_minute + burst` in the window. All clients currently share the same `default` bucket. Disabled by default. | v4.0+ |
 | Supply chain — PyPI publish credential theft | CWE-1104 | **PyPI Trusted Publishing via OIDC** (`id-token: write` in `.github/workflows/release.yml`, `pypa/gh-action-pypi-publish@release/v1`). No long-lived API tokens on GitHub. | v4.0+ |
 | Deserialization of untrusted input | CWE-502 | Only `json.loads` and `yaml.safe_load` are used (`grep -rE "import pickle|yaml\.load\b"` returns empty). `pickle`, `yaml.load` (unsafe), `shelve`, and `marshal` are all absent. | v4.0+ |
 | Command injection via tool arguments | CWE-78 | No `os.system` / `subprocess.run(shell=True)` on user-controlled strings anywhere in `mcp_server/`. Verified by `bandit` (`B605`, `B602`) on every PR. | v4.0+ |
@@ -41,12 +41,12 @@ Anything requiring the attacker to already own the local filesystem is **out of 
 
 | Version | Status |
 |---|---|
-| **4.6.x** | ✅ Active — Phase 1 security hardening baseline |
-| 4.5.x | ⚠️ Security-only patches for **30 days** after 4.6.0 |
-| 4.4.x | ❌ EOL — upgrade to 4.6 recommended |
-| < 4.0 | ❌ EOL |
+| Latest published 4.10.x release | Current maintenance line; check release notes for the fixes actually included |
+| Unreleased branches / pull requests | Under review; not a released security guarantee |
+| Previous minor release | Security patch window of 30 days after the next minor release, under the policy below |
+| Older releases | Unsupported; upgrade to the maintained release |
 
-When a new minor version ships, the previous minor gets one final security patch window and is then unsupported.
+When a new minor version ships, the previous minor gets a final 30-day security patch window and is then unsupported. The version embedded in a development branch does not prove that its fixes have been published. Consult [releases](https://github.com/lyonzin/knowledge-rag/releases) and the associated changelog.
 
 ---
 
@@ -58,10 +58,7 @@ When a new minor version ships, the previous minor gets one final security patch
 
 **→ https://github.com/lyonzin/knowledge-rag/security/advisories/new**
 
-The link above works for any GitHub user — no collaborator status required.
-Reports arrive as GitHub notifications on the maintainer's account and are
-handled inside the repo's `Security` tab. No external email is required and
-none is used.
+Use the private reporting form if it is available to your account. Reports are handled in GitHub's security workflow. No external email address is used for reporting.
 
 If you cannot use the GitHub Security Advisory form (rare), open a public
 issue with the label `security-triage` **describing only that you have a
@@ -115,7 +112,7 @@ Automated dependency updates:
 Release integrity:
 
 - **PyPI Trusted Publishing** (OIDC) — no long-lived API tokens on GitHub.
-- Release commits are signed by the tag creator; the release workflow verifies the ref before publishing.
+- Release publishing is triggered by the repository's release workflow. Do not infer signed commits or verified signatures merely from a successful build; inspect the specific release and its available provenance.
 
 ---
 
@@ -123,10 +120,11 @@ Release integrity:
 
 - **Do not commit `data/`** — the ChromaDB indices contain the raw text of everything you indexed.
 - **Do not commit `documents/`** if it holds sensitive material — check your `.gitignore`.
-- **Rotate `auth_bearer_token`** if it was ever pasted into a shell history or shared config.
+- **Rotate `server.auth.bearer_token`** if it was ever pasted into a shell history or shared config.
 - **Enable rate limiting** for any deployment reachable off `localhost` (`server.rate_limit.enabled: true` in `config.yaml`).
-- **Review `add_from_url` sources** — `knowledge-rag` defends against prompt injection in retrieved content, but it should not be pointed at hostile domains indiscriminately.
-- **Prefer `stdio` transport** for single-user local usage. Use `sse` or `streamable-http` only with `auth_bearer_token` set and rate limiting enabled.
+- **Review `add_from_url` sources** — token neutralization is a limited mitigation, not a prompt-injection prevention guarantee. HTTP(S) URL fetching is not a network-isolation boundary.
+- **Prefer `stdio` transport** for single-user local usage. For a network deployment, set `server.auth.bearer_token` and apply appropriate TLS and access controls.
+- **Treat the metrics endpoint separately** — it currently binds to `0.0.0.0` and does not inherit MCP bearer authentication. Enable and expose it deliberately.
 - **Do not disable TLS verification** on the fetch path — the URL loader defaults to strict verification for a reason.
 
 ---
@@ -161,4 +159,4 @@ This project does not currently offer a paid bug bounty. Volunteer contributions
 
 ---
 
-Thank you for helping keep `knowledge-rag` and its 70+ enterprise users safe.
+Security claims should be supported by active regression tests and released fixes. Expected-failure tests and planned defenses are not equivalent to a shipped mitigation.

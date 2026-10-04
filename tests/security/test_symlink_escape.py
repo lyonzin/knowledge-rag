@@ -92,7 +92,6 @@ def test_symlink_pointing_inside_corpus_is_contained(corpus_with_escape):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(reason="integration with parse_directory pending v4.6.0", strict=False)
 def test_parse_directory_never_yields_content_from_outside(corpus_with_escape):
     """The indexer must not surface host files reachable only via a link."""
     base, outside = corpus_with_escape
@@ -119,6 +118,15 @@ def test_parse_directory_still_indexes_legitimate_documents(corpus_with_escape):
     assert any("Owned by the operator" in d.content for d in docs)
 
 
+def test_relative_directory_retains_symlink_containment(corpus_with_escape, monkeypatch):
+    base, outside = corpus_with_escape
+    monkeypatch.chdir(base.parent)
+    docs = DocumentParser().parse_directory(Path("documents"))
+    assert docs
+    assert all(doc.source.resolve().is_relative_to(base.resolve()) for doc in docs)
+    assert not any(doc.source.resolve() == outside / "stolen.md" for doc in docs)
+
+
 def test_parse_directory_without_symlinks_is_unaffected(tmp_path):
     """A plain corpus behaves exactly as before the hardening."""
     base = tmp_path / "documents"
@@ -131,7 +139,6 @@ def test_parse_directory_without_symlinks_is_unaffected(tmp_path):
     assert {Path(d.source).name for d in docs} == {"a.md", "b.md"}
 
 
-@pytest.mark.xfail(reason="integration with parse_directory pending v4.6.0", strict=False)
 def test_has_documents_ignores_escaping_symlink(tmp_path):
     """Project-root detection must not be fooled by ``documents/x -> elsewhere``."""
     from mcp_server.config import _has_documents
@@ -149,3 +156,13 @@ def test_has_documents_ignores_escaping_symlink(tmp_path):
 
     (root / "documents" / "real.md").write_text("real", encoding="utf-8")
     assert _has_documents(root) is True
+
+
+def test_empty_in_corpus_directory_cycle_terminates(tmp_path):
+    from mcp_server.config import _has_documents
+
+    docs = tmp_path / "documents"
+    docs.mkdir()
+    _symlink_or_skip(docs / "loop", docs, directory=True)
+    assert _has_documents(tmp_path) is False
+    assert list(DocumentParser().iter_files(docs)) == []

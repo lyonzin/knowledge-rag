@@ -27,12 +27,7 @@ from mcp_server.ingestion import DocumentParser
 
 
 def test_markdown_with_utf8_bom_does_not_crash(tmp_path):
-    """Windows-saved markdown carries a BOM. Parser must at least not crash.
-
-    Caveat: the BOM currently leaks into the first chunk content; that is
-    suboptimal but not a regression of any prior release. The strict
-    assertion lives below as xfail to track the followup.
-    """
+    """Windows-saved markdown carrying a BOM remains indexable."""
     bom = b"\xef\xbb\xbf"
     path = tmp_path / "with_bom.md"
     path.write_bytes(bom + b"# Title\n\n## Section\n\nContent body.\n")
@@ -43,15 +38,8 @@ def test_markdown_with_utf8_bom_does_not_crash(tmp_path):
     assert doc.chunks, "parser produced no chunks for BOM-prefixed markdown"
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Parser does not strip leading UTF-8 BOM from chunk content. "
-        "Tracked as a followup quality improvement; not a regression of any prior release."
-    ),
-    strict=False,
-)
 def test_markdown_strips_utf8_bom_from_chunk(tmp_path):
-    """When the followup fix lands: the BOM must NOT appear inside chunk text."""
+    """A UTF-8 BOM must not appear inside chunk text."""
     bom = b"\xef\xbb\xbf"
     path = tmp_path / "with_bom.md"
     path.write_bytes(bom + b"# Title\n\n## Section\n\nContent body.\n")

@@ -31,6 +31,7 @@ must be removed too — this test will fail loudly the moment they drift.
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -98,19 +99,23 @@ def test_security_md_has_attack_surface_table(security_text: str) -> None:
     assert header, "SECURITY.md must have a table with columns Vector | CWE | Mitigation | Since"
 
 
-def test_security_md_lists_v4_6_as_active(security_text: str) -> None:
-    """Supported-versions table must name 4.6.x as the active line.
-
-    Accepts either the literal ``4.6.x`` cell or a ``4.6.<digit>`` cell, with
-    or without surrounding Markdown emphasis, followed anywhere on the same
-    line by an active marker (``Active`` / ``✅`` / ``Supported``).
-    """
+def test_security_md_lists_current_minor_as_active(security_text: str) -> None:
+    """Supported versions follow the package's current minor, not a stale release."""
+    manifest = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    minor = ".".join(manifest["project"]["version"].split(".")[:2])
     for line in security_text.splitlines():
-        if not re.search(r"4\.6(?:\.\d+|\.x)?\b", line):
+        if not re.search(re.escape(minor) + r"(?:\.\d+|\.x)?\b", line):
             continue
-        if re.search(r"(?:Active|✅|Supported)", line, re.IGNORECASE):
+        if re.search(r"(?:Active|✅|Supported|Current maintenance)", line, re.IGNORECASE):
             return
-    pytest.fail("SECURITY.md must mark v4.6.x as the active/supported version")
+    pytest.fail(f"SECURITY.md must mark {minor}.x as the active/supported version")
+
+
+@pytest.mark.parametrize("filename", ["test_symlink_escape.py", "test_prompt_injection.py", "test_path_traversal.py"])
+def test_security_integration_regressions_are_not_expected_failures(filename):
+    """Containment and provenance guarantees require active executable regressions."""
+    content = (REPO_ROOT / "tests" / "security" / filename).read_text(encoding="utf-8")
+    assert "@pytest.mark.xfail" not in content
 
 
 def test_security_md_declares_48h_acknowledgement(security_text: str) -> None:
@@ -199,7 +204,7 @@ def test_security_md_only_cites_cwes_backed_by_code(security_text: str) -> None:
 
 @pytest.mark.parametrize("cwe", sorted(_CWE_ANCHORS))
 def test_cwe_mitigation_anchor_exists(cwe: str, security_text: str) -> None:
-    """Each mapped CWE either matches a code pattern or lives at a real path.
+    """Check documentation anchors; executable security tests prove integration.
 
     Only assert anchor presence when the CWE is *actually* cited in
     ``SECURITY.md`` — some entries in ``_CWE_ANCHORS`` are pre-declared for

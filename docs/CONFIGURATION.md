@@ -7,6 +7,7 @@
 - [Installation guide →](INSTALLATION.md)
 - [Architecture →](ARCHITECTURE.md)
 - [Troubleshooting →](TROUBLESHOOTING.md)
+- [Folder scope and retrieval quality →](search-quality.md)
 
 **Quick links:**
 - [Quick Start](#quick-start) · [Full YAML template](#configyaml-structure) · [Presets](#presets) · [Field reference table](#configuration-reference) · [Hybrid tuning](#hybrid-search-tuning) · [FTS5 fast-path](#search-method-v482)
@@ -20,14 +21,19 @@
 cp presets/cybersecurity.yaml config.yaml    # Offensive/defensive security, CTFs
 cp presets/developer.yaml config.yaml        # Software engineering, APIs, DevOps
 cp presets/research.yaml config.yaml         # Academic research, papers, studies
-cp presets/general.yaml config.yaml          # Blank slate, pure semantic search
+cp presets/general.yaml config.yaml          # No domain-specific routing or expansion
 
 # Option 2: Start from the documented template
 cp config.example.yaml config.yaml
 # Edit config.yaml to your needs
 ```
 
-Restart Claude Code after changing `config.yaml`.
+Restart the knowledge-rag process after changing `config.yaml`. For a shared HTTP deployment, restart the server process; restarting a client alone does not reload server configuration.
+
+`include_folders` and `exclude_folders` are optional `search_knowledge` arguments,
+not persistent YAML settings. They restrict all retrieval backends before
+candidate selection without changing categories or requiring a rebuild.
+See [folder scope and multilingual evaluation](search-quality.md).
 
 ### config.yaml Structure
 
@@ -51,6 +57,9 @@ documents:
     - "node_modules"
     - ".venv"
     - "__pycache__"
+  batch_size: 500                  # Chunks written in each storage batch
+  parallel_workers: 1             # Concurrent storage batches; keep low on limited RAM
+  embed_batch_size: null          # ONNX micro-batch: CPU 32 / CUDA 256 unless overridden
   chunking:
     chunk_size: 1000              # Max chars per chunk
     chunk_overlap: 200            # Shared chars between chunks
@@ -58,9 +67,9 @@ documents:
 # Models — AI models for search (all run locally, in-process)
 models:
   embedding:
-    model: "BAAI/bge-small-en-v1.5"   # ONNX, ~33MB, auto-downloaded
+    model: "BAAI/bge-small-en-v1.5"   # ONNX; downloaded on first use unless cached
     dimensions: 384
-    gpu: false                         # Set true + pip install knowledge-rag[gpu]
+    gpu: "auto"                       # Try CUDA, fall back to CPU; see GPU setup guide
   reranker:
     enabled: true                      # Falls back to RRF if model is unavailable
     model: "Xenova/ms-marco-MiniLM-L-6-v2"
@@ -69,7 +78,7 @@ models:
 # Search — result limits and collection name
 search:
   default_results: 5
-  max_results: 20
+  max_results: 100
   collection_name: "knowledge_base"   # Change for separate knowledge bases
 
 # Categories — auto-tag documents by folder path
@@ -79,8 +88,8 @@ category_mappings:
   "security/blueteam": "blueteam"
   "notes": "notes"
 
-# Keyword routing — prioritize categories based on query keywords
-# Set to {} for pure semantic search with no routing bias
+# Keyword routing — report a matching category in result diagnostics
+# Does not filter or boost results; use the explicit category search parameter
 keyword_routes:
   redteam:
     - pentest
@@ -124,8 +133,8 @@ Pre-built configurations for common use cases:
 | **Cybersecurity** | `presets/cybersecurity.yaml` | 8 | 200+ | 69 | Red/Blue Team, CTFs, threat hunting, exploit dev |
 | **Developer** | `presets/developer.yaml` | 9 | 150+ | 50+ | Full-stack dev, APIs, DevOps, cloud, databases |
 | **Research** | `presets/research.yaml` | 9 | 100+ | 40+ | Academic papers, thesis, lab notebooks, datasets |
-| **Multilingual** | `presets/multilingual.yaml` | 0 | 0 | 0 | Non-English corpora (100+ languages via `intfloat/multilingual-e5-large`, 1024D). Requires `reindex_documents(force=True)` after switching |
-| **General** | `presets/general.yaml` | 0 | 0 | 0 | Blank slate — pure semantic search, no domain logic |
+| **Multilingual** | `presets/multilingual.yaml` | 0 | 0 | 0 | Non-English corpora using `intfloat/multilingual-e5-large`, 1024D and matching query/passage prefixes. Requires a complete model-profile migration, not incremental indexing |
+| **General** | `presets/general.yaml` | 0 | 0 | 0 | Hybrid search without domain-specific categories or expansion |
 
 **Creating your own preset**: Copy `config.example.yaml`, fill in your categories/keywords/expansions, save to `presets/your-domain.yaml`.
 
@@ -161,13 +170,13 @@ With `category_mappings` defined, a query like `search_knowledge(query="privileg
 | `server.host` | `"127.0.0.1"` | Bind address for SSE/HTTP mode |
 | `server.port` | `8179` | Bind port for SSE/HTTP mode |
 | `server.auth.bearer_token` | `""` (disabled) | Bearer token for SSE/HTTP auth. Empty = no auth |
-| `server.rate_limit.enabled` | `false` | Enable per-client rate limiting |
+| `server.rate_limit.enabled` | `false` | Enable one shared request budget for the server's tool calls |
 | `server.rate_limit.requests_per_minute` | `60` | Max requests per minute |
 | `server.rate_limit.burst` | `10` | Burst allowance above steady rate |
 | `server.metrics.enabled` | `false` | Enable Prometheus `/metrics` endpoint |
 | `server.metrics.port` | `9179` | Port for metrics scraping |
 
-In stdio mode (default), server settings are ignored. SSE/HTTP mode auto-enables the single-instance lock.
+In stdio mode (default), HTTP host, port, and bearer authentication do not apply. Rate limiting and optional metrics still apply. SSE/HTTP mode auto-enables the single-instance lock. The separate metrics endpoint currently binds to `0.0.0.0` and does not use MCP bearer authentication.
 
 #### Paths
 
@@ -183,10 +192,15 @@ Relative paths resolve from the project root. Absolute paths work too.
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `documents.supported_formats` | All 33 non-MetaTrader formats (see README table) | File extensions to index; also accepts exact filenames (`Dockerfile`, `Makefile`, `Tiltfile`) |
+| `documents.supported_formats` | Built-in supported extension/filename list | File extensions to index; also accepts exact filenames (`Dockerfile`, `Makefile`, `Tiltfile`) |
 | `documents.exclude_patterns` | `[]` (empty) | Glob patterns for files/dirs to skip during indexing |
 | `documents.chunking.chunk_size` | 1000 | Max characters per chunk |
 | `documents.chunking.chunk_overlap` | 200 | Characters shared between consecutive chunks |
+| `documents.batch_size` | 500 | Storage-write batch, bounded to 1–5000 chunks |
+| `documents.parallel_workers` | 1 | Concurrent storage batches, bounded to 1–16; additional workers also increase transient memory |
+| `documents.embed_batch_size` | `null` | ONNX inference batch override, bounded to 1–512; independent of the storage batch |
+
+A valid `KNOWLEDGE_RAG_EMBED_BATCH_SIZE` environment value takes precedence over the YAML micro-batch setting. Invalid values produce a diagnostic and fall back to valid configuration/provider defaults. CUDA availability is checked against the initialized model session before selecting its batch size. Smaller batches can reduce peak RAM/VRAM at a throughput cost; defaults are not an OOM guarantee.
 
 **Chunking guidelines**: Short notes → 500/100. General use → 1000/200. Long technical docs → 1500/300.
 
@@ -198,28 +212,37 @@ For `.md` files, chunking splits at `##` and `###` header boundaries first. Sect
 |-------|---------|-------------|
 | `models.embedding.model` | `BAAI/bge-small-en-v1.5` | Embedding model (ONNX, runs locally) |
 | `models.embedding.dimensions` | 384 | Vector dimensions (must match model) |
-| `models.embedding.gpu` | false | Enable CUDA GPU acceleration. See [GPU Acceleration](#gpu-acceleration) for full setup |
+| `models.embedding.gpu` | `"auto"` | Automatic CUDA/CPU selection; `false` forces CPU, `true` requests CUDA. See [GPU setup](gpu-setup.md) for runtime requirements and additional backends |
+| `models.embedding.device_id` | `null` | Explicit non-negative adapter index required for `gpu: "directml"` on Windows; select and verify the intended GPU before enabling |
+| `models.embedding.query_prefix` | `""` | Prefix applied to queries; must match the selected model's retrieval recipe |
+| `models.embedding.passage_prefix` | `""` | Prefix applied to documents; changing it requires re-embedding stored passages |
 | `models.reranker.enabled` | true | Enable cross-encoder reranking |
 | `models.reranker.model` | `Xenova/ms-marco-MiniLM-L-6-v2` | Reranker model |
 | `models.reranker.top_k_multiplier` | 3 | Fetch N*multiplier candidates for reranking |
 
 If the reranker model is not available locally and the machine cannot download it, search now falls back to the RRF order from hybrid semantic+BM25 retrieval. This keeps `search_knowledge` available offline, but result ordering may be less precise for ambiguous queries until the reranker model is cached.
 
-**Embedding model options** (fastest → most accurate):
-- `BAAI/bge-small-en-v1.5` — 384D, ~33MB (default)
-- `BAAI/bge-base-en-v1.5` — 768D, ~130MB
-- `BAAI/bge-large-en-v1.5` — 1024D, ~335MB
-- `intfloat/multilingual-e5-small` — 384D, 100+ languages
+**Embedding model examples** (availability depends on the installed FastEmbed version):
+- `BAAI/bge-small-en-v1.5` — English, 384D (default)
+- `BAAI/bge-base-en-v1.5` — English, 768D
+- `BAAI/bge-large-en-v1.5` — English, 1024D
+- `intfloat/multilingual-e5-small` — multilingual, 384D; use the model's query/passage prefixes
 
-> **Warning**: Changing the embedding model after indexing requires `reindex_documents(full_rebuild=True)`.
+Larger models do not guarantee better retrieval on a specific corpus. Measure recall and rank with representative questions before migrating. Download size and runtime memory depend on the exported ONNX weights, precision, sequence length, and batch size.
+
+Changing the embedding model or passage prefix requires re-embedding every
+stored passage. A different model/dimension may prevent the existing collection
+from opening before an MCP rebuild can be requested. Use separate data and
+metadata for a model migration, validate the replacement index, then switch
+clients. See [the migration procedure](reindex-operations.md#changing-the-embedding-model).
 
 #### Search
 
 | Field | Default | Description |
 |-------|---------|-------------|
 | `search.default_results` | 5 | Results returned when no limit specified |
-| `search.max_results` | 20 | Hard cap even if client requests more |
-| `search.collection_name` | `knowledge_base` | ChromaDB collection — change for separate KBs |
+| `search.max_results` | 100 | Hard cap even if client requests more |
+| `search.collection_name` | `knowledge_base` | ChromaDB collection name. For isolated knowledge bases or model migrations, also isolate the data directory and metadata |
 
 #### Categories
 
@@ -235,7 +258,7 @@ Set `category_mappings: {}` to disable — documents are still searchable, just 
 
 #### Keyword Routing
 
-Route queries to categories based on keywords. When a query contains listed keywords, results from that category are prioritized (not filtered — other categories still appear, ranked lower).
+Match queries to category labels for the informational `routed_by` field. This does not filter results or change scores. An explicit `category` parameter restricts retrieval.
 
 ```yaml
 keyword_routes:
@@ -247,7 +270,7 @@ keyword_routes:
 
 Single-word keywords use regex word boundaries (`\b`) — "api" won't match "RAPID". Multi-word keywords use substring matching.
 
-Set `keyword_routes: {}` for pure semantic search.
+Set `keyword_routes: {}` to disable this diagnostic routing. To request semantic-only hybrid retrieval, use `hybrid_alpha=1.0` with `search_method="hybrid"`.
 
 #### Query Expansion
 
@@ -295,6 +318,8 @@ This keeps backward compatibility while allowing concise synonym groups.
 
 Ready-to-copy examples showing when each value fits best. Pass via the `search_knowledge` MCP tool call:
 
+Set `search_method="hybrid"` when comparing alpha values with FTS5 enabled; the lexical fast path does not use `hybrid_alpha`.
+
 ```python
 # α = 0.0 → pure keyword (BM25). Best when the query IS the answer (exact
 # terminology, tool name, CVE, MITRE ID). Semantic drift is a bug here.
@@ -327,17 +352,19 @@ Two paths ship with v4.8.2 — the default `hybrid` path (BM25 + semantic + RRF
 ATT&CK codes, CWEs, file hashes, bug-bounty IDs). Enable via
 `search.lexical_fast_path.enabled: true` in `config.yaml`.
 
-| Method                  | Path              | Latency (typical)     | Best For                                     |
-|-------------------------|-------------------|-----------------------|----------------------------------------------|
-| `auto` **(default)**    | Router decides    | Router adds ~0.1ms    | Mixed workloads — safe default               |
-| `hybrid`                | BM25 + semantic   | 50-150ms (with rerank)| Prose queries, "how does X work", exploration|
-| `fts5`                  | SQLite FTS5 only  | <10ms cold / <2ms hot | CVE / MITRE / CWE / hash lookups             |
+| Method | Path | Use |
+|--------|------|-----|
+| `auto` **(default)** | Router chooses when FTS5 is enabled; hybrid otherwise | Mixed identifier and prose queries |
+| `hybrid` | BM25 + semantic + optional reranking | Prose, exploration, or controlled alpha comparisons |
+| `fts5` | SQLite FTS5 with optional reranking | Literal identifiers; requires a ready lexical index |
+
+Latency depends on corpus size, hardware, model, cache state, candidate counts, and reranking. Use the benchmark scripts on your corpus rather than treating these paths as fixed latency guarantees.
 
 The `search_knowledge` MCP tool exposes `search_method: Literal["auto",
 "hybrid", "fts5"] = "auto"` (ADR-006, additive on the LEI 1 contract). The
-default `enabled: false` preserves v4.8.1 behaviour byte-for-byte; the flip
-to `enabled: true` by default is reserved for v4.9.0 pending the CI
-perf-gate adjudication documented in ADR-004 and ADR-009. Full user guide
-in [`docs/features/fts5_fast_path.md`](docs/features/fts5_fast_path.md).
+default `enabled: false` keeps lexical dispatch opt-in. Enabling it starts
+or resumes the derived FTS5 index; `auto` falls back to hybrid while the index
+is unavailable. Full user guide in
+[`features/fts5_fast_path.md`](features/fts5_fast_path.md).
 
 ---

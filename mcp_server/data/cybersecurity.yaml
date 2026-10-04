@@ -35,7 +35,11 @@ documents:
     - .txt
     - .pdf
     - .py       # Exploit scripts, PoCs, tooling
+    - .c        # Exploit PoCs, kernel modules
+    - .h        # Header files
+    - .cpp      # C++ exploit code
     - .json     # Nuclei templates, config dumps
+    - .xml      # Nmap XML, Nuclei templates, config files
     - .docx
     - .xlsx
     - .pptx

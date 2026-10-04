@@ -115,7 +115,7 @@ class TestMigrationLifecycle:
         try:
             thread = index.start_migration_background(_iter_factory(_gen_rows(1000)), docs_total=1000)
             thread.join(timeout=20.0)
-            out = capsys.readouterr().out
+            out = capsys.readouterr().err
             # 10 batches of 100 = 10 progress checkpoints, each crossing a 10% boundary.
             progress_lines = [line for line in out.splitlines() if "migration progress" in line]
             assert len(progress_lines) >= 5, f"expected >=5 progress lines, got {progress_lines}"
@@ -167,6 +167,7 @@ class TestMigrationLifecycle:
         try:
             assert index.is_ready() is False
             rows = _gen_rows(200)
+            index._populate_batch(rows[:100])
             # Resume from checkpoint — worker should skip first 100 rows.
             thread = index.start_migration_background(_iter_factory(rows), docs_total=200, resume_from=100)
             thread.join(timeout=10.0)
@@ -174,7 +175,7 @@ class TestMigrationLifecycle:
             assert state["status"] == "complete"
             with index._fts5_lock:  # noqa: SLF001
                 total = index._conn.execute("SELECT COUNT(*) FROM fts5_documents").fetchone()[0]  # noqa: SLF001
-            assert total == 100, "resume must skip the 100 already-indexed rows"
+            assert total == 200, "resume retains the first 100 committed rows and indexes the remainder"
         finally:
             index.close()
 
@@ -184,7 +185,7 @@ class TestMigrationLifecycle:
         try:
             thread = index.start_migration_background(_iter_factory([]), docs_total=0)
             thread.join(timeout=5.0)
-            out = capsys.readouterr().out
+            out = capsys.readouterr().err
             assert "migration complete" in out
             assert "migration progress" not in out
         finally:
@@ -330,11 +331,12 @@ class TestMigrationIntegration:
         )
         try:
             rows = _gen_rows(100)
+            index._populate_batch(rows[:40])
             thread = index.start_migration_background(_iter_factory(rows), docs_total=100, resume_from=40)
             thread.join(timeout=10.0)
             with index._fts5_lock:  # noqa: SLF001
                 total = index._conn.execute("SELECT COUNT(*) FROM fts5_documents").fetchone()[0]  # noqa: SLF001
-            assert total == 60, "resume must skip the first 40 rows"
+            assert total == 100, "resume retains committed rows and adds the remaining 60"
             assert index.is_ready() is True
         finally:
             index.close()

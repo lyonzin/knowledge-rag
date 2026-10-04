@@ -1,240 +1,147 @@
 # Architecture
 
-> Detailed architecture of **knowledge-rag** — system overview, query processing flow, document ingestion pipeline, and the hybrid_alpha parameter effect.
+The server exposes 13 MCP tools over stdio or the configured HTTP transport.
+Embeddings and retrieval run in the server process. A shared HTTP process can
+serve several clients without loading a separate model and index per client.
+See [single-instance operation](single-instance.md) for the process boundary.
 
-**Related docs:**
-- [Configuration reference →](CONFIGURATION.md)
-- [API reference →](API.md)
-- [Installation guide →](INSTALLATION.md)
+This describes the implementation in this branch. Historical ADRs record design
+decisions; they are not a substitute for the current configuration and API.
 
-**Diagrams inside:**
-- [System Overview](#system-overview)
-- [Query Processing Flow](#query-processing-flow)
-- [Document Ingestion Flow](#document-ingestion-flow)
-- [hybrid_alpha Parameter Effect](#hybrid_alpha-parameter-effect)
+## Components and ownership
 
----
+| Component | Responsibility | Lifetime / storage |
+| --- | --- | --- |
+| FastMCP tool layer | Validate requests, serialize results, rate limit and instrument calls | Server process |
+| KnowledgeOrchestrator | Coordinate indexing, retrieval, metadata and derived indexes | Server process |
+| IngestionEngine and parsers | Discover contained source paths, parse changed files, create chunks | Per indexing operation |
+| FastEmbedEmbeddings | Lazy model loading, execution-provider validation, bounded embedding batches | Model session in process; weights in model cache |
+| ChromaDB | Persist chunk text, metadata and vectors | Configured data directory, `chroma_db/` |
+| BM25Index | Tokenize and rank keyword candidates with an inverted index | In process; rebuilt from ChromaDB |
+| Fts5LexicalIndex | Optional derived lexical index keyed by chunk ID | `fts5_index.db` in the data directory |
+| QueryCache | Cache retrieval results with bounded entry count and TTL | In process; invalidated by mutations |
+| MetricsCollector | Aggregate counters, sums and registered histogram buckets | In process; observations are not retained individually |
 
-### System Overview
+Categories are configurable metadata, not a fixed number of collections.
+Several supported file extensions share a parser; extension count and parser
+class count are different measures.
 
-```mermaid
-flowchart TB
-    subgraph MCP["MCP SERVER (FastMCP)"]
-        direction TB
-        TOOLS["13 MCP Tools (frozen, LEI 1)<br/>search_knowledge | get_document | search_similar<br/>add_document | add_from_url | update_document | remove_document<br/>reindex_documents | get_reindex_status<br/>list_categories | list_documents | get_index_stats | evaluate_retrieval"]
-    end
-
-    subgraph SEARCH["SEARCH DISPATCH (v4.8.2+)"]
-        direction TB
-        SM["search_method dispatch<br/>auto | hybrid | fts5"]
-        QROUTER["QueryRouter (regex)<br/>lexical vs semantic<br/>(ADR-002)"]
-        FTS5PATH["FTS5 Fast-Path<br/>(exact identifiers <10ms)"]
-        HYBRIDPATH["Hybrid Pipeline<br/>(conceptual queries)"]
-
-        SM --> QROUTER
-        QROUTER -->|lexical| FTS5PATH
-        QROUTER -->|semantic| HYBRIDPATH
-        FTS5PATH -.->|not_ready / low_hits<br/>fallback| HYBRIDPATH
-    end
-
-    subgraph HYBRID["HYBRID PIPELINE"]
-        direction LR
-        KWROUTER["Keyword Router<br/>(word boundaries → category filter)"]
-        SEMANTIC["Semantic Search<br/>(ChromaDB)"]
-        BM25["BM25 Keyword<br/>(inverted-index + expansion)"]
-        RRF["Reciprocal Rank<br/>Fusion (RRF)"]
-        RERANK["Cross-Encoder<br/>Reranker"]
-
-        KWROUTER --> SEMANTIC
-        KWROUTER --> BM25
-        SEMANTIC --> RRF
-        BM25 --> RRF
-        RRF --> RERANK
-    end
-
-    subgraph STORAGE["STORAGE LAYER"]
-        direction LR
-        CHROMA[("ChromaDB<br/>data/chroma_db/<br/>(vector store)")]
-        FTS5DB[("SQLite FTS5<br/>data/fts5_index.db<br/>(lexical index, ADR-001)")]
-        COLLECTIONS["8 Categories<br/>redteam | blueteam | ctf<br/>security | logscale<br/>development | aar | general"]
-        CHROMA --- COLLECTIONS
-        FTS5DB --- COLLECTIONS
-    end
-
-    subgraph EMBED["EMBEDDINGS (In-Process)"]
-        FASTEMBED["FastEmbed ONNX<br/>BAAI/bge-small-en-v1.5<br/>(384D, CPU or GPU)"]
-        CROSSENC["Cross-Encoder<br/>ms-marco-MiniLM-L-6-v2"]
-        FASTEMBED --- CROSSENC
-    end
-
-    subgraph INGEST["DOCUMENT INGESTION"]
-        PARSERS["35 Parsers<br/>MD | PDF | TXT | PY | C | H | CPP | JS | JSX | TS | TSX | JSON | XML | CSV<br/>DOCX | XLSX | PPTX | IPYNB | MQH | MQ4<br/>Go | Rust | Kotlin | YAML | HuJSON | CUE | Proto | Rego | SQL | Shell | jq | Dockerfile | Makefile | Tiltfile"]
-        CHUNKER["Chunking<br/>MD: section-aware<br/>Other: 1000 chars + 200 overlap"]
-        FTS5SYNC["FTS5 CRUD sync<br/>(v4.8.2 task 05)"]
-        PARSERS --> CHUNKER --> FTS5SYNC
-    end
-
-    CLAUDE["Claude Code"] --> MCP
-    MCP --> SEARCH
-    HYBRIDPATH --> HYBRID
-    FTS5PATH --> FTS5DB
-    HYBRID --> STORAGE
-    STORAGE --> EMBED
-    INGEST --> EMBED
-    EMBED --> STORAGE
-    FTS5SYNC --> FTS5DB
-```
-
-### Query Processing Flow
+## Retrieval flow
 
 ```mermaid
-flowchart TB
-    QUERY["User Query<br/>'mimikatz credential dump' | 'CVE-2021-4034'"] --> METHOD
-
-    subgraph DISPATCH["Dispatch (v4.8.2+, ADR-006)"]
-        METHOD{"search_method<br/>auto | hybrid | fts5"}
-        AUTOROUTE["QueryRouter.classify()<br/>regex-based lexical detection"]
-        FASTPATH["FTS5 Fast-Path<br/>SQLite MATCH<br/>(&lt;10ms cold, &lt;2ms hot)"]
-        NOTREADY{"FTS5 ready<br/>AND hits >= min_hits?"}
-
-        METHOD -->|auto| AUTOROUTE
-        METHOD -->|fts5| FASTPATH
-        METHOD -->|hybrid| EXPAND
-        AUTOROUTE -->|lexical| FASTPATH
-        AUTOROUTE -->|semantic| EXPAND
-        FASTPATH --> NOTREADY
-        NOTREADY -->|no, fallback| EXPAND
-    end
-
-    subgraph EXPANSION["Query Expansion (hybrid path)"]
-        EXPAND["Synonym Expansion<br/>mimikatz -> mimikatz, sekurlsa, logonpasswords"]
-    end
-
-    EXPAND --> KWROUTER
-
-    subgraph ROUTING["Keyword Routing (category filter)"]
-        KWROUTER["Keyword Router<br/>(word boundaries)"]
-        MATCH{"Word Boundary<br/>Match?"}
-        CATEGORY["Filter: redteam"]
-        NOFILTER["No Filter"]
-
-        KWROUTER --> MATCH
-        MATCH -->|Yes| CATEGORY
-        MATCH -->|No| NOFILTER
-    end
-
-    subgraph HYBRID["Hybrid Search"]
-        direction LR
-        SEMANTIC["Semantic Search<br/>(ChromaDB embeddings)<br/>Conceptual similarity"]
-        BM25["BM25 Inverted-Index<br/>(posting lists + numpy top-k)<br/>Exact term matching"]
-    end
-
-    subgraph FUSION["Result Fusion + Reranking"]
-        RRF["Reciprocal Rank Fusion<br/>score = alpha * 1/(k+rank_sem)<br/>+ (1-alpha) * 1/(k+rank_bm25)"]
-        RERANK["Cross-Encoder Reranker<br/>Re-scores top 3x candidates<br/>query+doc pair scoring"]
-        SORT["Sort by Reranker Score<br/>Normalize to 0-1"]
-        ADJ["Adjacent Chunk Expansion<br/>(batch fetch ±1 chunk)"]
-
-        RRF --> RERANK --> SORT --> ADJ
-    end
-
-    subgraph OUTPUT["Output Processing"]
-        MINSCORE["min_score Filter<br/>(discard below threshold)"]
-        SNIPPET["snippet_mode Truncation<br/>(~500 chars at natural break)"]
-
-        MINSCORE --> SNIPPET
-    end
-
-    CATEGORY --> HYBRID
-    NOFILTER --> HYBRID
-    SEMANTIC --> RRF
-    BM25 --> RRF
-
-    ADJ --> MINSCORE
-    NOTREADY -->|yes, hit| MINSCORE
-    SNIPPET --> RESULTS["Results<br/>search_method: fts5 | hybrid | semantic | keyword<br/>routed_by: fts5_router | none<br/>score + filtered_by_score + content_length"]
+flowchart TD
+    Q["MCP search_knowledge request"] --> V["Validate query, limits and search_method"]
+    V --> C{"Query cache hit?"}
+    C -->|yes| O["Response filtering and optional snippet"]
+    C -->|no| D{"Dispatch"}
+    D -->|hybrid or semantic auto query| H["Semantic and BM25 candidates"]
+    D -->|lexical auto query or explicit fts5| F["SQLite FTS5 candidates"]
+    F --> A{"Ready and useful results?"}
+    A -->|auto fallback| H
+    A -->|explicit fts5 not ready| E["Structured error"]
+    A -->|results| P["Hydrate from Chroma; optional FTS5 rerank"]
+    H --> R["Weighted RRF plus metadata path score"]
+    R --> X["Optional cross-encoder rerank"]
+    X --> N["Select results and expand adjacent chunks"]
+    P --> N
+    N --> S["Cache retrieval result"]
+    S --> O
 ```
 
-### Document Ingestion Flow
+The FTS5 feature is disabled by default. In `auto` mode the regex router
+classifies queries as lexical or semantic; the lexical branch can fall back to
+hybrid retrieval. Explicit `fts5` bypasses the router and the minimum-hit
+threshold, and reports an error when the index is unavailable. See
+[FTS5 behavior](features/fts5_fast_path.md).
+
+The separate keyword-to-category router produces informational `routed_by`
+metadata. It does **not** automatically restrict the search. An explicit
+`category` argument filters semantic retrieval in ChromaDB; the BM25 and FTS5
+paths filter the retrieved candidate pool using chunk metadata. This distinction
+matters for sparse categories: filtering a bounded global pool can miss relevant
+items outside that pool. Folder filtering before candidate selection is tracked
+in [issue #232](https://github.com/lyonzin/knowledge-rag/issues/232).
+
+For hybrid retrieval, semantic and keyword branches run concurrently when both
+weights are nonzero. Documents found only by BM25 are hydrated in a batch.
+Cross-encoder reranking, when enabled, scores a candidate pool before the final
+result limit. Adjacent chunks add context to selected results.
+
+Scores depend on the retrieval path and optional reranking. A normalized score
+is a ranking signal, not a probability that the answer is correct. The MCP layer
+applies `min_score` and optional snippet truncation; those operations must not
+mutate a cached full-content result.
+
+## Ingestion and publication
 
 ```mermaid
 flowchart LR
-    subgraph INPUT["Input"]
-        FILES["documents/<br/>├── security/<br/>│   ├── redteam/<br/>│   ├── blueteam/<br/>│   └── ctf/<br/>├── aar/<br/>├── logscale/<br/>├── development/<br/>└── general/"]
-    end
-
-    subgraph PARSE["Parse (35 formats)"]
-        MD["Markdown"]
-        PDF["PDF<br/>(PyMuPDF)"]
-        OFFICE["DOCX | XLSX<br/>PPTX | CSV"]
-        CODE["PY | C | H | CPP | JS | JSX<br/>TS | TSX | JSON | XML | IPYNB"]
-    end
-
-    subgraph CHUNK["Chunk"]
-        MDSPLIT["MD: Section-Aware<br/>Split at ## headers"]
-        TXTSPLIT["Other: Fixed-Size<br/>1000 chars + 200 overlap"]
-        DEDUP["SHA256 Dedup<br/>Skip duplicate content"]
-    end
-
-    subgraph EMBED["Embed"]
-        FASTEMBED["FastEmbed ONNX<br/>bge-small-en-v1.5<br/>(384D, CPU or GPU)"]
-    end
-
-    subgraph DISPATCH["Write Dispatch (v4.8.3, #161)"]
-        WCOL{"_write_collection<br/>routes writes"}
-        STAGING["Staging Collection<br/>(nuclear_rebuild only,<br/>keeps prod serving queries)"]
-        PROD["Production Collection<br/>(default)"]
-        WCOL -->|_staging_target set| STAGING
-        WCOL -->|default| PROD
-    end
-
-    subgraph STORE["Store"]
-        CHROMADB[("ChromaDB<br/>data/chroma_db/")]
-        BM25IDX["BM25 Index<br/>(in-memory,<br/>rebuilt on write)"]
-        FTS5DB[("SQLite FTS5<br/>data/fts5_index.db<br/>(CRUD-synced, ADR-008)")]
-    end
-
-    FILES --> MD & PDF & OFFICE & CODE
-    MD --> MDSPLIT
-    PDF & OFFICE & CODE --> TXTSPLIT
-    MDSPLIT --> DEDUP
-    TXTSPLIT --> DEDUP
-    DEDUP --> EMBED
-    EMBED --> DISPATCH
-    STAGING --> CHROMADB
-    PROD --> CHROMADB
-    PROD --> BM25IDX
-    PROD --> FTS5DB
+    D["Discover paths within documents root"] --> M["Compare metadata before parsing"]
+    M -->|changed or forced| P["Parse one document"]
+    P --> K["Chunk with configured size and overlap"]
+    K --> E["Embed bounded batches"]
+    E --> W["Write replacement chunks"]
+    W --> I["Publish metadata and refresh derived indexes"]
+    I --> C["Invalidate query cache"]
 ```
 
-### hybrid_alpha Parameter Effect
+Incremental scans inspect paths and modification metadata before parsing.
+Discovery rejects links that escape the configured corpus and avoids cycles.
+A parsing failure must preserve the previously indexed document and remain
+visible in the operation's errors.
 
-`hybrid_alpha` weights RRF fusion between semantic and BM25 rankings on the **hybrid pipeline only**. When `search_method="auto"` and the QueryRouter classifies the query as lexical (e.g. `CVE-2021-4034`, `MDR-AD002`, `T1078.001`, file hashes), the FTS5 fast-path fires and `hybrid_alpha` is not consulted — FTS5 uses SQLite's native `bm25()` scoring exclusively. Pass `search_method="hybrid"` to force RRF fusion + rerank on every query if you want deterministic hybrid semantics regardless of the query shape.
+A full rebuild creates a separate staging collection and staging metadata.
+The live collection remains available while staging is populated and validated.
+Publication spans several ChromaDB and metadata operations; it is not a single
+database transaction. The previous collection is retained until publication
+succeeds so handled failures can roll back. Abrupt process termination still
+requires inspection of the persisted state. See the
+[reindex operations guide](reindex-operations.md) for recovery and storage costs.
 
-```mermaid
-flowchart LR
-    subgraph ALPHA["hybrid_alpha values (hybrid path only)"]
-        A0["0.0<br/>Pure BM25<br/>Instant"]
-        A3["0.3 (default)<br/>Keyword-heavy<br/>Fast"]
-        A5["0.5<br/>Balanced"]
-        A7["0.7<br/>Semantic-heavy"]
-        A10["1.0<br/>Pure Semantic"]
-    end
+FTS5 is derived from ChromaDB. Its migration and mutation paths use chunk IDs to
+avoid duplicates during replay. Migration counters use historical
+`docs_*` names but count **chunks**, not source files.
 
-    subgraph USE["Best For"]
-        U0["CVEs, tool names<br/>exact matches<br/>(consider FTS5 fast-path)"]
-        U3["Technical queries<br/>specific terms"]
-        U5["General queries"]
-        U7["Conceptual queries<br/>related topics"]
-        U10["'How to...' questions<br/>conceptual search"]
-    end
+## Memory and concurrency boundaries
 
-    A0 --- U0
-    A3 --- U3
-    A5 --- U5
-    A7 --- U7
-    A10 --- U10
-```
+Embedding microbatches and outer indexing batches are separate controls.
+Provider-aware defaults limit the number of simultaneous model inputs; long
+documents, tokenizer buffers, model weights and ChromaDB still consume memory.
+See [GPU and CPU configuration](gpu-setup.md).
 
----
+Indexing streams documents, but a parser may materialize an entire individual
+file, and replacement rollback retains the old chunks for that document.
+This bounds whole-corpus accumulation; it does not make arbitrary-sized files
+constant-memory. BM25 retains corpus data in memory, while ChromaDB and FTS5
+also use native/database caches. Process RSS therefore includes more than Python
+allocations tracked by `tracemalloc`.
 
+Mutating operations are coordinated within one orchestrator. The optional
+single-instance lock addresses multiple server processes sharing a data
+directory. It is a different boundary from threads inside one process.
+Read queries during mutation may observe an earlier or later published state;
+clients should not assume a transaction across separate MCP calls.
+
+## The hybrid_alpha parameter
+
+| Value | Candidate contribution on the hybrid path |
+| --- | --- |
+| `0.0` | BM25 only |
+| `0.3` | Greater BM25 weight; the default configuration |
+| `0.5` | Equal RRF weights |
+| `0.7` | Greater semantic weight |
+| `1.0` | Semantic only |
+
+The RRF constant is 60 and ranks are one-based. Metadata path scoring and
+optional reranking also affect the final order. Changing alpha does not by
+itself establish a latency or quality improvement. Measure representative
+queries and expected sources with [evaluate_retrieval](API.md).
+Alpha is not used by the FTS5 path; select `search_method="hybrid"` when comparing
+hybrid weights.
+
+## References
+
+- [Configuration](CONFIGURATION.md)
+- [MCP API](API.md)
+- [Installation](INSTALLATION.md)
+- [Security boundaries](../SECURITY.md)

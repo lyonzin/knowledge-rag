@@ -7,17 +7,18 @@
 # Keep this file lean — only what's needed to run tests, linters, and benches.
 
 # ── Linting & formatting ────────────────────────────────────────────────────
-ruff>=0.16.2,<1.0
+ruff>=0.16.9,<1.0
 pre-commit>=4.6.2,<5.0
 
 # ── Tests ───────────────────────────────────────────────────────────────────
 pytest>=9.1.1,<10.0
 pytest-cov>=7.0.0
-pytest-rerunfailures>=16.4    # flake detection (Pillar 2: Stability)
-pytest-memray>=1.10.0; sys_platform != "win32"  # memory baseline (Pillar 3); memray Linux/macOS only
+pytest-rerunfailures>=16.7    # flake detection (Pillar 2: Stability)
+pytest-memray>=1.11.0; sys_platform != "win32"  # memory baseline (Pillar 3); memray Linux/macOS only
 pytest-benchmark>=5.2.3       # micro-benchmarks
 pytest-timeout>=2.3.0         # safety net for hung tests
-hypothesis>=6.165.9            # property-based testing (Pillar 4: Versatility)
+hypothesis>=6.168.3            # property-based testing (Pillar 4: Versatility)
+hatchling                      # real wheel/sdist regressions; matches build-system
 
 # ── Type checking & quality ─────────────────────────────────────────────────
 mypy>=2.1.0
@@ -33,4 +34,4 @@ pip-audit>=2.10.0               # CVE check on installed deps
 psutil>=5.9.0                  # cross-platform RSS measurement for memory baselines
 
 # ── Mutation testing (nightly only, optional locally) ───────────────────────
-mutmut>=3.5.0                  # used by .github/workflows/nightly.yml
+mutmut>=3.8.0                  # used by .github/workflows/nightly.yml

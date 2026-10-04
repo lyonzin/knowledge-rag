@@ -24,18 +24,12 @@ python --version    # Must be 3.11+
 
 ### FastEmbed model download fails
 
-On first run, FastEmbed downloads models to `models_cache/`. If the download fails:
-
-```bash
-# Clear cache and retry
-# Windows:
-rmdir /s /q models_cache
-
-# Linux/macOS:
-rm -rf models_cache
-
-# Then restart the MCP server
-```
+On first use, FastEmbed downloads to the configured `paths.models_cache_dir`.
+Check the download error, network access, available disk space and permissions
+for that directory. Preserve working cached models: deleting the entire cache
+also removes unrelated models and prevents offline startup. If a specific
+download is corrupt, identify that model/revision from the error and retry only
+its failed download after preserving any usable cached copy.
 
 ### Reranker model download fails
 
@@ -49,7 +43,11 @@ models:
     enabled: false
 ```
 
-Disabling reranking reduces memory use and avoids first-query model loading. The tradeoff is lower ranking precision, especially when several chunks match the same terms but only one is the best answer.
+Disabling reranking reduces memory use and avoids first-query model loading,
+but changes result ordering. Measure precision and source recall on your own
+languages and questions with it both enabled and disabled. The default reranker
+was trained on English MS-MARCO; it can also move a relevant candidate below
+irrelevant results. Its score is not a probability that an answer is correct.
 
 ### ChromaDB index crashes on startup
 
@@ -71,9 +69,22 @@ ls documents/
 # Force reindex via Claude Code:
 # reindex_documents(force=True)
 
-# Or nuclear rebuild if model changed:
-# reindex_documents(full_rebuild=True)
 ```
+
+For model or dimension changes, follow the isolated migration procedure in
+[the reindex guide](reindex-operations.md). A dimension mismatch can prevent
+startup before any MCP reindex tool becomes available.
+
+### PDF exists but does not index
+
+Check the actual file content as well as its extension. Binary PDFs use
+PyMuPDF; encrypted, damaged or image-only documents may not yield indexable
+text. OCR is not included. Explicit UTF-8 extractions beginning with `[Page N]`
+are supported within the strict encoding, control-character and 4 MiB limits
+described in the [format reference](../README.md). A `.pdf` suffix alone does
+not make arbitrary text or binary data a valid PDF. Empty files produce no
+document; inspect per-file diagnostics rather than treating a completed worker
+as proof that every source was indexed.
 
 ### MCP server not loading
 
@@ -96,7 +107,7 @@ The cross-encoder reranker model is lazy-loaded on the first query. This adds a 
 
 ### Memory usage
 
-With ~200 documents, expect ~300-500MB RAM. The embedding model (~200MB ONNX runtime resident, lazy-loaded on first query since v3.8.0) and reranker (~25MB, lazy-loaded) are loaded into memory only when actually used. For very large knowledge bases (1000+ documents), consider enabling GPU acceleration and using exclude patterns to limit index scope.
+Memory depends on the model, chunk lengths, batch size, corpus, and runtime allocator. The embedding model and reranker load lazily when needed. Measure peak process RSS during indexing; document count alone does not predict it. Reduce `documents.embed_batch_size` to limit ONNX inference memory and use exclude patterns to limit index scope. GPU execution still consumes host RAM and adds VRAM requirements; see [GPU setup](gpu-setup.md) before changing providers.
 
 ### Multiple MCP clients spawn duplicate servers
 
@@ -106,7 +117,19 @@ MCP stdio is one process per client by protocol — multiple Claude Code windows
 export KNOWLEDGE_RAG_SINGLE_INSTANCE=1
 ```
 
-A second instance exits immediately with code 75. Default is OFF (multi-client friendly). Full guide: [docs/single-instance.md](docs/single-instance.md). Sample MCP config: [examples/mcp-config-single-instance.json](examples/mcp-config-single-instance.json).
+A second instance exits immediately with code 75. Default is OFF (multi-client friendly). Full guide: [docs/single-instance.md](single-instance.md). Sample MCP config: [examples/mcp-config-single-instance.json](../examples/mcp-config-single-instance.json).
+
+### Second MCP client disconnects / exits with code 75
+
+If two clients both launch `knowledge-rag` over `stdio` against the same `data_dir`, the single-instance guard (`KNOWLEDGE_RAG_SINGLE_INSTANCE=1`) can reject the second process to prevent ChromaDB index corruption (discussed in [#217](https://github.com/lyonzin/knowledge-rag/pull/217)).
+
+To share a single index across multiple clients concurrently, run one shared server instead:
+
+```bash
+knowledge-rag --transport streamable-http
+```
+
+Then connect every local HTTP-capable client (Cursor, LM Studio, etc.) to `http://127.0.0.1:8179/mcp`. For Claude custom connectors, use a public/tunneled HTTPS URL (custom connectors connect from Anthropic's cloud). See the [Multi-client setup](../README.md#multi-client-setup-shared-server-via-streamable-http) section in the README.
 
 ### SSE server won't start
 

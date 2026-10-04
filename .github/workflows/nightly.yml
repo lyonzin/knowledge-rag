@@ -3,7 +3,7 @@ name: Nightly
 # Nightly resilience matrix that does not run on every PR (too slow)
 # but catches deeper regressions weekly:
 #   * mutation testing — finds tests that are too weak
-#   * soak test — proves no leak after 1h continuous queries
+#   * soak test — 50,000 embedding calls under a fixed RSS growth budget
 #   * chaos suite — failure injection (HF down, ONNX zeroed, etc.)
 #   * determinism — full suite x3 to surface flaky tests
 #
@@ -31,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Install package + chaos deps
@@ -48,12 +48,12 @@ jobs:
         run: pytest -m chaos -v
 
   soak:
-    name: "Nightly — Soak test (1h queries)"
+    name: "Nightly — Soak test (50k calls, fixed RSS budget)"
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Install package + memory deps
@@ -67,24 +67,29 @@ jobs:
           HF_HUB_OFFLINE: "1"
           TRANSFORMERS_OFFLINE: "1"
           HF_HUB_DISABLE_PROGRESS_BARS: "1"
-          # The baseline test caps iterations at 1000; the env var lets
-          # the nightly job amplify to 50000 iterations for a true soak.
+          # Increase calls from 1,000 to 50,000 without increasing the
+          # 40 MiB retained RSS growth budget or retaining mock call history.
           KNOWLEDGE_RAG_SOAK_ITERATIONS: "50000"
-        run: pytest tests/test_memory_baseline.py -v
+        run: pytest tests/test_memory_baseline.py -v --junitxml=memory-soak.xml
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: memory-soak-results
+          path: memory-soak.xml
 
   determinism:
     name: "Nightly — Determinism (full suite x3)"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Install package + tests
         shell: bash
         run: |
           pip install -e .
-          pip install pytest pytest-cov pytest-rerunfailures hypothesis psutil numpy pyyaml
+          pip install pytest pytest-cov pytest-rerunfailures hypothesis psutil numpy pyyaml hatchling
       - name: Run suite three times
         shell: bash
         env:
@@ -105,7 +110,7 @@ jobs:
     continue-on-error: true   # mutmut output is exploratory, never blocking
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Install package + mutmut

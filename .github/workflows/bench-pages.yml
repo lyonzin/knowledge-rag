@@ -32,7 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -70,6 +70,14 @@ jobs:
             --version "$(python -c 'import mcp_server; print(mcp_server.__version__)')"
           echo "Site contents:"
           ls -la site/
+
+      - name: Preserve raw timings and RSS byte samples
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: benchmark-raw-measurements
+          path: bench-current.json
+          if-no-files-found: warn
 
       - uses: actions/upload-artifact@v7
         with:

@@ -55,15 +55,15 @@ class TestGpuModeNormalization:
         assert c.gpu_mode == "auto"
         assert c.gpu_acceleration is True
         captured = capsys.readouterr()
-        assert "Invalid gpu value" in captured.out
-        assert "banana" in captured.out
+        assert "Invalid gpu value" in captured.err
+        assert "banana" in captured.err
 
     def test_invalid_type_falls_back_to_auto(self, capsys):
         c = Config(gpu_mode=42)  # type: ignore[arg-type]
         assert c.gpu_mode == "auto"
         assert c.gpu_acceleration is True
         captured = capsys.readouterr()
-        assert "Invalid gpu value" in captured.out
+        assert "Invalid gpu value" in captured.err
 
 
 # ============================================================================
@@ -133,9 +133,9 @@ class TestLoadModelRouting:
         assert kwargs["providers"] == ["CPUExecutionProvider"]
         # And the fallback reason is surfaced in the banner
         captured = capsys.readouterr()
-        assert "GPU STATUS: UNAVAILABLE" in captured.out
-        assert "auto-cpu-fallback" in captured.out
-        assert "CUDAExecutionProvider not in onnxruntime providers" in captured.out
+        assert "GPU STATUS: UNAVAILABLE" in captured.err
+        assert "auto-cpu-fallback" in captured.err
+        assert "CUDAExecutionProvider not in onnxruntime providers" in captured.err
 
     @patch("mcp_server.server.FastEmbedEmbeddings.verify_gpu_readiness")
     @patch("mcp_server.server.TextEmbedding")
@@ -156,8 +156,8 @@ class TestLoadModelRouting:
         _, kwargs = mock_te.call_args
         assert kwargs["providers"] == ["CPUExecutionProvider"]
         captured = capsys.readouterr()
-        assert "gpu: true but GPU not ready" in captured.out
-        assert "forced-cuda-fallback" in captured.out
+        assert "gpu: true but GPU not ready" in captured.err
+        assert "forced-cuda-fallback" in captured.err
 
     @patch("mcp_server.server.FastEmbedEmbeddings.verify_gpu_readiness")
     @patch("mcp_server.server.TextEmbedding")
@@ -188,5 +188,5 @@ class TestLoadModelRouting:
         ]
         assert second_call_kwargs["providers"] == ["CPUExecutionProvider"]
         captured = capsys.readouterr()
-        assert "CUDA load failed" in captured.out
-        assert "forced-cuda-fallback" in captured.out
+        assert "CUDA load failed" in captured.err
+        assert "forced-cuda-fallback" in captured.err

@@ -14,7 +14,7 @@
   --border-strong: #2d3b5f;
   --text:          #e6ecf7;
   --text-muted:    #9aa8c4;
-  --text-dim:      #6c7a99;
+  --text-dim:      #9aa8c4;
 
   /* Accents — brand + status */
   --accent:        #38bdf8;   /* cyan-400 */
@@ -22,7 +22,7 @@
   --brand:         #a78bfa;   /* violet-400 */
   --success:       #22c55e;
   --warning:       #f59e0b;
-  --danger:        #ef4444;
+  --danger:        #f87171;
 
   /* Chart palette (used by dashboard.js) */
   --chart-series-1: #38bdf8;
@@ -60,7 +60,13 @@
     --border-strong: #cbd5e1;
     --text:          #0f172a;
     --text-muted:    #475569;
-    --text-dim:      #94a3b8;
+    --text-dim:      #475569;
+    --accent:        #0369a1;
+    --accent-strong: #075985;
+    --brand:         #6d28d9;
+    --success:       #166534;
+    --warning:       #92400e;
+    --danger:        #b91c1c;
     --shadow-sm: 0 1px 2px rgba(15,23,42,.06);
     --shadow:    0 4px 12px rgba(15,23,42,.08);
     --shadow-lg: 0 20px 40px -12px rgba(15,23,42,.15);
@@ -76,7 +82,13 @@
   --border-strong: #cbd5e1;
   --text:          #0f172a;
   --text-muted:    #475569;
-  --text-dim:      #94a3b8;
+  --text-dim:      #475569;
+  --accent:        #0369a1;
+  --accent-strong: #075985;
+  --brand:         #6d28d9;
+  --success:       #166534;
+  --warning:       #92400e;
+  --danger:        #b91c1c;
   --shadow-sm: 0 1px 2px rgba(15,23,42,.06);
   --shadow:    0 4px 12px rgba(15,23,42,.08);
   --shadow-lg: 0 20px 40px -12px rgba(15,23,42,.15);
@@ -159,10 +171,7 @@ code, .mono {
   font-weight: 700;
   margin: 0;
   letter-spacing: -0.02em;
-  background: linear-gradient(135deg, var(--text) 0%, var(--accent) 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  color: var(--text);
 }
 
 .tagline {
