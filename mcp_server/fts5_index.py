@@ -300,18 +300,21 @@ class Fts5LexicalIndex:
         escaped = _escape_fts5_query(query)
         if not escaped:
             return []
-        scope_sql = (
-            "AND rowid IN (SELECT rowid FROM fts5_chunk_ids WHERE chunk_id IN (SELECT value FROM json_each(?))) "
-            if allowed_ids is not None
-            else ""
-        )
-        sql = (
-            "SELECT chunk_id, bm25(fts5_documents) AS rank "
-            "FROM fts5_documents WHERE fts5_documents MATCH ? " + scope_sql + "ORDER BY rank LIMIT ?"
-        )
-        parameters = (
-            (escaped, json.dumps(sorted(allowed_ids)), int(top_k)) if allowed_ids is not None else (escaped, int(top_k))
-        )
+        parameters: tuple[str | int, ...]
+        if allowed_ids is not None:
+            sql = (
+                "SELECT chunk_id, bm25(fts5_documents) AS rank "
+                "FROM fts5_documents WHERE fts5_documents MATCH ? "
+                "AND rowid IN (SELECT rowid FROM fts5_chunk_ids WHERE chunk_id IN (SELECT value FROM json_each(?))) "
+                "ORDER BY rank LIMIT ?"
+            )
+            parameters = (escaped, json.dumps(sorted(allowed_ids)), int(top_k))
+        else:
+            sql = (
+                "SELECT chunk_id, bm25(fts5_documents) AS rank "
+                "FROM fts5_documents WHERE fts5_documents MATCH ? ORDER BY rank LIMIT ?"
+            )
+            parameters = (escaped, int(top_k))
         try:
             with self._fts5_lock:
                 cur = self._conn.execute(sql, parameters)
