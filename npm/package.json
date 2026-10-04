@@ -1,6 +1,6 @@
 {
   "name": "knowledge-rag",
-  "version": "4.10.0",
+  "version": "4.11.0",
   "description": "Local RAG MCP server with hybrid search, cross-encoder reranking and local document indexing.",
   "bin": {
     "knowledge-rag": "./bin/cli.js"

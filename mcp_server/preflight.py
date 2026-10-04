@@ -11,17 +11,83 @@ fixes below were validated on their environment before merging.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
 
-from .config import BASE_DIR, config
+from .config import BASE_DIR, _get, config
 
 PROBE_ATTEMPTS = 3
 PROBE_RETRY_DELAY_SECONDS = 5
 PROBE_TIMEOUT_SECONDS = 30
+
+# Cloud-sync folders break ChromaDB (HNSW mmap) and SQLite WAL/SHM:
+# the provider opens handles on live files to upload them, racing with
+# the engine's own mmap/WAL writes → native access violation (0xC0000005
+# on Windows, SIGBUS on macOS/Linux) → corrupted segments → auto-repair
+# wipes the index. Match on any path segment to catch OneDrive, iCloud,
+# Dropbox, Google Drive, Box, pCloud, Mega, Nextcloud, Sync.com, MEGAsync.
+_CLOUD_SYNC_PATTERNS = re.compile(
+    r"(?:^|[\\/])("
+    r"OneDrive(?:[ -][^\\/]*)?"
+    r"|iCloud(?:[ ]Drive)?|com~apple~CloudDocs"
+    r"|Dropbox(?:[ -][^\\/]*)?"
+    r"|Google[ ]Drive|GoogleDrive|My[ ]Drive"
+    r"|Box(?:[ ]Sync)?"
+    r"|pCloudDrive|pCloud"
+    r"|MEGA(?:sync)?"
+    r"|Nextcloud|ownCloud"
+    r"|Sync|Syncthing"
+    r")(?:[\\/]|$)"
+)
+
+
+def _detect_cloud_sync_provider(path: Path) -> str | None:
+    """Return the matched provider segment when ``path`` resolves under a
+    known cloud-sync folder, otherwise ``None``. Case-insensitive.
+    """
+    try:
+        resolved = str(path.resolve())
+    except OSError:
+        resolved = str(path)
+    match = _CLOUD_SYNC_PATTERNS.search(resolved) or _CLOUD_SYNC_PATTERNS.search(resolved.replace("/", "\\"))
+    if match:
+        return match.group(1)
+    # Case-insensitive fallback for odd-cased folders.
+    match_ci = _CLOUD_SYNC_PATTERNS.search(resolved, re.IGNORECASE) if hasattr(re, "search") else None
+    return match_ci.group(1) if match_ci else None
+
+
+def _check_cloud_sync() -> None:
+    """Abort startup when ``data_dir`` lives under a cloud-sync folder,
+    unless ``paths.allow_cloud_sync: true`` is set as an opt-in override.
+
+    Cloud sync corrupts ChromaDB HNSW segments (mmap) and SQLite WAL —
+    see _CLOUD_SYNC_PATTERNS docstring for the failure mode.
+    """
+    provider = _detect_cloud_sync_provider(config.data_dir)
+    if not provider:
+        return
+    allow = bool(_get("paths", "allow_cloud_sync", False))
+    if allow:
+        _log(
+            f"[PREFLIGHT] WARNING: data_dir is under cloud sync ({provider}): {config.data_dir}. "
+            f"Index corruption is likely. Running anyway because paths.allow_cloud_sync=true."
+        )
+        return
+    _log(
+        f"[PREFLIGHT] FATAL: data_dir is under cloud sync ({provider}): {config.data_dir}\n"
+        f"  Cloud sync corrupts ChromaDB (HNSW mmap) and SQLite WAL — the engine will crash with\n"
+        f"  access violations (0xC0000005 on Windows, SIGBUS on *nix) and auto-repair will wipe\n"
+        f"  the index.\n"
+        f"  Fix: move paths.data_dir to a local path (e.g. %LOCALAPPDATA%\\knowledge-rag\\data on\n"
+        f"  Windows, ~/.local/share/knowledge-rag/data on Linux/macOS), or set paths.allow_cloud_sync=true\n"
+        f"  to acknowledge the risk and continue."
+    )
+    raise SystemExit(78)  # EX_CONFIG
 
 
 def _log(msg: str) -> None:
@@ -134,6 +200,8 @@ def run_preflight(timeout_seconds: int = PROBE_TIMEOUT_SECONDS) -> bool:
     and the process exits with EX_TEMPFAIL (75) instead of crashing
     halfway with a partial move.
     """
+    _check_cloud_sync()
+
     last_result: subprocess.CompletedProcess[str] | None = None
     for attempt in range(1, PROBE_ATTEMPTS + 1):
         try:
@@ -169,3 +237,31 @@ def run_preflight(timeout_seconds: int = PROBE_TIMEOUT_SECONDS) -> bool:
         raise SystemExit(75) from exc
     _log(f"[RECOVERY] moved active index to {backup_dir}")
     return True
+
+
+if __name__ == "__main__":
+    # ponytail: runnable self-check for _detect_cloud_sync_provider. No framework.
+    cases = [
+        (r"C:\Users\x\OneDrive\Documentos\knowledge-rag\data", "OneDrive"),
+        (r"C:\Users\x\OneDrive - Contoso\knowledge-rag\data", "OneDrive - Contoso"),
+        (r"/Users/x/Library/Mobile Documents/com~apple~CloudDocs/kr", "com~apple~CloudDocs"),
+        (r"/Users/x/iCloud Drive/kr", "iCloud Drive"),
+        (r"/home/x/Dropbox/kr/data", "Dropbox"),
+        (r"C:\Users\x\Google Drive\kr", "Google Drive"),
+        (r"/home/x/GoogleDrive/kr", "GoogleDrive"),
+        (r"C:\Users\x\pCloudDrive\kr", "pCloudDrive"),
+        (r"/home/x/MEGAsync/kr", "MEGAsync"),
+        (r"/home/x/Nextcloud/kr", "Nextcloud"),
+        (r"C:\knowledge-rag\data", None),
+        (r"/var/lib/knowledge-rag/data", None),
+        (r"C:\Users\x\AppData\Local\knowledge-rag\data", None),
+    ]
+    failed = 0
+    for raw, expected in cases:
+        got = _detect_cloud_sync_provider(Path(raw))
+        status = "OK" if got == expected else "FAIL"
+        if got != expected:
+            failed += 1
+        print(f"[{status}] {raw} → {got!r} (expected {expected!r})")
+    assert failed == 0, f"{failed} case(s) failed"
+    print(f"\nAll {len(cases)} cloud-sync detection cases passed.")

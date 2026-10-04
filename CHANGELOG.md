@@ -13,6 +13,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+### v4.11.0 (2026-10-04) — Cloud-sync data_dir guard
+
+**Added:**
+
+- Preflight check that detects when `paths.data_dir` resolves under a known cloud-sync folder (OneDrive incl. tenant variants like `OneDrive - Contoso`, iCloud Drive incl. `com~apple~CloudDocs`, Dropbox, Google Drive, Box, pCloud, MEGAsync, Nextcloud/ownCloud, Sync/Syncthing) and aborts startup with `EX_CONFIG` (78) and an actionable fix message before ChromaDB is opened.
+- Opt-in `paths.allow_cloud_sync` flag (default `false`) in `config.example.yaml` for users who understand the risk and want to continue anyway — demotes the fatal abort to a warning and lets startup proceed.
+- Runnable self-check in `mcp_server/preflight.py` (`python -m mcp_server.preflight`) with 13 asserts covering all supported providers plus negative cases (local root, `/var/lib`, `%LOCALAPPDATA%`).
+
+**Changed:**
+
+- `paths.data_dir` living under cloud sync is now a startup error by default. Existing installs under `Documents/` on Windows with OneDrive-synced M365 profiles, iCloud-synced macOS `~/Documents`, Dropbox/Google-Drive-synced home folders, etc., must either move `data_dir` to a local path (recommended) or set `paths.allow_cloud_sync: true` to acknowledge the corruption risk. Rationale: cloud sync opens handles on live files to upload them, racing with ChromaDB's HNSW mmap writes and SQLite WAL/SHM, which triggers native access violations (`0xC0000005` on Windows, `SIGBUS` on *nix). The 3-strike preflight probe failure path then invokes `_backup_active_index()` and moves the live index into `data/backups/auto-repair-*`, forcing a full reindex from scratch and effectively wiping the corpus. Reproduced empirically on Windows 11 + OneDrive + ~5.9k docs (crash → auto-repair wipe → 20 min reindex loop).
+
+---
+
 ### v4.10.0 (2026-10-04) — Indexing reliability, bounded memory and scoped retrieval
 
 **Fixed:**
