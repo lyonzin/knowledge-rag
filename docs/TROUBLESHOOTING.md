@@ -24,18 +24,12 @@ python --version    # Must be 3.11+
 
 ### FastEmbed model download fails
 
-On first run, FastEmbed downloads models to `models_cache/`. If the download fails:
-
-```bash
-# Clear cache and retry
-# Windows:
-rmdir /s /q models_cache
-
-# Linux/macOS:
-rm -rf models_cache
-
-# Then restart the MCP server
-```
+On first use, FastEmbed downloads to the configured `paths.models_cache_dir`.
+Check the download error, network access, available disk space and permissions
+for that directory. Preserve working cached models: deleting the entire cache
+also removes unrelated models and prevents offline startup. If a specific
+download is corrupt, identify that model/revision from the error and retry only
+its failed download after preserving any usable cached copy.
 
 ### Reranker model download fails
 
@@ -49,7 +43,11 @@ models:
     enabled: false
 ```
 
-Disabling reranking reduces memory use and avoids first-query model loading. The tradeoff is lower ranking precision, especially when several chunks match the same terms but only one is the best answer.
+Disabling reranking reduces memory use and avoids first-query model loading,
+but changes result ordering. Measure precision and source recall on your own
+languages and questions with it both enabled and disabled. The default reranker
+was trained on English MS-MARCO; it can also move a relevant candidate below
+irrelevant results. Its score is not a probability that an answer is correct.
 
 ### ChromaDB index crashes on startup
 
@@ -71,9 +69,22 @@ ls documents/
 # Force reindex via Claude Code:
 # reindex_documents(force=True)
 
-# Or nuclear rebuild if model changed:
-# reindex_documents(full_rebuild=True)
 ```
+
+For model or dimension changes, follow the isolated migration procedure in
+[the reindex guide](reindex-operations.md). A dimension mismatch can prevent
+startup before any MCP reindex tool becomes available.
+
+### PDF exists but does not index
+
+Check the actual file content as well as its extension. Binary PDFs use
+PyMuPDF; encrypted, damaged or image-only documents may not yield indexable
+text. OCR is not included. Explicit UTF-8 extractions beginning with `[Page N]`
+are supported within the strict encoding, control-character and 4 MiB limits
+described in the [format reference](../README.md). A `.pdf` suffix alone does
+not make arbitrary text or binary data a valid PDF. Empty files produce no
+document; inspect per-file diagnostics rather than treating a completed worker
+as proof that every source was indexed.
 
 ### MCP server not loading
 

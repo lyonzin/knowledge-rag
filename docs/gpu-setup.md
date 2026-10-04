@@ -114,6 +114,32 @@ Any probe exception is a failure and leads to CPU fallback. The application also
 
 Containers need host GPU access and a compatible runtime image. WSL2 uses the Windows host driver; follow [NVIDIA's WSL guidance](https://docs.nvidia.com/cuda/wsl-user-guide/index.html) rather than installing a Linux display driver inside WSL.
 
+### Windows MCP SDK subprocess environment
+
+Compare the server's environment with the working terminal if CUDA works in a
+foreground script but the same server falls back under a Python MCP stdio client.
+On the audit host, the SDK's reduced default environment omitted `PROGRAMW6432`:
+`nvidia-smi` then exited 255 with an NVML error. Inheriting that variable alone
+from the trusted parent restored the probe and actual CUDA inference. Adding
+`WINDIR` or changing `CREATE_NO_WINDOW` did not resolve that reproduction.
+
+For a client using `StdioServerParameters`, extend its environment explicitly:
+
+```python
+import os
+from mcp.client.stdio import get_default_environment
+
+server_env = get_default_environment()
+if os.name == "nt" and "PROGRAMW6432" in os.environ:
+    server_env["PROGRAMW6432"] = os.environ["PROGRAMW6432"]
+# Pass env=server_env to your StdioServerParameters instance.
+```
+
+Preserve any application-specific environment overrides as well. This is a
+reproduced client-environment issue, not a reason to reinstall GPU drivers.
+Verify the effective execution provider after startup; do not log the complete
+environment, which can contain credentials.
+
 ## AMD and Apple GPU status
 
 | Platform | Upstream option | Status in knowledge-rag |

@@ -31,12 +31,11 @@ def io_path(path: Path, *, extend_directory: bool = False) -> Path:
     Resolve dot components and links before adding the Win32 prefix, which
     otherwise disables their usual interpretation.
     """
-    if sys.platform != "win32":
-        return path
-    absolute = os.path.abspath(path)
-    if not extend_directory and len(absolute) < _MAX_PATH:
-        return path
-    return Path(_extend_windows_path(str(resolve_path(path))))
+    if sys.platform == "win32":
+        absolute = os.path.abspath(path)
+        if extend_directory or len(absolute) >= _MAX_PATH:
+            path = Path(_extend_windows_path(str(resolve_path(path))))
+    return path
 
 
 def _public_windows_path(path: str) -> str:
@@ -54,12 +53,13 @@ def resolve_path(path: Path) -> Path:
     A normal Win32 resolve can stop at MAX_PATH and leave a deep symlink
     unresolved. Containment must check its real target before any read.
     """
-    if sys.platform != "win32":
-        return path.resolve()
-    absolute = os.path.abspath(path)
-    readable = Path(_extend_windows_path(absolute)) if len(absolute) >= _MAX_PATH else path
-    resolved = readable.resolve()
-    return Path(_public_windows_path(str(resolved)))
+    if sys.platform == "win32":
+        absolute = os.path.abspath(path)
+        readable = Path(_extend_windows_path(absolute)) if len(absolute) >= _MAX_PATH else path
+        resolved = Path(_public_windows_path(str(readable.resolve())))
+    else:
+        resolved = path.resolve()
+    return resolved
 
 
 def walk_document_paths(directory: Path) -> Iterator[tuple[str, list[str], list[str]]]:

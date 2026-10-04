@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Drain in-flight collection readers during final publication, retain source timestamps from before parsing, persist partial orphan-pruning successes, and clean retired collection backups conservatively.
 - Skip unchanged files before parsing, bound pending indexing work, validate traversal containment, and prevent duplicate overlap-only chunks.
 - Read and discover long Windows document paths with the extended I/O namespace while preserving public source identities and resolving link targets before containment checks.
+- Release native PDF streams retained by failed constructor tracebacks so Windows can clean staged files after invalid PDF writes without changing the original error.
 - Make FTS5 chunk replay idempotent, index chunk identities for updates, validate migration completion, and synchronize derived lexical state with document/index mutations.
 - Choose embedding batch size from the actual execution provider, validate batch overrides and every output vector, and synchronize lazy model initialization.
 - Preserve full-content cached search results, batch keyword-hit hydration, and rerank the full FTS5 candidate pool before truncating results.
@@ -37,6 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Added:**
 
+- Recognize bounded UTF-8 PDF text extractions with explicit `[Page N]` markers and provenance metadata; retain native parsing and diagnostics for binary or invalid PDFs.
 - Explicit Windows DirectML embedding mode with a required adapter index, effective-session safety checks, serialized inference and CPU fallback. Automatic GPU selection remains CUDA/CPU.
 - An opt-in real indexing/retrieval audit harness with temporary ChromaDB/FTS5 storage, CPU/GPU selection, corpus/model hashes, mutation/reopen checks and measured query quality.
 

@@ -459,9 +459,8 @@ class DocumentParser:
         return content, metadata
 
     def _parse_pdf(self, filepath: Path) -> tuple[str, Dict]:
-        """Parse PDF file using PyMuPDF (text extraction, no markdown conversion)."""
-        if not HAS_PYMUPDF:
-            raise ImportError("PyMuPDF (fitz) not installed. Install with: pip install pymupdf")
+        """Read bounded explicit PDF extractions, or extract a binary PDF natively."""
+        from .pdf_support import read_extracted_pdf_text, release_exception_frames
 
         metadata = {
             "type": "pdf",
@@ -469,10 +468,19 @@ class DocumentParser:
             "file_size": filepath.stat().st_size,
             "modified": datetime.fromtimestamp(filepath.stat().st_mtime).isoformat(),
         }
-
+        extracted = read_extracted_pdf_text(filepath)
+        if extracted is not None:
+            return extracted[0], metadata | extracted[1]
+        if not HAS_PYMUPDF:
+            raise ImportError("PyMuPDF (fitz) not installed. Install with: pip install pymupdf")
         text_parts = []
-
-        with fitz.open(filepath) as doc:
+        prior_error = sys.exception()
+        try:
+            document = fitz.open(filepath)
+        except Exception as error:
+            release_exception_frames(error, stop_at=prior_error)
+            raise
+        with document as doc:
             metadata["pages"] = len(doc)
             metadata["title"] = doc.metadata.get("title", filepath.stem)
             metadata["author"] = doc.metadata.get("author", "")
@@ -482,8 +490,7 @@ class DocumentParser:
                 if text.strip():
                     text_parts.append(f"[Page {page_num + 1}]\n{text}")
 
-        content = "\n\n".join(text_parts)
-        return content, metadata
+        return "\n\n".join(text_parts), metadata
 
     def _parse_text(self, filepath: Path) -> tuple[str, Dict]:
         """Parse plain text file"""

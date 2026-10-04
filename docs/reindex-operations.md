@@ -24,6 +24,15 @@ Inspect representative sources and retrieval results after a large operation.
 A parser error should retain the previous indexed content for that source and
 be reported as an error; it must not be treated as a file deletion.
 
+Storage consistency and retrieval quality are separate checks. Before a large
+validation run, choose questions, expected sources and required evidence from
+the original documents. Keep that set unchanged when comparing configurations,
+and retain failed-to-ingest sources in the end-to-end denominator. A matching
+filename does not prove that the returned chunks contain the answer. When a
+source is relevant but its retrieved context is incomplete, use `get_document`
+to inspect that source. Record nearest-neighbor results for unanswerable queries
+separately; a nonempty search result is not itself an answered question.
+
 For an operator-owned foreground script, `get_orchestrator().nuclear_rebuild()`
 waits for completion in that process:
 

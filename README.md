@@ -489,7 +489,7 @@ Parsers use format-specific extraction: Markdown sections, code boundaries, note
 |---|--------|-----------|--------|:-------:|-------|
 | 1 | Markdown | `.md` | Section-aware (splits at `##`) | Yes | Headers preserved as chunk boundaries |
 | 2 | Plain Text | `.txt` | Fixed-size chunking | Yes | 1000 chars + 200 overlap |
-| 3 | PDF | `.pdf` | PyMuPDF extraction | Yes | Text-based PDFs only (no OCR) |
+| 3 | PDF | `.pdf` | PyMuPDF extraction or explicit page-marked UTF-8 text | Yes | No OCR; extracted-text recognition is limited to 4 MiB |
 | 4 | Word | `.docx` | python-docx | Yes | Headings preserved as markdown |
 | 5 | Excel | `.xlsx` | openpyxl | Yes | Sheet-by-sheet extraction |
 | 6 | PowerPoint | `.pptx` | python-pptx | Yes | Slide-by-slide extraction |
@@ -522,6 +522,16 @@ Parsers use format-specific extraction: Markdown sections, code boundaries, note
 | 33 | Tiltfile | `Tiltfile` | Code-aware parser | Yes | Starlark — `def` functions / `load()` extracted |
 | 34 | MQL4 Source | `.mq4` | Code parser | **No** | MetaTrader — opt-in via `documents.supported_formats` |
 | 35 | MQL4 Header | `.mqh` | Code parser | **No** | MetaTrader — opt-in via `documents.supported_formats` |
+
+Files with a `.pdf` extension can also contain an explicit text extraction: the
+first line must be `[Page N]` with a positive page number, followed by nonempty
+UTF-8 text. An optional UTF-8 BOM and tab/CR/LF whitespace are accepted. This
+recognition is limited to 4 MiB, rejects other C0/C1 controls and DEL, and never
+reinterprets a file containing PDF magic in the first 1 KiB as text. Accepted
+extractions retain their source path and are marked `content_format=extracted_text`
+and `page_count_source=markers`; the marker count is not proof of the original
+PDF's total page count. Binary PDFs keep the native parser and its error
+diagnostics. Invalid or oversized textual lookalikes remain errors.
 
 > **Enable an opt-in format** — add the extension to `documents.supported_formats` in your `config.yaml`:
 > ```yaml
