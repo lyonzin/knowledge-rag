@@ -12,6 +12,17 @@ def query(orch):
     return orch.query("synthetic orchard", max_results=1, hybrid_alpha=1.0, search_method="hybrid")
 
 
+def assert_committed_inventory(orch):
+    path = server.config.documents_dir / "one.txt"
+    assert path.read_text(encoding="utf-8") == "Original synthetic orchard"
+    assert len(orch._indexed_docs) == 1
+    assert orch._source_to_docid[str(path.resolve())] in orch._indexed_docs
+    result = orch.query(
+        "synthetic orchard", max_results=1, hybrid_alpha=1.0, search_method="hybrid", include_folders=["."]
+    )
+    assert len(result) == 1 and "Original synthetic orchard" in result[0]["content"]
+
+
 @pytest.fixture
 def mutation_window(isolated_orchestrator, monkeypatch):
     orch = isolated_orchestrator
@@ -80,6 +91,7 @@ def test_failed_delete_drops_intermediate_cache(mutation_window, monkeypatch, la
     assert orch.query_cache.generation > generation
     after = query(orch)
     assert len(after) == 1 and "Original synthetic orchard" in after[0]["content"]
+    assert_committed_inventory(orch)
 
 
 @pytest.mark.parametrize("operation", ["add", "update"])
@@ -99,3 +111,4 @@ def test_failed_content_rollback_drops_intermediate_cache(mutation_window, monke
     assert orch.query_cache.generation > generation
     after = query(orch)
     assert len(after) == 1 and "Original synthetic orchard" in after[0]["content"]
+    assert_committed_inventory(orch)

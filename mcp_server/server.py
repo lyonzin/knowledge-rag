@@ -1597,6 +1597,7 @@ class KnowledgeOrchestrator:
 
         # Reverse lookup: resolved source path → doc_id (for O(1) adjacent chunk expansion)
         self._source_to_docid: Dict[str, str] = self._build_source_lookup()
+        self._pending_document_repairs = self._load_document_repairs()
 
         # Migration: deferred — checked in main() after full init
         self._needs_rebuild = False
@@ -1794,11 +1795,15 @@ class KnowledgeOrchestrator:
     ) -> Dict[str, Any]:
         """Inner implementation of index_all (caller holds _index_lock)."""
         stats = self._init_index_stats()
+        repairs = self._load_document_repairs()
         documents = self._scan_and_count_documents(stats)
         path_to_docid = self._build_path_to_docid_map()
         self._prune_orphan_documents(documents, stats)
 
         tracking = self._init_reindex_tracking(resume_state, stats)
+        tracking["repair_sources"] = repairs
+        tracking["repaired_sources"] = set()
+        self._repair_missing_sources(stats, tracking)
         _progress_interval = max(1, stats["total_files"] // 10)
 
         for idx, doc in enumerate(documents):
@@ -1929,6 +1934,8 @@ class KnowledgeOrchestrator:
         """
         try:
             source = doc if isinstance(doc, Path) else doc.source
+            repair_ids = tracking.get("repair_sources", {}).get(str(source.resolve()))
+            force = force or repair_ids is not None
             source_stat = io_path(source).stat()
             if isinstance(doc, Path):
                 existing = path_to_docid.get(str(doc)) or self._source_to_docid.get(str(doc.resolve()))
@@ -1947,6 +1954,8 @@ class KnowledgeOrchestrator:
             if existing_doc_id is _SKIP_DOC:
                 return
 
+            if repair_ids is not None:
+                self._remove_repair_chunks(source, [value for value in repair_ids if value != existing_doc_id])
             chunks_added, dedup_skipped, removed = self._replace_document_chunks(doc, existing_doc_id)
             stats["chunks_removed"] += removed
             if existing_doc_id:
@@ -1954,6 +1963,8 @@ class KnowledgeOrchestrator:
             self._commit_indexed_doc(
                 doc, chunks_added, dedup_skipped, existing_doc_id, force, stats, tracking, source_stat
             )
+            if repair_ids is not None:
+                tracking["repaired_sources"].add(str(source.resolve()))
         except Exception as e:
             stats["errors"] += 1
             print(f"[ERROR] Failed to index {source}: {e}", file=sys.stderr)
@@ -1973,7 +1984,8 @@ class KnowledgeOrchestrator:
         doc_id (may be None for a fresh doc). Evicts stale content when a
         content change is detected.
         """
-        if tracking["resume_doc_ids"] and doc.id in tracking["resume_doc_ids"]:
+        repairing = str(doc.source.resolve()) in tracking.get("repair_sources", {})
+        if not repairing and tracking["resume_doc_ids"] and doc.id in tracking["resume_doc_ids"]:
             stats["skipped"] += 1
             return _SKIP_DOC
 
@@ -2165,6 +2177,7 @@ class KnowledgeOrchestrator:
     def _finalize_reindex(self, stats: Dict[str, Any], tracking: Dict[str, Any]) -> Dict[str, Any]:
         """Flush metadata, clear checkpoint (if applicable), invalidate query cache."""
         self._save_metadata()
+        self._finish_document_repairs(tracking.get("repaired_sources", set()))
 
         # Checkpoint is no longer needed after a successful run — clear it so
         # the next reindex(resume=True) does not resume into a stale state.
@@ -2875,6 +2888,10 @@ class KnowledgeOrchestrator:
             self._rollback_and_cleanup_staging(prod_name, ts, saved)
             raise
         self._staged_state = None
+        try:
+            self._finish_document_repairs(set(getattr(self, "_pending_document_repairs", {})))
+        except Exception as exc:
+            print(f"[RECOVERY] Rebuild committed; post-commit repair cleanup failed: {exc}", file=sys.stderr)
         self._retire_previous_collection(prod_name, ts)
         self._fts5_reset_and_rebuild()
 
@@ -3010,6 +3027,9 @@ class KnowledgeOrchestrator:
         queries returned no_results forever without any error surfaced.
         """
         if self.fts5_index is None:
+            return
+        if getattr(self, "_pending_document_repairs", None):
+            self.fts5_index.clear()
             return
         state_payload = self.fts5_index.state.read() or {}
         status = state_payload.get("status")
@@ -3920,11 +3940,7 @@ class KnowledgeOrchestrator:
 
     def _rollback_content_document(self, doc, old_id, old_info, previous) -> None:
         """Undo the replacement without embedding old text a second time."""
-        ids, _, _, _ = self._dedup_chunks(doc)
-        if ids:
-            self._write_collection.delete(ids=ids)
-            self._fts5_sync_remove_ids(ids)
-        self._restore_document_chunks(previous)
+        # The catalogue describes the last commit even when vector rollback fails.
         self._indexed_docs.pop(doc.id, None)
         self._source_to_docid.pop(str(doc.source), None)
         if old_id:
@@ -3932,6 +3948,15 @@ class KnowledgeOrchestrator:
             self._source_to_docid[str(doc.source)] = old_id
         self._bm25_initialized = False
         self.query_cache.invalidate()
+        try:
+            ids, _, _, _ = self._dedup_chunks(doc)
+            if ids:
+                self._write_collection.delete(ids=ids)
+                self._fts5_sync_remove_ids(ids)
+            self._restore_document_chunks(previous)
+        except Exception as exc:
+            self._record_document_repair(doc.source, [value for value in (old_id, doc.id) if value], exc)
+            raise
 
     def _fts5_sync_add_from_doc(self, doc: Document) -> None:
         """Insert every chunk of ``doc`` into FTS5. Best-effort (ADR-008)."""
@@ -3993,9 +4018,14 @@ class KnowledgeOrchestrator:
         try:
             self._save_metadata()
         except Exception:
-            self._restore_document_chunks(previous)
             self._indexed_docs[doc_id] = old_info
             self._source_to_docid[source] = doc_id
+            self._bm25_initialized = False
+            try:
+                self._restore_document_chunks(previous)
+            except Exception as exc:
+                self._record_document_repair(path, [doc_id], exc)
+                raise
             raise
         result = {"chunks_removed": removed, "filepath": source, "file_deleted": False}
         if delete_file:
@@ -4265,6 +4295,166 @@ class KnowledgeOrchestrator:
         if "error" in progress:
             result["last_error"] = progress["error"]
         return result
+
+    _DOCUMENT_REPAIR_LIMIT = 1024 * 1024
+
+    def _validate_document_repairs(self, repairs: Any) -> Dict[str, List[str]]:
+        """Validate bounded, corpus-local sources and document-version IDs."""
+        if not isinstance(repairs, dict) or len(repairs) > 1024:
+            raise ValueError("Invalid document repair inventory; preserve the journal for manual recovery")
+        validated = {}
+        for source, ids in repairs.items():
+            if not isinstance(source, str) or len(source) > 32768:
+                raise ValueError("Invalid document repair source")
+            path = validate_path_within(config.documents_dir, source)
+            if path == config.documents_dir.resolve() or str(path) != source:
+                raise ValueError("Document repair source must be a canonical contained file path")
+            if (
+                not isinstance(ids, list)
+                or not 1 <= len(ids) <= 16
+                or any(not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{16}", value) is None for value in ids)
+            ):
+                raise ValueError("Invalid document repair version IDs")
+            validated[source] = sorted(set(ids))
+        return validated
+
+    def _load_document_repairs(self) -> Dict[str, List[str]]:
+        """Read only the failure journal, bounded even if it grows after stat()."""
+        path = self._metadata_file.with_name("document_repairs.json")
+        repairs = {}
+        if path.exists():
+            if path.stat().st_size > self._DOCUMENT_REPAIR_LIMIT:
+                raise ValueError("Document repair journal exceeds 1 MiB; preserve it for manual recovery")
+            with path.open("rb") as stream:
+                raw = stream.read(self._DOCUMENT_REPAIR_LIMIT + 1)
+            if len(raw) > self._DOCUMENT_REPAIR_LIMIT:
+                raise ValueError("Document repair journal exceeds 1 MiB; preserve it for manual recovery")
+            payload = json.loads(raw.decode("utf-8"))
+            if (
+                not isinstance(payload, dict)
+                or type(payload.get("version")) is not int
+                or payload.get("version") != 1
+                or payload.get("collection") != config.collection_name
+            ):
+                raise ValueError("Invalid document repair journal identity")
+            repairs = self._validate_document_repairs(payload.get("sources"))
+        for source, ids in getattr(self, "_pending_document_repairs", {}).items():
+            repairs[source] = sorted(set(repairs.get(source, []) + ids))
+        self._pending_document_repairs = self._validate_document_repairs(repairs)
+        return dict(self._pending_document_repairs)
+
+    def _save_document_repairs(self, repairs: Dict[str, List[str]]) -> None:
+        """Publish the failure journal atomically; never publish a partial repair."""
+        import tempfile
+
+        repairs = self._validate_document_repairs(repairs)
+        path = self._metadata_file.with_name("document_repairs.json")
+        if not repairs:
+            path.unlink(missing_ok=True)
+            return
+        raw = json.dumps({"version": 1, "collection": config.collection_name, "sources": repairs}).encode("utf-8")
+        if len(raw) > self._DOCUMENT_REPAIR_LIMIT:
+            raise ValueError("Document repair journal exceeds 1 MiB")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix=path.name, suffix=".tmp", delete=False) as stream:
+            temporary = Path(stream.name)
+            try:
+                stream.write(raw)
+                stream.flush()
+                os.fsync(stream.fileno())
+            except BaseException:
+                stream.close()
+                temporary.unlink(missing_ok=True)
+                raise
+        try:
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _record_document_repair(self, source: Path, ids: List[str], error: Exception) -> None:
+        """Keep the original double failure and make uncertain restoration retryable."""
+        source_key = str(source.resolve())
+        repairs = dict(getattr(self, "_pending_document_repairs", {}))
+        repairs[source_key] = sorted(set(repairs.get(source_key, []) + ids))
+        self._pending_document_repairs = repairs
+        self._bm25_initialized = False
+        try:
+            # Load/merge old failures before publishing this one, never drop them.
+            repairs = self._load_document_repairs()
+            self._save_document_repairs(repairs)
+            error.add_note("Vector rollback is unconfirmed; the next incremental reindex will repair this source.")
+        except Exception as journal_error:
+            recovery_hint = (
+                f"Could not persist rollback repair ({journal_error}); run reindex_documents(force=True) now, "
+                "or reindex_documents(full_rebuild=True) after restarting, before trusting the index. "
+                "If rebuild validation refuses the reduced corpus, rebuild in an isolated data_dir and retain this index."
+            )
+            error.add_note(recovery_hint)
+            print(f"[RECOVERY] {recovery_hint}", file=sys.stderr)
+        if self.fts5_index is not None:
+            try:
+                self.fts5_index.clear()
+            except Exception as lexical_error:
+                error.add_note(f"FTS5 invalidation failed ({lexical_error}); run reindex_documents(force=True).")
+                # A failed clear must not leave a ready lexical fast path exposed.
+                index, self.fts5_index = self.fts5_index, None
+                try:
+                    index.close()
+                except Exception as close_error:
+                    error.add_note(f"FTS5 close failed: {close_error}")
+
+    def _remove_repair_chunks(self, source: Path, ids: List[str]) -> int:
+        """Delete only journaled versions belonging to this contained source."""
+        if not ids:
+            return 0
+        source = validate_path_within(config.documents_dir, source)
+        where = {"$and": [{"doc_id": {"$in": ids}}, {"source": str(source)}]}
+        removed = 0
+        while True:
+            batch = self._write_collection.get(where=where, include=[], limit=self._CHROMA_BATCH_SIZE)["ids"]
+            if not batch:
+                break
+            self._write_collection.delete(ids=batch)
+            self._fts5_sync_remove_ids(batch)
+            removed += len(batch)
+        self._bm25_initialized = False
+        self.query_cache.invalidate()
+        return removed
+
+    def _repair_missing_sources(self, stats: Dict[str, Any], tracking: Dict[str, Any]) -> None:
+        """A failed first add can leave rows after its uncommitted file is removed."""
+        for source, ids in tracking["repair_sources"].items():
+            path = Path(source)
+            try:
+                io_path(path).stat()
+            except FileNotFoundError:
+                try:
+                    stats["chunks_removed"] += self._remove_repair_chunks(path, ids)
+                    for doc_id in ids:
+                        if self._indexed_docs.get(doc_id, {}).get("source") == source:
+                            self._indexed_docs.pop(doc_id)
+                    self._source_to_docid.pop(source, None)
+                    tracking["repaired_sources"].add(source)
+                    stats["deleted"] += 1
+                except Exception as exc:
+                    stats["errors"] += 1
+                    print(f"[ERROR] Failed to repair absent source {source}: {exc}", file=sys.stderr)
+            except OSError:
+                # Inaccessibility is not proof that deletion is safe.
+                continue
+
+    def _finish_document_repairs(self, repaired: set[str]) -> None:
+        """Forget failures only after authoritative rows and metadata committed."""
+        if not repaired or not getattr(self, "_persist_metadata", True):
+            return
+        remaining = {key: ids for key, ids in self._pending_document_repairs.items() if key not in repaired}
+        self._save_document_repairs(remaining)
+        self._pending_document_repairs = remaining
+        if not remaining and config.fts5_enabled:
+            if self.fts5_index is None:
+                self._initialize_fts5_dispatch()
+            else:
+                self._maybe_start_fts5_migration()
 
     def _load_metadata(self) -> Dict[str, Dict]:
         """Read validated metadata; never silently replace a corrupt state file."""
