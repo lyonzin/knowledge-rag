@@ -44,6 +44,17 @@ paths:
   # Default: ./models_cache (relative to project root)
   models_cache_dir: "./models_cache"
 
+  # Opt-in escape hatch: allow data_dir to live under a cloud-sync folder
+  # (OneDrive, iCloud, Dropbox, Google Drive, Box, pCloud, Mega, Nextcloud, Sync).
+  # Default: false — preflight aborts with EX_CONFIG (78) when data_dir is
+  # under one of those providers. Cloud sync opens handles on live files to
+  # upload them, racing with ChromaDB's HNSW mmap and SQLite WAL writes, which
+  # triggers native access violations (0xC0000005 on Windows, SIGBUS on *nix)
+  # and causes preflight auto-repair to wipe the corpus. Leave this false and
+  # point data_dir at a local path (e.g. %LOCALAPPDATA%\knowledge-rag\data on
+  # Windows, ~/.local/share/knowledge-rag/data on Linux/macOS).
+  allow_cloud_sync: false
+
 
 # ============================================================================
 # DOCUMENTS

@@ -41,7 +41,7 @@ Anything requiring the attacker to already own the local filesystem is **out of 
 
 | Version | Status |
 |---|---|
-| Latest published 4.10.x release | Current maintenance line; check release notes for the fixes actually included |
+| Latest published 4.11.x release | Current maintenance line; check release notes for the fixes actually included |
 | Unreleased branches / pull requests | Under review; not a released security guarantee |
 | Previous minor release | Security patch window of 30 days after the next minor release, under the policy below |
 | Older releases | Unsupported; upgrade to the maintained release |
