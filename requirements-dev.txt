@@ -21,7 +21,7 @@ hypothesis>=6.168.3            # property-based testing (Pillar 4: Versatility)
 hatchling                      # real wheel/sdist regressions; matches build-system
 
 # ── Type checking & quality ─────────────────────────────────────────────────
-mypy>=2.1.0
+mypy>=2.4.0
 interrogate>=1.7.0             # docstring coverage (Pillar 7)
 radon>=6.0.1                   # cyclomatic complexity
 vulture>=2.16                  # dead-code detection
