@@ -48,7 +48,7 @@ dependencies = [
 gpu = [
     # ORT 1.27+ on PyPI defaults to CUDA 13; this extra installs CUDA 12.
     # CPU/GPU wheels share a namespace: see docs/gpu-setup.md before use.
-    "onnxruntime-gpu>=1.21,<1.27; sys_platform == 'win32' or sys_platform == 'linux'",
+    "onnxruntime-gpu>=1.21,<1.31; sys_platform == 'win32' or sys_platform == 'linux'",
     "nvidia-cublas-cu12>=12.8,<13; sys_platform == 'win32' or sys_platform == 'linux'",
     "nvidia-cudnn-cu12>=9,<10; sys_platform == 'win32' or sys_platform == 'linux'",
     "nvidia-cuda-runtime-cu12>=12.8,<13; sys_platform == 'win32' or sys_platform == 'linux'",
