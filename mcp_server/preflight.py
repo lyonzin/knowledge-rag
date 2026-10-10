@@ -53,17 +53,11 @@ def _detect_cloud_sync_provider(path: Path) -> str | None:
         resolved = str(path.resolve())
     except OSError:
         resolved = str(path)
-    match = _CLOUD_SYNC_PATTERNS.search(resolved) or _CLOUD_SYNC_PATTERNS.search(
-        resolved.replace("/", "\\")
-    )
+    match = _CLOUD_SYNC_PATTERNS.search(resolved) or _CLOUD_SYNC_PATTERNS.search(resolved.replace("/", "\\"))
     if match:
         return match.group(1)
     # Case-insensitive fallback for odd-cased folders.
-    match_ci = (
-        _CLOUD_SYNC_PATTERNS.search(resolved, re.IGNORECASE)
-        if hasattr(re, "search")
-        else None
-    )
+    match_ci = _CLOUD_SYNC_PATTERNS.search(resolved, re.IGNORECASE) if hasattr(re, "search") else None
     return match_ci.group(1) if match_ci else None
 
 
@@ -223,9 +217,7 @@ def run_preflight(timeout_seconds: int = PROBE_TIMEOUT_SECONDS) -> bool:
             return False
         if result.returncode == 0:
             if attempt > 1:
-                _log(
-                    f"[PREFLIGHT] attempt {attempt}: OK (recovered from transient failure)"
-                )
+                _log(f"[PREFLIGHT] attempt {attempt}: OK (recovered from transient failure)")
             return False
         stderr_tail = (result.stderr or "").strip()[-1500:]
         _log(
@@ -237,9 +229,7 @@ def run_preflight(timeout_seconds: int = PROBE_TIMEOUT_SECONDS) -> bool:
 
     assert last_result is not None
     reason = "segfault" if last_result.returncode in (-11, 139) else "failed"
-    _log(
-        f"[RECOVERY] preflight failed {PROBE_ATTEMPTS}x (last exit code {last_result.returncode}); moving index aside"
-    )
+    _log(f"[RECOVERY] preflight failed {PROBE_ATTEMPTS}x (last exit code {last_result.returncode}); moving index aside")
     try:
         backup_dir = _backup_active_index(reason)
     except OSError as exc:
