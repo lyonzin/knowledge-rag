@@ -53,11 +53,17 @@ def _detect_cloud_sync_provider(path: Path) -> str | None:
         resolved = str(path.resolve())
     except OSError:
         resolved = str(path)
-    match = _CLOUD_SYNC_PATTERNS.search(resolved) or _CLOUD_SYNC_PATTERNS.search(resolved.replace("/", "\\"))
+    match = _CLOUD_SYNC_PATTERNS.search(resolved) or _CLOUD_SYNC_PATTERNS.search(
+        resolved.replace("/", "\\")
+    )
     if match:
         return match.group(1)
     # Case-insensitive fallback for odd-cased folders.
-    match_ci = _CLOUD_SYNC_PATTERNS.search(resolved, re.IGNORECASE) if hasattr(re, "search") else None
+    match_ci = (
+        _CLOUD_SYNC_PATTERNS.search(resolved, re.IGNORECASE)
+        if hasattr(re, "search")
+        else None
+    )
     return match_ci.group(1) if match_ci else None
 
 
@@ -156,19 +162,22 @@ def _backup_active_index(reason: str) -> Path:
     return backup_dir
 
 
-def _probe_chroma(timeout_seconds: int = PROBE_TIMEOUT_SECONDS) -> subprocess.CompletedProcess[str]:
+def _probe_chroma(
+    timeout_seconds: int = PROBE_TIMEOUT_SECONDS,
+) -> subprocess.CompletedProcess[str]:
     """Check Chroma in a child process so native crashes do not kill MCP startup."""
     code = r"""
 import chromadb
 
 from mcp_server.config import config
+from mcp_server.server import FastEmbedEmbeddings
 
 if not config.chroma_dir.exists():
     print("missing")
     raise SystemExit(0)
 
 client = chromadb.PersistentClient(path=str(config.chroma_dir))
-collection = client.get_or_create_collection(name=config.collection_name)
+collection = client.get_or_create_collection(name=config.collection_name, embedding_function=FastEmbedEmbeddings())
 print(collection.count())
 """
     env = os.environ.copy()
@@ -214,7 +223,9 @@ def run_preflight(timeout_seconds: int = PROBE_TIMEOUT_SECONDS) -> bool:
             return False
         if result.returncode == 0:
             if attempt > 1:
-                _log(f"[PREFLIGHT] attempt {attempt}: OK (recovered from transient failure)")
+                _log(
+                    f"[PREFLIGHT] attempt {attempt}: OK (recovered from transient failure)"
+                )
             return False
         stderr_tail = (result.stderr or "").strip()[-1500:]
         _log(
@@ -226,7 +237,9 @@ def run_preflight(timeout_seconds: int = PROBE_TIMEOUT_SECONDS) -> bool:
 
     assert last_result is not None
     reason = "segfault" if last_result.returncode in (-11, 139) else "failed"
-    _log(f"[RECOVERY] preflight failed {PROBE_ATTEMPTS}x (last exit code {last_result.returncode}); moving index aside")
+    _log(
+        f"[RECOVERY] preflight failed {PROBE_ATTEMPTS}x (last exit code {last_result.returncode}); moving index aside"
+    )
     try:
         backup_dir = _backup_active_index(reason)
     except OSError as exc:
@@ -244,7 +257,10 @@ if __name__ == "__main__":
     cases = [
         (r"C:\Users\x\OneDrive\Documentos\knowledge-rag\data", "OneDrive"),
         (r"C:\Users\x\OneDrive - Contoso\knowledge-rag\data", "OneDrive - Contoso"),
-        (r"/Users/x/Library/Mobile Documents/com~apple~CloudDocs/kr", "com~apple~CloudDocs"),
+        (
+            r"/Users/x/Library/Mobile Documents/com~apple~CloudDocs/kr",
+            "com~apple~CloudDocs",
+        ),
         (r"/Users/x/iCloud Drive/kr", "iCloud Drive"),
         (r"/home/x/Dropbox/kr/data", "Dropbox"),
         (r"C:\Users\x\Google Drive\kr", "Google Drive"),
