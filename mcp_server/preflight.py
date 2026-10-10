@@ -156,19 +156,22 @@ def _backup_active_index(reason: str) -> Path:
     return backup_dir
 
 
-def _probe_chroma(timeout_seconds: int = PROBE_TIMEOUT_SECONDS) -> subprocess.CompletedProcess[str]:
+def _probe_chroma(
+    timeout_seconds: int = PROBE_TIMEOUT_SECONDS,
+) -> subprocess.CompletedProcess[str]:
     """Check Chroma in a child process so native crashes do not kill MCP startup."""
     code = r"""
 import chromadb
 
 from mcp_server.config import config
+from mcp_server.server import FastEmbedEmbeddings
 
 if not config.chroma_dir.exists():
     print("missing")
     raise SystemExit(0)
 
 client = chromadb.PersistentClient(path=str(config.chroma_dir))
-collection = client.get_or_create_collection(name=config.collection_name)
+collection = client.get_or_create_collection(name=config.collection_name, embedding_function=FastEmbedEmbeddings())
 print(collection.count())
 """
     env = os.environ.copy()
@@ -244,7 +247,10 @@ if __name__ == "__main__":
     cases = [
         (r"C:\Users\x\OneDrive\Documentos\knowledge-rag\data", "OneDrive"),
         (r"C:\Users\x\OneDrive - Contoso\knowledge-rag\data", "OneDrive - Contoso"),
-        (r"/Users/x/Library/Mobile Documents/com~apple~CloudDocs/kr", "com~apple~CloudDocs"),
+        (
+            r"/Users/x/Library/Mobile Documents/com~apple~CloudDocs/kr",
+            "com~apple~CloudDocs",
+        ),
         (r"/Users/x/iCloud Drive/kr", "iCloud Drive"),
         (r"/home/x/Dropbox/kr/data", "Dropbox"),
         (r"C:\Users\x\Google Drive\kr", "Google Drive"),
