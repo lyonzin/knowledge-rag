@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+### Unreleased
+
+**Fixed:**
+
+- `search_knowledge(category)`, `list_documents(category)` and `add_from_url(title)` now accept an explicit `null`. They were annotated `str = None`, so the tool schema advertised `"default": null` on a string-only field and the MCP SDK rejected `{"category": null}` with a validation error before the tool ran. They are now `Optional[str]`, matching the other optional arguments.
+
+---
+
 ### v4.11.0 (2026-10-04) — Cloud-sync data_dir guard
 
 **Added:**

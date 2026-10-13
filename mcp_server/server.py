@@ -4688,7 +4688,7 @@ def _make_snippet(content: str, max_chars: int = 500) -> str:
 def search_knowledge(
     query: str,
     max_results: int = 5,
-    category: str = None,
+    category: Optional[str] = None,
     hybrid_alpha: float = 0.3,
     min_score: float = 0.0,
     snippet_mode: bool = True,
@@ -4986,7 +4986,7 @@ def list_categories() -> str:
 @mcp.tool()
 @rate_limited
 @instrument("list_documents")
-def list_documents(category: str = None) -> str:
+def list_documents(category: Optional[str] = None) -> str:
     """
     List all indexed documents, optionally filtered by category.
 
@@ -5155,7 +5155,7 @@ def remove_document(filepath: str, delete_file: bool = False) -> str:
 @mcp.tool()
 @rate_limited
 @instrument("add_from_url")
-def add_from_url(url: str, category: str = "general", title: str = None) -> str:
+def add_from_url(url: str, category: str = "general", title: Optional[str] = None) -> str:
     """
     Fetch content from a URL, convert to markdown, and add to the knowledge base.
 
