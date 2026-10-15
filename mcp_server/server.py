@@ -564,6 +564,87 @@ class FastEmbedEmbeddings:
 
 
 # =============================================================================
+# EMBEDDINGS (OpenAI API)
+# =============================================================================
+
+
+class OpenAIEmbeddings:
+    """
+    OpenAI API embedding function for ChromaDB (v1.4.0+ compatible).
+
+    Drop-in replacement for FastEmbedEmbeddings when config has
+    provider: "openai". Requires an OpenAI API key via config.yaml
+    or the OPENAI_API_KEY environment variable.
+
+    Default model: text-embedding-3-small (1536-dim)
+    """
+
+    def __init__(self, model: str = None, api_key: str = None):
+        self.model_name = model or config.embedding_model
+        self._dim = config.embedding_dim
+        resolved_key = api_key or config.openai_api_key or os.environ.get("OPENAI_API_KEY")
+        if not resolved_key:
+            raise ValueError(
+                "OpenAI API key required: set models.embedding.api_key in config.yaml "
+                "or OPENAI_API_KEY env var"
+            )
+        from openai import OpenAI
+
+        self._client = OpenAI(api_key=resolved_key)
+        print(f"[INFO] OpenAI embeddings configured: {self.model_name} ({self._dim}D)")
+
+    # OpenAI allows max 300k tokens per request. With ~1500-char chunks
+    # averaging ~375 tokens each, 500 chunks is a safe batch size.
+    BATCH_SIZE = 500
+
+    def __call__(self, input: List[str]) -> List[List[float]]:
+        """
+        Generate embeddings via OpenAI API.
+
+        ChromaDB embedding_function interface: __call__(input: List[str]) -> List[List[float]]
+        Automatically batches large inputs to stay under OpenAI's per-request token limit.
+        """
+        if not input:
+            return []
+
+        result: List[List[float]] = []
+        for i in range(0, len(input), self.BATCH_SIZE):
+            batch = input[i : i + self.BATCH_SIZE]
+            try:
+                resp = self._client.embeddings.create(model=self.model_name, input=batch)
+            except Exception as exc:
+                raise EmbeddingError(f"OpenAI embedding request failed: {exc}") from exc
+            result.extend(d.embedding for d in resp.data)
+
+        if len(result) != len(input):
+            raise EmbeddingError(f"Embedding count mismatch: expected {len(input)}, got {len(result)}")
+        if result and len(result[0]) != self._dim:
+            raise EmbeddingError(
+                f"Embedding dim mismatch: expected {self._dim}, got {len(result[0])}. "
+                f"Check models.embedding.dimensions in config.yaml"
+            )
+        return result
+
+    def name(self) -> str:
+        """Return embedding function name (required by ChromaDB v1.4.0+)"""
+        return f"openai-{self.model_name}"
+
+    def embed_documents(self, documents: List[str]) -> List[List[float]]:
+        """Embed a list of documents (alias for __call__)"""
+        return self(documents)
+
+    def embed_query(self, input=None, **kwargs) -> List[List[float]]:
+        """Embed query text(s) - returns list of embeddings"""
+        if isinstance(input, list):
+            texts = input
+        elif input is not None:
+            texts = [input]
+        else:
+            texts = [kwargs.get("query", "")]
+        return self(texts)
+
+
+# =============================================================================
 # CROSS-ENCODER RERANKER
 # =============================================================================
 
@@ -804,7 +885,10 @@ class KnowledgeOrchestrator:
 
     def __init__(self):
         self.parser = DocumentParser()
-        self.embed_fn = FastEmbedEmbeddings()
+        if config.embedding_provider == "openai":
+            self.embed_fn = OpenAIEmbeddings()
+        else:
+            self.embed_fn = FastEmbedEmbeddings()
 
         # Initialize ChromaDB with persistent storage (new API v1.4.0+)
         self.chroma_client = chromadb.PersistentClient(path=str(config.chroma_dir))

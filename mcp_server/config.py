@@ -4,7 +4,7 @@ import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import yaml
 
@@ -426,6 +426,13 @@ class Config:
     )
 
     # Embeddings
+    embedding_provider: str = field(
+        default_factory=lambda: (
+            _get("models", "embedding", {}).get("provider", "fastembed")
+            if isinstance(_get("models", "embedding", {}), dict)
+            else "fastembed"
+        )
+    )
     embedding_model: str = field(
         default_factory=lambda: (
             _get("models", "embedding", {}).get("model", "BAAI/bge-small-en-v1.5")
@@ -438,6 +445,13 @@ class Config:
             _get("models", "embedding", {}).get("dimensions", 384)
             if isinstance(_get("models", "embedding", {}), dict)
             else 384
+        )
+    )
+    openai_api_key: Optional[str] = field(
+        default_factory=lambda: (
+            _get("models", "embedding", {}).get("api_key", None)
+            if isinstance(_get("models", "embedding", {}), dict)
+            else None
         )
     )
     gpu_acceleration: bool = field(
@@ -526,6 +540,12 @@ class Config:
 
     def __post_init__(self):
         """Validate config values and ensure directories exist."""
+        # Embedding provider validation
+        valid_providers = ("fastembed", "openai")
+        if self.embedding_provider not in valid_providers:
+            print(f"[WARN] embedding_provider={self.embedding_provider!r} invalid, using 'fastembed'")
+            self.embedding_provider = "fastembed"
+
         # Bounds validation
         if not isinstance(self.chunk_size, int) or self.chunk_size < 100:
             print(f"[WARN] chunk_size={self.chunk_size} invalid, using 1000")

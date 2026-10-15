@@ -35,6 +35,9 @@ pyyaml>=6.0
 # File watcher (auto-reindex on document changes)
 watchdog>=4.0.0
 
+# OpenAI embeddings (alternative to FastEmbed)
+openai>=1.0.0
+
 # ==========================================
 # IMPORTANT NOTES:
 # ==========================================
