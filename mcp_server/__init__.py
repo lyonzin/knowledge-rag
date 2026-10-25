@@ -1,6 +1,6 @@
 """Knowledge RAG MCP Server - Local Retrieval-Augmented Generation System"""
 
-__version__ = "4.11.0"
+__version__ = "4.11.1"
 __author__ = "Ailton Rocha (Lyon.)"
 
 from .config import Config  # noqa: E402
