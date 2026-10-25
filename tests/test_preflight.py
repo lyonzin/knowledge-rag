@@ -30,18 +30,33 @@ def test_real_probe_reads_but_never_creates_the_collection(tmp_path, monkeypatch
     monkeypatch.setenv("PYTHONPATH", str(ROOT))
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
 
+    chroma_dir = str(base / "data" / "chroma_db")
+    seed = (
+        "import sys, chromadb\n"
+        "class FastEmbedLike:\n"
+        "    def __call__(self, input): return [[0.1, 0.2] for _ in input]\n"
+        "    def name(self): return 'fastembed-test'\n"
+        "client = chromadb.PersistentClient(path=sys.argv[1])\n"
+        "if sys.argv[2] == 'production':\n"
+        "    client.create_collection('knowledge_base', embedding_function=FastEmbedLike()).add(ids=['a'], documents=['a'])\n"
+        "else:\n"
+        "    client.delete_collection('knowledge_base')\n"
+        "    client.create_collection('knowledge_base')\n"
+    )
+
     fresh = preflight._probe_chroma(timeout_seconds=120)
     assert (fresh.returncode, fresh.stdout.strip()) == (0, "missing"), fresh.stderr
 
-    # create_collection raises if the probe above left a collection behind.
-    seed = (
-        "import sys, chromadb; client = chromadb.PersistentClient(path=sys.argv[1]); "
-        "client.create_collection('knowledge_base').add(ids=['a'], embeddings=[[0.1, 0.2]])"
-    )
-    subprocess.run([sys.executable, "-c", seed, str(base / "data" / "chroma_db")], check=True, timeout=120)
+    # A healthy index as the server writes it; create_collection also fails if the
+    # probe above left a collection behind.
+    subprocess.run([sys.executable, "-c", seed, chroma_dir, "production"], check=True, timeout=120)
+    production = preflight._probe_chroma(timeout_seconds=120)
+    assert (production.returncode, production.stdout.strip()) == (0, "1"), production.stderr
 
-    existing = preflight._probe_chroma(timeout_seconds=120)
-    assert (existing.returncode, existing.stdout.strip()) == (0, "1"), existing.stderr
+    # What the old probe left on fresh installs: empty, bound to Chroma's default EF.
+    subprocess.run([sys.executable, "-c", seed, chroma_dir, "leftover"], check=True, timeout=120)
+    leftover = preflight._probe_chroma(timeout_seconds=120)
+    assert (leftover.returncode, leftover.stdout.strip()) == (0, "0"), leftover.stderr
 
 
 def test_probe_uses_absolute_parent_base_even_with_relative_environment(tmp_path, monkeypatch):
