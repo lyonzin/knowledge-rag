@@ -2,6 +2,7 @@
 
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock
 
@@ -33,6 +34,54 @@ def test_collection_open_failure_preserves_database_and_collections(tmp_path, mo
     assert vectors.read_bytes() == b"existing vectors sentinel"
     orchestrator.chroma_client.delete_collection.assert_not_called()
     assert orchestrator.chroma_client.get_or_create_collection.call_count == 1
+
+
+class _FastEmbedLike:
+    """What Chroma sees of FastEmbedEmbeddings: callable plus name(), no config."""
+
+    def __call__(self, input):
+        return [[0.1, 0.2] for _ in input]
+
+    @staticmethod
+    def name():
+        return "fastembed-test"
+
+
+@pytest.fixture
+def default_ef_collection(monkeypatch):
+    """The collection as the pre-fix preflight probe left it: Chroma's default EF."""
+    import chromadb
+
+    monkeypatch.setattr(server.config, "collection_name", "test-" + uuid.uuid4().hex)
+    orchestrator = object.__new__(server.KnowledgeOrchestrator)
+    orchestrator.embed_fn = _FastEmbedLike()
+    orchestrator.chroma_client = chromadb.EphemeralClient()
+    stale = orchestrator.chroma_client.create_collection(server.config.collection_name)
+    yield orchestrator, stale
+    for collection in orchestrator.chroma_client.list_collections():
+        if collection.name == server.config.collection_name:
+            orchestrator.chroma_client.delete_collection(collection.name)
+
+
+def test_empty_default_ef_collection_is_recreated(default_ef_collection):
+    """GH #248/#252: installs that already hit the conflict start again after upgrading."""
+    orchestrator, stale = default_ef_collection
+
+    collection = orchestrator._safe_get_collection()
+
+    assert collection.id != stale.id
+    assert orchestrator._safe_get_collection().id == collection.id
+
+
+def test_default_ef_collection_with_data_is_never_dropped(default_ef_collection):
+    orchestrator, stale = default_ef_collection
+    stale.add(ids=["a"], embeddings=[[0.1, 0.2]])
+
+    with pytest.raises(RuntimeError, match="Existing index preserved"):
+        orchestrator._safe_get_collection()
+
+    kept = orchestrator.chroma_client.get_collection(server.config.collection_name)
+    assert (kept.id, kept.count()) == (stale.id, 1)
 
 
 def test_bm25_retry_does_not_accumulate_duplicate_documents(monkeypatch):

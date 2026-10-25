@@ -1642,17 +1642,41 @@ class KnowledgeOrchestrator:
     def _safe_get_collection(self):
         """Open the collection without discarding data on initialization errors."""
         try:
-            return self.chroma_client.get_or_create_collection(
-                name=config.collection_name,
-                embedding_function=self.embed_fn,
-                metadata={"description": "Knowledge base for RAG"},
-            )
+            return self._open_collection()
         except Exception as exc:
-            raise RuntimeError(
-                f"Could not open ChromaDB collection {config.collection_name!r} "
-                f"at {config.chroma_dir}: {exc}. Existing index preserved. "
-                "Check database access and embedding configuration before retrying."
-            ) from exc
+            if not self._drop_empty_default_ef_collection():
+                raise RuntimeError(
+                    f"Could not open ChromaDB collection {config.collection_name!r} "
+                    f"at {config.chroma_dir}: {exc}. Existing index preserved. "
+                    "Check database access and embedding configuration before retrying."
+                ) from exc
+        return self._open_collection()
+
+    def _open_collection(self) -> Any:
+        """Get or create the production collection bound to the FastEmbed function."""
+        return self.chroma_client.get_or_create_collection(
+            name=config.collection_name,
+            embedding_function=self.embed_fn,
+            metadata={"description": "Knowledge base for RAG"},
+        )
+
+    def _drop_empty_default_ef_collection(self) -> bool:
+        """Drop the collection only when it is empty and bound to Chroma's default EF.
+
+        GH #248/#252: the preflight probe used to create it without an embedding
+        function, so Chroma persisted ``default`` and refused FastEmbed on every
+        later open. An empty one holds nothing; one with data is never touched.
+        """
+        try:
+            stale = self.chroma_client.get_collection(name=config.collection_name, embedding_function=None)
+            ef_name = (stale.configuration_json.get("embedding_function") or {}).get("name")
+            if ef_name != "default" or stale.count() != 0:
+                return False
+            self.chroma_client.delete_collection(name=config.collection_name)
+        except Exception:
+            return False
+        print("[RECOVERY] Recreating empty collection bound to Chroma's default embedding (GH #248)", file=sys.stderr)
+        return True
 
     def _check_dimension_mismatch(self) -> bool:
         """Check if stored embeddings have different dimension than current config.
