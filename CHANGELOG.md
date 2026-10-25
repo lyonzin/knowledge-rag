@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 **Fixed:**
 
 - `search_knowledge(category)`, `list_documents(category)` and `add_from_url(title)` now accept an explicit `null`. They were annotated `str = None`, so the tool schema advertised `"default": null` on a string-only field and the MCP SDK rejected `{"category": null}` with a validation error before the tool ran. They are now `Optional[str]`, matching the other optional arguments.
+- Fresh installs and new data directories start again (#248, #252). Since v4.10.0 they failed with `Embedding function conflict: new: fastembed-… vs persisted: default`: the startup preflight probe created the collection without an embedding function, so ChromaDB persisted its `default` one and refused FastEmbed afterwards. The probe now only reads the collection, and the empty collection the old probe left behind is recreated on the next start. A collection that holds data is never dropped.
 
 ---
 

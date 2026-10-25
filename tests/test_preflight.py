@@ -4,9 +4,44 @@ GH #216 (v4.9.1): retry + timeout + atomic-rename behavior.
 """
 
 import subprocess
+import sys
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_real_probe_reads_but_never_creates_the_collection(tmp_path, monkeypatch):
+    """GH #248/#252: the probe must read, never create, the collection.
+
+    ``get_or_create_collection`` without an embedding function persisted
+    Chroma's ``default`` EF on every fresh data_dir, and the server then
+    refused to open it with FastEmbed ("Embedding function conflict ...
+    persisted: default"). Runs the real child so a broken probe script,
+    which would quarantine every index after 3 attempts, fails here first.
+    """
+    from mcp_server import preflight
+
+    base = tmp_path / "rag"
+    base.mkdir()
+    monkeypatch.setattr(preflight, "BASE_DIR", base)
+    monkeypatch.setenv("PYTHONPATH", str(ROOT))
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+
+    fresh = preflight._probe_chroma(timeout_seconds=120)
+    assert (fresh.returncode, fresh.stdout.strip()) == (0, "missing"), fresh.stderr
+
+    # create_collection raises if the probe above left a collection behind.
+    seed = (
+        "import sys, chromadb; client = chromadb.PersistentClient(path=sys.argv[1]); "
+        "client.create_collection('knowledge_base').add(ids=['a'], embeddings=[[0.1, 0.2]])"
+    )
+    subprocess.run([sys.executable, "-c", seed, str(base / "data" / "chroma_db")], check=True, timeout=120)
+
+    existing = preflight._probe_chroma(timeout_seconds=120)
+    assert (existing.returncode, existing.stdout.strip()) == (0, "1"), existing.stderr
 
 
 def test_probe_uses_absolute_parent_base_even_with_relative_environment(tmp_path, monkeypatch):
