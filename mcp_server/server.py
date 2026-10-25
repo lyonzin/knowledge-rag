@@ -64,7 +64,7 @@ from watchdog.observers import Observer
 # Local imports
 from . import __version__
 from .config import config
-from .file_transaction import staged_text_file
+from .file_transaction import replace_with_retry, staged_text_file
 from .filesystem import io_path
 from .fts5_index import Fts5LexicalIndex, Fts5MigrationError, Fts5NotReadyError
 from .ingestion import Document, DocumentParser
@@ -2411,6 +2411,17 @@ class KnowledgeOrchestrator:
         if self._reindex_progress.get("active"):
             return {"status": "already_running", "progress": dict(self._reindex_progress)}
 
+        # GH #249: index_all refuses at once while a watcher pass or a document
+        # write holds the index lock, so "started" would hide the refusal.
+        # nuclear_rebuild waits for the lock instead.
+        # ponytail: a probe, not admission. A pass that takes the lock between this
+        # check and the worker's index_all is still refused, as before, and shows up
+        # as last_result.skipped_reason; move admission into the worker if it matters.
+        if mode != "nuclear_rebuild":
+            if not self._index_lock.acquire(blocking=False):
+                return {"status": "already_running", "progress": {**self._reindex_progress, "operation": None}}
+            self._index_lock.release()
+
         self._reindex_progress = self._fresh_reindex_progress(mode, resume_state)
 
         # GH #163 (v4.8.3): propagate force through smart_reindex so
@@ -4391,7 +4402,7 @@ class KnowledgeOrchestrator:
                 temporary.unlink(missing_ok=True)
                 raise
         try:
-            os.replace(temporary, path)
+            replace_with_retry(temporary, path)
         finally:
             temporary.unlink(missing_ok=True)
 
@@ -4521,7 +4532,7 @@ class KnowledgeOrchestrator:
                 temporary.unlink(missing_ok=True)
                 raise
         try:
-            os.replace(temporary, self._metadata_file)
+            replace_with_retry(temporary, self._metadata_file)
         finally:
             temporary.unlink(missing_ok=True)
 
@@ -4580,7 +4591,7 @@ class KnowledgeOrchestrator:
             json.dumps(payload, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
-        os.replace(tmp_path, self._checkpoint_file)
+        replace_with_retry(tmp_path, self._checkpoint_file)
         # Reflect in progress dict for status polling.
         self._reindex_progress["checkpoint_saved_at"] = payload["checkpoint_at"]
 

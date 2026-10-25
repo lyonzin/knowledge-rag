@@ -100,7 +100,7 @@ Index or reindex all documents in the knowledge base. **Runs in background** —
 | `full_rebuild` | bool | false | Re-embed all documents into a staging collection and replace the live collection after validation. Requires a running orchestrator and temporary storage for both collections. |
 | `resume` | bool | false | Resume a compatible smart-reindex checkpoint; missing, corrupt, or incompatible checkpoints start a fresh smart run. Cannot be combined with `full_rebuild=true`. |
 
-**Returns:** `{"status": "started", "operation": "..."}` immediately. If already running, returns `{"status": "already_running", "progress": "1200/3734"}`.
+**Returns:** `{"status": "started", "operation": "..."}` immediately. If a reindex, a file-watcher pass or a document write is already running, returns `{"status": "already_running", "progress": "1200/3734"}`; retry after it finishes. `full_rebuild=true` waits for a watcher pass or document write instead.
 
 Poll until `reindex.active` is false, then inspect `last_error` and `last_result.errors`. An idle worker is not proof of a successful rebuild. Smart reindexing writes a resumable checkpoint; see the [operations guide](reindex-operations.md).
 

@@ -1,11 +1,115 @@
 """File publication must preserve rollback bytes and report committed writes accurately."""
 
+import json
+import os
 from pathlib import Path
 
 import pytest
 
 from mcp_server import file_transaction
 from mcp_server.file_transaction import StagedTextFile, staged_text_file
+
+
+def _windows_denial(winerror):
+    """PermissionError as Windows raises it while another handle holds the path."""
+    error = PermissionError(13, "Access is denied")
+    error.winerror = winerror
+    return error
+
+
+def test_replace_waits_out_a_transient_windows_handle(tmp_path, monkeypatch):
+    """GH #249: scanners and readers briefly hold files without FILE_SHARE_DELETE."""
+    source, target = tmp_path / "state.json.tmp", tmp_path / "state.json"
+    source.write_text("new", encoding="utf-8")
+    target.write_text("old", encoding="utf-8")
+    real_replace = os.replace
+    failures = [_windows_denial(5), _windows_denial(32)]
+
+    def held_twice(src, dst):
+        if failures:
+            raise failures.pop(0)
+        real_replace(src, dst)
+
+    monkeypatch.setattr(file_transaction.os, "replace", held_twice)
+    monkeypatch.setattr(file_transaction, "sleep", lambda _delay: None)
+    file_transaction.replace_with_retry(source, target)
+
+    assert target.read_text(encoding="utf-8") == "new"
+    assert not source.exists()
+
+
+@pytest.mark.parametrize("winerror", [5, None])
+def test_replace_reraises_persistent_or_non_windows_denial(tmp_path, monkeypatch, winerror):
+    denial = _windows_denial(winerror)
+    calls = []
+
+    def always_denied(src, dst):
+        calls.append(src)
+        raise denial
+
+    monkeypatch.setattr(file_transaction.os, "replace", always_denied)
+    monkeypatch.setattr(file_transaction, "sleep", lambda _delay: None)
+    with pytest.raises(PermissionError) as caught:
+        file_transaction.replace_with_retry(tmp_path / "a", tmp_path / "b")
+
+    assert caught.value is denial
+    assert len(calls) == (len(file_transaction._REPLACE_RETRY_DELAYS) + 1 if winerror else 1)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows sharing semantics")
+def test_replace_succeeds_once_a_real_windows_handle_is_released(tmp_path, monkeypatch):
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    source, target = tmp_path / "index_metadata.json.tmp", tmp_path / "index_metadata.json"
+    source.write_text("new", encoding="utf-8")
+    target.write_text("old", encoding="utf-8")
+    # GENERIC_READ shared for read/write but not delete, like a scanner or open().
+    handle = kernel32.CreateFileW(str(target), 0x80000000, 0x1 | 0x2, None, 3, 0x80, None)
+    assert handle not in (None, wintypes.HANDLE(-1).value)
+    released = []
+
+    def release(_delay):
+        if not released:
+            assert kernel32.CloseHandle(handle), ctypes.get_last_error()
+            released.append(handle)
+
+    try:
+        with pytest.raises(PermissionError):
+            os.replace(source, target)
+        monkeypatch.setattr(file_transaction, "sleep", release)
+        file_transaction.replace_with_retry(source, target)
+    finally:
+        release(0)
+
+    assert target.read_text(encoding="utf-8") == "new"
+
+
+def test_reindex_state_files_survive_a_transient_windows_handle(isolated_orchestrator, monkeypatch):
+    """GH #249: a held metadata or checkpoint file must not lose the write."""
+    orch = isolated_orchestrator
+    orch._indexed_docs = {"doc": {"source": "a.md"}}
+    held = {orch._metadata_file.name, orch._checkpoint_file.name}
+    real_replace = os.replace
+
+    def held_once(src, dst):
+        if Path(dst).name in held:
+            held.discard(Path(dst).name)
+            raise _windows_denial(5)
+        real_replace(src, dst)
+
+    monkeypatch.setattr(file_transaction.os, "replace", held_once)
+    monkeypatch.setattr(file_transaction, "sleep", lambda _delay: None)
+    orch._save_metadata()
+    orch._write_checkpoint("smart_reindex", ["doc"], 3)
+
+    assert not held
+    assert json.loads(orch._metadata_file.read_text(encoding="utf-8")) == orch._indexed_docs
+    assert json.loads(orch._checkpoint_file.read_text(encoding="utf-8"))["indexed_doc_ids"] == ["doc"]
 
 
 def test_committed_file_survives_temporary_backup_cleanup_failure(tmp_path, monkeypatch, caplog):
