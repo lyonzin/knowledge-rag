@@ -13,6 +13,124 @@
       },
       "functions": {}
     },
+    "mcp_server.file_transaction": {
+      "classes": {
+        "StagedTextFile": {
+          "bases": [],
+          "methods": {
+            "close": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "publish": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            }
+          }
+        }
+      },
+      "functions": {
+        "replace_with_retry": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "source"
+            },
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "destination"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "staged_text_file": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "destination"
+            },
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "content"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        }
+      }
+    },
+    "mcp_server.filesystem": {
+      "classes": {},
+      "functions": {
+        "io_path": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "path"
+            },
+            {
+              "annotated": true,
+              "has_default": true,
+              "kind": "keyword_only",
+              "name": "extend_directory"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "resolve_path": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "path"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "walk_document_paths": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "directory"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        }
+      }
+    },
     "mcp_server.fts5_index": {
       "classes": {
         "Fts5CorruptError": {
@@ -60,7 +178,31 @@
               "is_async": false,
               "returns_annotated": true
             },
+            "clear": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
             "close": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "count": {
               "args": [
                 {
                   "annotated": false,
@@ -133,6 +275,12 @@
                   "has_default": true,
                   "kind": "positional",
                   "name": "top_k"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "keyword_only",
+                  "name": "allowed_ids"
                 }
               ],
               "is_async": false,
@@ -169,6 +317,12 @@
                   "has_default": true,
                   "kind": "keyword_only",
                   "name": "on_progress"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "keyword_only",
+                  "name": "source_snapshot"
                 }
               ],
               "is_async": false,
@@ -181,6 +335,24 @@
                   "has_default": false,
                   "kind": "positional",
                   "name": "self"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "stop_migration": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "timeout"
                 }
               ],
               "is_async": false,
@@ -308,6 +480,15 @@
         }
       }
     },
+    "mcp_server.health": {
+      "classes": {
+        "HealthMiddleware": {
+          "bases": [],
+          "methods": {}
+        }
+      },
+      "functions": {}
+    },
     "mcp_server.ingestion": {
       "classes": {
         "Chunk": {
@@ -346,6 +527,24 @@
         "DocumentParser": {
           "bases": [],
           "methods": {
+            "iter_files": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "directory"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": false
+            },
             "parse_directory": {
               "args": [
                 {
@@ -377,6 +576,12 @@
                   "has_default": false,
                   "kind": "positional",
                   "name": "filepath"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "keyword_only",
+                  "name": "logical_filename"
                 }
               ],
               "is_async": false,
@@ -417,6 +622,67 @@
         },
         "single_instance_lock": {
           "args": [],
+          "is_async": false,
+          "returns_annotated": true
+        }
+      }
+    },
+    "mcp_server.logging_config": {
+      "classes": {
+        "JsonFormatter": {
+          "bases": [
+            "logging.Formatter"
+          ],
+          "methods": {
+            "format": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "record"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            }
+          }
+        }
+      },
+      "functions": {
+        "get_logger": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "name"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "setup_logging": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": true,
+              "kind": "positional",
+              "name": "fmt"
+            },
+            {
+              "annotated": true,
+              "has_default": true,
+              "kind": "positional",
+              "name": "level"
+            }
+          ],
           "is_async": false,
           "returns_annotated": true
         }
@@ -588,6 +854,41 @@
         }
       }
     },
+    "mcp_server.pdf_support": {
+      "classes": {},
+      "functions": {
+        "read_extracted_pdf_text": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "filepath"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "release_exception_frames": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "error"
+            },
+            {
+              "annotated": true,
+              "has_default": true,
+              "kind": "keyword_only",
+              "name": "stop_at"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        }
+      }
+    },
     "mcp_server.preflight": {
       "classes": {},
       "functions": {
@@ -598,6 +899,65 @@
               "has_default": true,
               "kind": "positional",
               "name": "timeout_seconds"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        }
+      }
+    },
+    "mcp_server.publication": {
+      "classes": {
+        "PublicationLock": {
+          "bases": [],
+          "methods": {
+            "read": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "write": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            }
+          }
+        }
+      },
+      "functions": {
+        "collection_publication": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "orchestrator"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "collection_reader": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "method"
             }
           ],
           "is_async": false,
@@ -673,6 +1033,117 @@
           "returns_annotated": true
         }
       }
+    },
+    "mcp_server.search_candidates": {
+      "classes": {},
+      "functions": {
+        "select_rerank_candidates": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "candidates"
+            },
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "limit"
+            },
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "results"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        }
+      }
+    },
+    "mcp_server.search_scope": {
+      "classes": {
+        "FolderScope": {
+          "bases": [],
+          "methods": {
+            "active": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "create": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "cls"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "root"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "include"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "exclude"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "document_ids": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "indexed"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "key": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            }
+          }
+        }
+      },
+      "functions": {}
     },
     "mcp_server.security": {
       "classes": {
@@ -924,6 +1395,12 @@
                   "has_default": true,
                   "kind": "positional",
                   "name": "top_k"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "keyword_only",
+                  "name": "allowed_ids"
                 }
               ],
               "is_async": false,
@@ -1363,6 +1840,18 @@
                   "has_default": true,
                   "kind": "positional",
                   "name": "search_method"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "include_folders"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "exclude_folders"
                 }
               ],
               "is_async": false,
@@ -1381,6 +1870,12 @@
                   "has_default": true,
                   "kind": "positional",
                   "name": "resume_state"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "force"
                 }
               ],
               "is_async": false,
@@ -1487,6 +1982,18 @@
         "QueryCache": {
           "bases": [],
           "methods": {
+            "generation": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
             "get": {
               "args": [
                 {
@@ -1524,6 +2031,12 @@
                   "has_default": true,
                   "kind": "positional",
                   "name": "search_method"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "keyword_only",
+                  "name": "folder_scope"
                 }
               ],
               "is_async": false,
@@ -1584,6 +2097,18 @@
                   "has_default": true,
                   "kind": "positional",
                   "name": "search_method"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "keyword_only",
+                  "name": "expected_generation"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "keyword_only",
+                  "name": "folder_scope"
                 }
               ],
               "is_async": false,
@@ -1799,6 +2324,18 @@
               "has_default": true,
               "kind": "positional",
               "name": "search_method"
+            },
+            {
+              "annotated": true,
+              "has_default": true,
+              "kind": "positional",
+              "name": "include_folders"
+            },
+            {
+              "annotated": true,
+              "has_default": true,
+              "kind": "positional",
+              "name": "exclude_folders"
             }
           ],
           "is_async": false,
