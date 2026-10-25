@@ -27,6 +27,8 @@ from itertools import islice
 from pathlib import Path
 from typing import Any, Callable, Iterable, List, Optional, Sequence, Tuple
 
+from .file_transaction import replace_with_retry
+
 ChunkRow = Tuple[str, str, str, str]
 ChunkIterFactory = Callable[[], Iterable[ChunkRow]]
 ProgressCallback = Callable[[int, int], None]
@@ -137,7 +139,7 @@ class Fts5MigrationState:
                     json.dump(payload, tmp)
                     tmp.flush()
                     os.fsync(tmp.fileno())
-                os.replace(tmp_name, self._path)
+                replace_with_retry(tmp_name, self._path)
             except Exception:
                 try:
                     os.unlink(tmp_name)

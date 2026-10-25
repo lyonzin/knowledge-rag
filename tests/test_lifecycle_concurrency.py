@@ -142,6 +142,40 @@ def test_watcher_rearms_events_during_active_callback(monkeypatch, busy):
     timer.start.assert_called_once()
 
 
+@pytest.mark.parametrize(
+    ("mode", "status"),
+    [("incremental", "already_running"), ("smart_reindex", "already_running"), ("nuclear_rebuild", "started")],
+)
+def test_reindex_reports_already_running_while_the_index_lock_is_held(isolated_orchestrator, monkeypatch, mode, status):
+    """GH #249: index_all refuses while a watcher pass or document write holds the lock.
+
+    Answering "started" hid the refusal; nuclear_rebuild waits for the lock, so it still starts.
+    """
+    orch = isolated_orchestrator
+    held, release = threading.Event(), threading.Event()
+
+    def watcher_pass():
+        with orch._index_lock:
+            held.set()
+            release.wait(5)
+
+    holder = threading.Thread(target=watcher_pass)
+    holder.start()
+    assert held.wait(5)
+    spawned = Mock()
+    monkeypatch.setattr(server.threading, "Thread", spawned)
+    try:
+        result = orch.start_reindex_background(mode)
+    finally:
+        release.set()
+        holder.join(5)
+
+    assert result["status"] == status
+    assert spawned.called == (status == "started")
+    if status == "already_running":
+        assert orch._reindex_progress == {"active": False}
+
+
 def test_public_smart_reindex_routes_force_true(isolated_orchestrator, monkeypatch):
     orch = isolated_orchestrator
     reindex = Mock(return_value={})

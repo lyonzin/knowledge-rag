@@ -8,8 +8,32 @@ import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from time import sleep
 
 logger = logging.getLogger(__name__)
+
+# ERROR_ACCESS_DENIED / ERROR_SHARING_VIOLATION: a scanner, indexer or reader holds
+# the path without FILE_SHARE_DELETE, and Windows cannot replace over it until it lets go.
+_WINDOWS_HELD_ERRORS = frozenset({5, 32})
+_REPLACE_RETRY_DELAYS = (0.05, 0.1, 0.2, 0.4, 0.8)
+
+
+def replace_with_retry(source: str | os.PathLike[str], destination: str | os.PathLike[str]) -> None:
+    """``os.replace`` that waits out a transient Windows handle on either path (GH #249).
+
+    Only PermissionError carrying winerror 5 or 32 is retried, for about 1.5 s; then
+    it is re-raised, so a real permission problem still surfaces. Elsewhere this is
+    a plain ``os.replace``.
+    """
+    for delay in _REPLACE_RETRY_DELAYS:
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError as exc:
+            if getattr(exc, "winerror", None) not in _WINDOWS_HELD_ERRORS:
+                raise
+        sleep(delay)
+    os.replace(source, destination)
 
 
 class StagedTextFile:
@@ -47,19 +71,19 @@ class StagedTextFile:
             ) as stream:
                 backup = Path(stream.name)
             try:
-                os.replace(self.destination, backup)
+                replace_with_retry(self.destination, backup)
             except BaseException:
                 backup.unlink(missing_ok=True)
                 raise
             self.backup = backup
-        os.replace(self.path, self.destination)
+        replace_with_retry(self.path, self.destination)
         self.published = True
 
     def close(self) -> None:
         """Restore old bytes after failure; never delete a backup whose restore failed."""
         if not self.committed:
             if self.backup is not None:
-                os.replace(self.backup, self.destination)
+                replace_with_retry(self.backup, self.destination)
             elif self.published:
                 self.destination.unlink(missing_ok=True)
         for temporary in (self.path, self.backup):

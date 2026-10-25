@@ -21,6 +21,7 @@ tests/test_batch_parallel.py and tests/test_search.py.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -41,8 +42,10 @@ def _fresh_orchestrator(tmp_path: Path) -> KnowledgeOrchestrator:
     - _checkpoint_file pointing inside tmp_path
     - _reindex_progress dict
     - _indexed_docs empty (per-test setup can populate it)
+    - _index_lock, as __init__ always creates it
     """
     orch = object.__new__(KnowledgeOrchestrator)
+    orch._index_lock = threading.RLock()
     orch._checkpoint_file = tmp_path / "reindex_checkpoint.json"
     orch._metadata_file = tmp_path / "index_metadata.json"
     orch._indexed_docs = {}
