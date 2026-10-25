@@ -13,11 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-### Unreleased
+### v4.11.1 (2026-10-25) — Fresh-install startup fix and Windows-safe state writes
+
+Patch release. On v4.10.0 and v4.11.0, every fresh install and every new data directory, new Docker volumes included, failed to start with `Embedding function conflict … persisted: default`. Installs that already hit the error start normally after upgrading. No breaking changes and no migration steps. Thanks to @mmathoosh and @rshun for the reports, @franzgranlund for tracing it to the preflight probe, @cauger-dev for the detailed Windows analysis in #249, and @vishalhabib99 and @viniciussantos45 for #236 and #242.
+
+**Added:**
+
+- The Docker image is published for `linux/amd64` and `linux/arm64` (#242), so Apple Silicon and ARM servers run it natively instead of under emulation.
 
 **Fixed:**
 
-- `search_knowledge(category)`, `list_documents(category)` and `add_from_url(title)` now accept an explicit `null`. They were annotated `str = None`, so the tool schema advertised `"default": null` on a string-only field and the MCP SDK rejected `{"category": null}` with a validation error before the tool ran. They are now `Optional[str]`, matching the other optional arguments.
+- `search_knowledge(category)`, `list_documents(category)` and `add_from_url(title)` now accept an explicit `null` (#236). They were annotated `str = None`, so the tool schema advertised `"default": null` on a string-only field and the MCP SDK rejected `{"category": null}` with a validation error before the tool ran. They are now `Optional[str]`, matching the other optional arguments.
 - Fresh installs and new data directories start again (#248, #252). Since v4.10.0 they failed with `Embedding function conflict: new: fastembed-… vs persisted: default`: the startup preflight probe created the collection without an embedding function, so ChromaDB persisted its `default` one and refused FastEmbed afterwards. The probe now only reads the collection, and the empty collection the old probe left behind is recreated on the next start. A collection that holds data is never dropped.
 - On Windows, saving the index metadata, the reindex checkpoint, the repair journal, the FTS5 state or a document no longer fails when an antivirus, indexer or concurrent reader briefly holds the file (#249). The atomic replace is retried for about 1.5 s on `WinError 5`/`32`, then the original error is raised. Other platforms are unchanged.
 - `reindex_documents` answers `already_running` instead of `started` when a file-watcher pass or a document write holds the index, instead of starting a reindex that was refused at once (#249). `full_rebuild=True` still starts and waits for the lock.
