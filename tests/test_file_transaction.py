@@ -63,6 +63,8 @@ def test_replace_succeeds_once_a_real_windows_handle_is_released(tmp_path, monke
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
     source, target = tmp_path / "index_metadata.json.tmp", tmp_path / "index_metadata.json"
     source.write_text("new", encoding="utf-8")
     target.write_text("old", encoding="utf-8")
@@ -73,7 +75,8 @@ def test_replace_succeeds_once_a_real_windows_handle_is_released(tmp_path, monke
 
     def release(_delay):
         if not released:
-            released.append(kernel32.CloseHandle(handle))
+            assert kernel32.CloseHandle(handle), ctypes.get_last_error()
+            released.append(handle)
 
     try:
         with pytest.raises(PermissionError):

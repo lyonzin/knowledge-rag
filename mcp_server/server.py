@@ -2413,9 +2413,10 @@ class KnowledgeOrchestrator:
 
         # GH #249: index_all refuses at once while a watcher pass or a document
         # write holds the index lock, so "started" would hide the refusal.
-        # nuclear_rebuild waits for the lock instead. A pass that takes the lock
-        # right after this check is still refused and surfaces as
-        # last_result.skipped_reason in get_reindex_status().
+        # nuclear_rebuild waits for the lock instead.
+        # ponytail: a probe, not admission. A pass that takes the lock between this
+        # check and the worker's index_all is still refused, as before, and shows up
+        # as last_result.skipped_reason; move admission into the worker if it matters.
         if mode != "nuclear_rebuild":
             if not self._index_lock.acquire(blocking=False):
                 return {"status": "already_running", "progress": {**self._reindex_progress, "operation": None}}
