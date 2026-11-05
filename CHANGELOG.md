@@ -22,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 **Changed:**
 
 - `list_documents` returns at most 100 documents by default, ordered by source path so pages stay stable while files are re-indexed. `count` is now the number of documents in the page; `total` is the number that match the filter. To list every document, call again with `offset` until it reaches `total` (#260).
-- CI: a pull request now needs the full test suite to pass before it can merge. The 3 OS × 3 Python test matrix moved into `quality-gate.yml`, and `Quality Gate Summary` (the required check) fails when any of its jobs fails, is cancelled or runs past its time limit. The test-count check compares the tests that actually run with master's, and the API-surface check uses master's baseline unless a maintainer adds the `skip-api-surface` label for an intentional breaking change. The coverage floor rises from 35% to 80% (#269).
+- CI: a pull request now needs the full test suite to pass before it can merge. The 3 OS × 3 Python test matrix moved into `quality-gate.yml`, and `Quality Gate Summary` (the required check) fails when any of its jobs fails, is cancelled or runs past its time limit. The test-count check compares the number of collected tests, not counting deselected ones, with master's, and the API-surface check uses master's baseline unless a maintainer adds the `skip-api-surface` label for an intentional breaking change. The coverage floor rises from 35% to 80% (#269).
 
 **Fixed:**
 

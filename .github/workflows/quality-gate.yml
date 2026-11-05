@@ -455,6 +455,9 @@ jobs:
         # tests of the master commit under test instead, in this same
         # environment and with this PR's counting script. With the bypass
         # label the comparison passes anyway, so the step is skipped.
+        # Master's tests are collected with this PR's dependencies: if the PR
+        # changes a dependency that they import, collection fails and the
+        # label is the way through (a second venv would double the install).
         if: ${{ !contains(github.event.pull_request.labels.*.name, 'skip-test-count') }}
         shell: bash
         env:
@@ -464,7 +467,10 @@ jobs:
         run: |
           git worktree add --detach "$RUNNER_TEMP/base" HEAD^1
           cp scripts/check_test_count.py "$RUNNER_TEMP/base/scripts/"
-          python "$RUNNER_TEMP/base/scripts/check_test_count.py" --update
+          if ! python "$RUNNER_TEMP/base/scripts/check_test_count.py" --update; then
+            echo "::error title=test-count::Could not collect master's tests with this PR's dependencies. If the PR changes a dependency that master's tests import, a maintainer can add the skip-test-count label."
+            exit 1
+          fi
           cp "$RUNNER_TEMP/base/.github/test-count-baseline.txt" .github/test-count-baseline.txt
       - name: Verify test count has not regressed
         shell: bash

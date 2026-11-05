@@ -1,4 +1,4 @@
-"""Test-count gate: count the tests that run, not the deselected ones."""
+"""Test-count gate: count the selected tests, not the deselected ones."""
 
 from __future__ import annotations
 

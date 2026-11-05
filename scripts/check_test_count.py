@@ -35,8 +35,9 @@ TESTS_DIR = REPO_ROOT / "tests"
 BYPASS_LABEL = "skip-test-count"
 # pytest -q prints "144 tests collected in 1.23s", or with deselection (addopts
 # `-m 'not chaos'`) "1312/1317 tests collected (5 deselected) in 3.21s". Capture
-# the first number, the tests that run: counting the total would let a PR move
-# tests under a deselected marker without lowering the count.
+# the first number, the selected tests (skipped ones included): counting the
+# total would let a PR move tests under a deselected marker without lowering
+# the count.
 COLLECTED_SUMMARY = re.compile(r"(\d+)(?:/\d+)?\s+tests?\s+collected")
 
 
