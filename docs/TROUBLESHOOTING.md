@@ -51,7 +51,7 @@ irrelevant results. Its score is not a probability that an answer is correct.
 
 ### ChromaDB index crashes on startup
 
-Native ChromaDB failures can terminate Python before normal exception handling runs. Startup now probes ChromaDB in a child process before initializing the MCP server. If the probe crashes, the active `chroma_db/` and `index_metadata.json` are moved to `data/backups/auto-repair-*`, and the next startup can rebuild a clean index.
+Native ChromaDB failures can terminate Python before normal exception handling runs. Startup now probes ChromaDB in a child process before initializing the MCP server. If the probe crashes, the active `chroma_db/` and `index_metadata.json` are moved to `data/backups/auto-repair-*`, and the next startup can rebuild a clean index. Only the 3 most recent `auto-repair-*` backups are kept: older ones are deleted after each new repair.
 
 The same guarded behavior is available through either console script:
 

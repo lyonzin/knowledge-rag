@@ -10,8 +10,10 @@ fixes below were validated on their environment before merging.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -23,6 +25,8 @@ from .config import BASE_DIR, _get, config
 PROBE_ATTEMPTS = 3
 PROBE_RETRY_DELAY_SECONDS = 5
 PROBE_TIMEOUT_SECONDS = 30
+AUTO_REPAIR_BACKUPS_KEPT = 3  # GH #267: unbounded auto-repair backups once filled a disk (197 copies, 76 GB)
+_AUTO_REPAIR_DIR_NAME = re.compile(r"auto-repair-[0-9]{8}-[0-9]{6}")  # what _backup_active_index creates
 
 # Cloud-sync folders break ChromaDB (HNSW mmap) and SQLite WAL/SHM:
 # the provider opens handles on live files to upload them, racing with
@@ -134,26 +138,43 @@ def _backup_active_index(reason: str) -> Path:
     metadata_file = config.data_dir / "index_metadata.json"
     metadata_backup = backup_dir / f"index_metadata.{reason}.json"
     metadata_moved = False
-    if metadata_file.exists():
-        os.rename(str(metadata_file), str(metadata_backup))
-        metadata_moved = True
-
-    if config.chroma_dir.exists():
-        try:
+    try:
+        if metadata_file.exists():
+            os.rename(str(metadata_file), str(metadata_backup))
+            metadata_moved = True
+        if config.chroma_dir.exists():
             os.rename(str(config.chroma_dir), str(backup_dir / f"chroma_db.{reason}"))
-        except OSError:
-            if metadata_moved:
-                # Rollback the metadata move so the two files stay consistent.
-                # If the rollback itself fails (unlikely — dst dir is fresh)
-                # we still re-raise the original OSError so the caller can
-                # exit cleanly instead of leaving the system in a wedged state.
-                try:
-                    os.rename(str(metadata_backup), str(metadata_file))
-                except OSError:
-                    pass
-            raise
+    except OSError:
+        if metadata_moved:
+            # Rollback the metadata move so the two files stay consistent.
+            # If the rollback itself fails (unlikely — dst dir is fresh)
+            # we still re-raise the original OSError so the caller can
+            # exit cleanly instead of leaving the system in a wedged state.
+            with contextlib.suppress(OSError):
+                os.rename(str(metadata_backup), str(metadata_file))
+        raise
+    finally:
+        with contextlib.suppress(OSError):
+            backup_dir.rmdir()  # GH #267: an empty folder would take a kept slot; rmdir spares any holding data
 
     return backup_dir
+
+
+def _prune_auto_repair_backups(new_backup: Path) -> None:
+    """Keep only the newest AUTO_REPAIR_BACKUPS_KEPT auto-repair backups, ``new_backup`` included."""
+    with os.scandir(new_backup.parent) as entries:
+        # Symlinks are skipped here; rmtree refuses Windows junctions, so no link is ever followed.
+        other_dirs = {entry.name for entry in entries if entry.is_dir(follow_symlinks=False)} - {new_backup.name}
+    older = sorted((name for name in other_dirs if _AUTO_REPAIR_DIR_NAME.fullmatch(name)), reverse=True)
+    removed = 0
+    # new_backup takes one kept slot even when a clock change made its stamp sort below the others.
+    for name in older[AUTO_REPAIR_BACKUPS_KEPT - 1 :]:
+        try:
+            shutil.rmtree(new_backup.parent / name)
+            removed += 1
+        except OSError as exc:  # e.g. a file still held open on Windows
+            _log(f"[RECOVERY] could not delete old backup {new_backup.parent / name} ({exc}); will retry next repair")
+    _log(f"[RECOVERY] removed {removed} old auto-repair backup(s)")
 
 
 def _probe_chroma(timeout_seconds: int = PROBE_TIMEOUT_SECONDS) -> subprocess.CompletedProcess[str]:
@@ -242,7 +263,12 @@ def run_preflight(timeout_seconds: int = PROBE_TIMEOUT_SECONDS) -> bool:
             f"to avoid partial corruption. Retry after freeing file handles."
         )
         raise SystemExit(75) from exc
-    _log(f"[RECOVERY] moved active index to {backup_dir}")
+    try:
+        if backup_dir.exists():  # GH #267: the empty folder is dropped when there was nothing to move
+            _log(f"[RECOVERY] moved active index to {backup_dir}")
+            _prune_auto_repair_backups(backup_dir)
+    except OSError as exc:  # best effort: old backups never fail the repair
+        _log(f"[RECOVERY] could not prune old backups in {backup_dir.parent} ({exc})")
     return True
 
 
