@@ -263,12 +263,12 @@ def run_preflight(timeout_seconds: int = PROBE_TIMEOUT_SECONDS) -> bool:
             f"to avoid partial corruption. Retry after freeing file handles."
         )
         raise SystemExit(75) from exc
-    if backup_dir.exists():  # GH #267: the empty folder is dropped when there was nothing to move
-        _log(f"[RECOVERY] moved active index to {backup_dir}")
-        try:
+    try:
+        if backup_dir.exists():  # GH #267: the empty folder is dropped when there was nothing to move
+            _log(f"[RECOVERY] moved active index to {backup_dir}")
             _prune_auto_repair_backups(backup_dir)
-        except OSError as exc:  # best effort, like each rmtree: old backups never fail the repair
-            _log(f"[RECOVERY] could not prune old backups in {backup_dir.parent} ({exc})")
+    except OSError as exc:  # best effort: old backups never fail the repair
+        _log(f"[RECOVERY] could not prune old backups in {backup_dir.parent} ({exc})")
     return True
 
 

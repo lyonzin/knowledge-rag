@@ -247,3 +247,22 @@ def test_unlistable_backups_folder_does_not_break_the_repair(tmp_path, monkeypat
 
     assert sorted(path.name for path in backups.iterdir()) == [*OLD_BACKUPS, NEW_BACKUP]
     assert "could not prune old backups" in (tmp_path / "data" / "preflight.log").read_text(encoding="utf-8")
+
+
+def test_backup_folder_stat_failure_after_the_move_does_not_break_the_repair(tmp_path, monkeypatch):
+    """GH #267 review: Python 3.11's ``Path.exists`` re-raises PermissionError; after the move it is only logged."""
+    from mcp_server import preflight
+
+    backups = _crash_probe_with_backups(tmp_path, monkeypatch)
+    real_exists = Path.exists
+
+    def exists_denied_for_new_backup(path, *args, **kwargs):
+        if path == backups / NEW_BACKUP:
+            raise PermissionError(13, "Access is denied", str(path))
+        return real_exists(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "exists", exists_denied_for_new_backup)
+
+    assert preflight.run_preflight() is True
+    assert (backups / NEW_BACKUP / "chroma_db.segfault").exists()
+    assert "could not prune old backups" in (tmp_path / "data" / "preflight.log").read_text(encoding="utf-8")
