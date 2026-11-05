@@ -4,9 +4,10 @@ These tests freeze promises that existing user setups rely on:
 
 1. **Legacy config files** load the way the server loads ``config.yaml`` at
    startup (``_load_yaml_config`` into ``Config``) with every setting they make
-   in effect: the ``config.example.yaml`` shipped with v3.6.0 and v3.7.0, and
-   the exclude_patterns example it documents. A key that stops being read, or
-   a changed default it relies on, fails here.
+   in effect: the ``config.example.yaml`` shipped with v3.6.0 and v3.7.0,
+   which catches a changed default it relies on, and a config in the same
+   layout with a non-default value for every key, which catches a key that
+   stops being read.
 2. **Public Python signatures and exception classes** that callers bind to.
 
 The MCP tool contract (tool names, parameters in order, types, required
@@ -77,6 +78,38 @@ SHIPPED_V3_PATHS = {
     "chroma_dir": "data/chroma_db",
     "models_cache_dir": "models_cache",
 }
+# Hand-written in that example's layout (provenance in the file's header). Every
+# value differs from today's default, so a key that stops being read fails;
+# the shipped example above catches a changed default instead.
+V3_LAYOUT_FIXTURE = "v3.7.0_layout_non_default_values.yaml"
+V3_LAYOUT_SETTINGS = {
+    "supported_formats": [".md", ".py"],
+    "exclude_patterns": ["node_modules", ".git", "__pycache__", ".venv", "*.tmp", "drafts/*"],
+    "chunk_size": 1500,
+    "chunk_overlap": 300,
+    "embedding_model": "BAAI/bge-base-en-v1.5",
+    "embedding_dim": 768,
+    "gpu_mode": "true",
+    "reranker_enabled": False,
+    "reranker_model": "BAAI/bge-reranker-base",
+    "reranker_top_k_multiplier": 5,
+    "default_results": 8,
+    "max_results": 50,
+    "collection_name": "work_kb",
+    "category_mappings": {"recipes/italian": "italian", "recipes": "cooking"},
+    "keyword_routes": {"cooking": ["pasta", "risotto"]},
+    "query_expansions": {"js": ["javascript"]},
+}
+V3_LAYOUT_PATHS = {
+    "documents_dir": "notes",
+    "data_dir": "index",
+    "chroma_dir": "index/chroma_db",
+    "models_cache_dir": "cache",
+}
+LEGACY_CASES = [
+    pytest.param((SHIPPED_V3_EXAMPLE, SHIPPED_V3_SETTINGS, SHIPPED_V3_PATHS), id="shipped-v3-example"),
+    pytest.param((V3_LAYOUT_FIXTURE, V3_LAYOUT_SETTINGS, V3_LAYOUT_PATHS), id="v3-layout-non-default-values"),
+]
 
 
 def load_legacy_config(name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> config_module.Config:
@@ -92,17 +125,13 @@ def load_legacy_config(name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatc
 # ---------------------------------------------------------------------------
 
 
-def test_shipped_v3_config_example_loads_with_every_setting_in_effect(tmp_path, monkeypatch):
-    """The config.example.yaml shipped with v3.6.0 and v3.7.0 keeps its paths, documents, models and search."""
-    loaded = load_legacy_config(SHIPPED_V3_EXAMPLE, tmp_path, monkeypatch)
-    expected = {**SHIPPED_V3_SETTINGS, **{name: tmp_path / path for name, path in SHIPPED_V3_PATHS.items()}}
+@pytest.mark.parametrize("case", LEGACY_CASES)
+def test_legacy_config_loads_with_every_setting_in_effect(case, tmp_path, monkeypatch):
+    """Paths, documents, models, search and mappings keep the values the legacy config sets."""
+    fixture, settings, paths = case
+    loaded = load_legacy_config(fixture, tmp_path, monkeypatch)
+    expected = {**settings, **{name: tmp_path / path for name, path in paths.items()}}
     assert {name: getattr(loaded, name) for name in expected} == expected
-
-
-def test_documents_exclude_patterns_from_the_v3_example_are_honored(tmp_path, monkeypatch):
-    """The exclude_patterns example documented in the v3.6.0/v3.7.0 config.example.yaml, under documents:."""
-    loaded = load_legacy_config("v3.7.0_exclude_patterns_example.yaml", tmp_path, monkeypatch)
-    assert loaded.exclude_patterns == ["node_modules", ".git", "__pycache__", ".venv", "*.tmp", "drafts/*"]
 
 
 # ---------------------------------------------------------------------------

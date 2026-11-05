@@ -1,9 +1,10 @@
 """Detect breaking changes to the MCP tool contract of knowledge-rag.
 
-MCP clients call tools by name with JSON arguments, so what they depend on is
-what the server advertises in ``tools/list``: the tool names, each tool's
-parameter names in order, each parameter's JSON-schema type, which parameters
-are required and their default values. Descriptions are not part of it.
+MCP clients call tools by name with JSON arguments, and Python code calls the
+same functions positionally, so the contract is what the server advertises in
+``tools/list``: the tool names, each tool's parameters in order, each
+parameter's schema, which parameters are required and their default values.
+Titles and descriptions are not part of it.
 
     python scripts/check_mcp_contract.py --dump PATH
         Import ``mcp_server`` from the checkout that contains this script, list
@@ -14,13 +15,19 @@ are required and their default values. Descriptions are not part of it.
 
     python scripts/check_mcp_contract.py --compare BASE HEAD
         Compare two dumps and exit:
-            0  = HEAD keeps BASE's contract (new tools and new optional
-                 parameters are allowed and listed)
+            0  = HEAD keeps BASE's contract (new tools, and new optional
+                 parameters after the existing ones, are listed)
             1  = breaking change: a tool removed, a parameter removed or
                  renamed, a parameter that is now required (new or existing),
-                 a changed type, a changed or removed default, or a change in
-                 the relative order of the parameters both sides have
-            2  = a file is missing or is not a dump
+                 any change to a parameter's schema, a changed or removed
+                 default, or an existing parameter that moved
+            2  = a file is missing, is not a dump or lists no tools; ``--dump``
+                 also exits 2 when the server registers no tools
+
+Schemas are compared as canonical JSON, with ``$ref`` resolved and ``title`` /
+``description`` dropped, and defaults as JSON, so ``1`` differs from ``1.0``
+and ``0`` from ``false``. The check fails closed: a widening such as ``int``
+to ``Optional[int]`` breaks no caller but still needs the label.
 
 In CI, BASE is dumped from master's code: this script is copied into a
 ``HEAD^1`` worktree and run there, so a pull request cannot approve its own
@@ -43,18 +50,26 @@ from mcp.client import Client
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 OFFLINE_ENV = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
-PARAMETER_KEYS = frozenset({"name", "type", "required"})
+PARAMETER_KEYS = frozenset({"name", "type", "required", "schema"})
+# Keywords that document a schema without constraining the values it accepts.
+ANNOTATION_KEYWORDS = frozenset({"title", "description"})
+DEFS_PREFIX = "#/$defs/"
 BYPASS_LABEL = "skip-api-surface"
 EXIT_OK = 0
 EXIT_BREAKING = 1
-EXIT_UNREADABLE = 2
+EXIT_INVALID = 2
 
 Parameter = dict[str, Any]
 Contract = dict[str, list[Parameter]]
 
 
+def _json(value: Any) -> str:
+    """Canonical JSON: equal values give equal text, while ``1``/``1.0`` and ``0``/``false`` differ."""
+    return json.dumps(value, sort_keys=True)
+
+
 def schema_type(schema: dict[str, Any]) -> str:
-    """Render a parameter's JSON-schema type, e.g. ``integer`` or ``array[string]|null``."""
+    """Render a canonical schema's type for messages, e.g. ``integer`` or ``array[string]|null``."""
     branches = schema.get("anyOf") or schema.get("oneOf")
     if branches:
         return "|".join(sorted(schema_type(branch) for branch in branches))
@@ -64,33 +79,69 @@ def schema_type(schema: dict[str, Any]) -> str:
     return kind
 
 
+def _resolve(node: Any, defs: dict[str, Any], resolving: frozenset[str], names: bool = False) -> Any:
+    """Copy ``node`` with each ``$ref`` replaced by its definition and the annotation keywords dropped.
+
+    ``names`` marks a ``properties`` mapping, whose keys are field names (a field
+    may be called ``title``), not keywords. ``resolving`` keeps a model that
+    contains itself as a ``$ref`` instead of recursing forever.
+    """
+    if isinstance(node, list):
+        return [_resolve(item, defs, resolving) for item in node]
+    if not isinstance(node, dict):
+        return node
+    ref = None if names else node.get("$ref")
+    if isinstance(ref, str) and ref.startswith(DEFS_PREFIX) and ref not in resolving:
+        siblings = {key: value for key, value in node.items() if key != "$ref"}
+        return _resolve({**defs[ref.removeprefix(DEFS_PREFIX)], **siblings}, defs, resolving | {ref})
+    return {
+        key: _resolve(value, defs, resolving, names=not names and key == "properties")
+        for key, value in node.items()
+        if names or key not in ANNOTATION_KEYWORDS
+    }
+
+
+def canonical_schema(schema: dict[str, Any], defs: dict[str, Any]) -> dict[str, Any]:
+    """A parameter's schema as callers see it, without its default, which is compared apart."""
+    canonical: dict[str, Any] = _resolve(schema, defs, frozenset())
+    canonical.pop("default", None)
+    return canonical
+
+
 def tool_parameters(input_schema: dict[str, Any]) -> list[Parameter]:
-    """Return a tool's parameters in declaration order, with type, required flag and default."""
+    """Return a tool's parameters in declaration order: canonical schema, readable type, required flag, default."""
+    defs = input_schema.get("$defs", {})
     required = set(input_schema.get("required", []))
     parameters = []
-    for name, schema in input_schema.get("properties", {}).items():
+    for name, raw in input_schema.get("properties", {}).items():
+        schema = canonical_schema(raw, defs)
         parameter: Parameter = {"name": name, "type": schema_type(schema), "required": name in required}
-        if "default" in schema:
-            parameter["default"] = schema["default"]
+        parameter["schema"] = schema
+        if "default" in raw:
+            parameter["default"] = raw["default"]
         parameters.append(parameter)
     return parameters
 
 
-async def _list_tools(server: Any) -> list[Any]:
-    """Every tool the server advertises over MCP, across pages."""
-    tools: list[Any] = []
+async def read_contract(server: Any) -> Contract:
+    """Return the contract of every tool ``server`` lists over MCP, across pages."""
+    contract: Contract = {}
     cursor: str | None = None
     async with Client(server) as client:
         while True:
             page = await client.list_tools(cursor=cursor)
-            tools.extend(page.tools)
+            contract.update((tool.name, tool_parameters(tool.input_schema)) for tool in page.tools)
             cursor = page.next_cursor
             if cursor is None:
-                return tools
+                return contract
 
 
-def collect_contract() -> Contract:
-    """Import this checkout's MCP server in isolation and return the contract of its registered tools."""
+def _collect_contract() -> Contract:
+    """Import this checkout's MCP server in isolation and read its contract.
+
+    Meant for the ``--dump`` process: it sets ``os.environ`` and ``sys.path`` for
+    the import and does not restore them.
+    """
     with tempfile.TemporaryDirectory(prefix="kr-contract-", ignore_cleanup_errors=True) as base_dir:
         # config.py resolves its base directory and reads config.yaml when it is imported.
         os.environ.update(OFFLINE_ENV, KNOWLEDGE_RAG_DIR=base_dir)
@@ -101,21 +152,22 @@ def collect_contract() -> Contract:
         imported = Path(server.__file__).resolve()
         if not imported.is_relative_to(REPO_ROOT):
             raise RuntimeError(f"Imported {imported} instead of the mcp_server in {REPO_ROOT}")
-        tools = asyncio.run(_list_tools(server.mcp))
-    return {tool.name: tool_parameters(tool.input_schema) for tool in tools}
+        return asyncio.run(read_contract(server.mcp))
 
 
 def _compare_parameter(label: str, base: Parameter, head: Parameter) -> list[str]:
     """Breaking changes between two versions of one parameter."""
     breaks = []
-    if head["type"] != base["type"]:
-        breaks.append(f"{label}: type changed: {base['type']} -> {head['type']}")
+    if _json(head["schema"]) != _json(base["schema"]):
+        breaks.append(
+            f"{label}: schema changed: {base['type']} {_json(base['schema'])} -> {head['type']} {_json(head['schema'])}"
+        )
     if head["required"] and not base["required"]:
         breaks.append(f"{label}: became required")
     if "default" in base and "default" not in head:
-        breaks.append(f"{label}: default removed (was {json.dumps(base['default'])})")
-    elif "default" in base and head["default"] != base["default"]:
-        breaks.append(f"{label}: default changed: {json.dumps(base['default'])} -> {json.dumps(head['default'])}")
+        breaks.append(f"{label}: default removed (was {_json(base['default'])})")
+    elif "default" in base and _json(head["default"]) != _json(base["default"]):
+        breaks.append(f"{label}: default changed: {_json(base['default'])} -> {_json(head['default'])}")
     return breaks
 
 
@@ -132,10 +184,10 @@ def _compare_tool(tool: str, base: list[Parameter], head: list[Parameter]) -> tu
             breaks.append(f"{tool}.{name}: new required parameter")
         else:
             additions.append(f"{tool}.{name}: new optional parameter")
-    old_order = [name for name in base_by_name if name in head_by_name]
-    new_order = [name for name in head_by_name if name in base_by_name]
-    if old_order != new_order:
-        breaks.append(f"{tool}: parameter order changed: {old_order} -> {new_order}")
+    # Python callers bind arguments by position: existing parameters stay first, in their order.
+    kept = [name for name in base_by_name if name in head_by_name]
+    if list(head_by_name)[: len(kept)] != kept:
+        breaks.append(f"{tool}: parameter positions changed (new parameters go last): {kept} -> {list(head_by_name)}")
     return breaks, additions
 
 
@@ -156,17 +208,20 @@ def _is_parameter_list(value: Any) -> bool:
 
 
 def load_contract(path: Path) -> Contract:
-    """Read a file written by ``--dump``; raise ``ValueError`` when it is not one."""
+    """Read a file written by ``--dump``; raise ``ValueError`` when it is not one or lists no tools."""
     data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict) or not all(_is_parameter_list(value) for value in data.values()):
-        raise ValueError(f"{path} is not an MCP tool contract written by --dump")
+    if not isinstance(data, dict) or not data or not all(_is_parameter_list(value) for value in data.values()):
+        raise ValueError(f"{path} is not an MCP tool contract written by --dump, or it lists no tools")
     contract: Contract = data
     return contract
 
 
 def _dump(path: Path) -> int:
-    """Write this checkout's tool contract to PATH."""
-    contract = collect_contract()
+    """Write this checkout's tool contract to PATH; an empty one is refused."""
+    contract = _collect_contract()
+    if not contract:
+        print("[ERROR] The MCP server registers no tools, so there is no contract to write.", file=sys.stderr)
+        return EXIT_INVALID
     path.write_text(json.dumps(contract, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(f"[OK] Contract of {len(contract)} MCP tools written to {path}")
     return EXIT_OK
@@ -178,7 +233,7 @@ def _compare(base_path: Path, head_path: Path) -> int:
         base, head = load_contract(base_path), load_contract(head_path)
     except (OSError, ValueError) as exc:
         print(f"[ERROR] Cannot read an MCP tool contract: {exc}", file=sys.stderr)
-        return EXIT_UNREADABLE
+        return EXIT_INVALID
     breaks, additions = compare_contracts(base, head)
     for addition in additions:
         print(f"  + {addition}")

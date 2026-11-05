@@ -6,7 +6,7 @@ import ast
 
 import pytest
 
-from scripts.check_api_surface import _arg_signature, _diff_function, _function_signature
+from scripts.check_api_surface import _arg_signature, _class_info, _diff_function, _function_signature
 
 
 def signature(arguments: str) -> dict:
@@ -76,3 +76,42 @@ def test_gate_allows_compatible_widening(old, new):
 
 def test_same_parameter_name_losing_default_is_reported():
     assert "parameter became required: count" in changes("count=5", "count")[0]
+
+
+def constructor_changes(old: str, new: str) -> list[str]:
+    """Breaking changes between the constructors of two versions of class ``C``."""
+
+    def constructor(source: str) -> dict:
+        node = ast.parse(source).body[0]
+        assert isinstance(node, ast.ClassDef)
+        return _class_info(node)["methods"]["__init__"]
+
+    result = []
+    _diff_function("C.__init__", constructor(old), constructor(new), result)
+    return result
+
+
+def dataclass_source(*fields: str) -> str:
+    """Source of a dataclass ``C`` with one field per argument."""
+    return "@dataclass\nclass C:\n" + "".join(f"    {line}\n" for line in fields)
+
+
+@pytest.mark.parametrize(
+    ("fields", "breaks"),
+    [
+        pytest.param(["a: int"], True, id="field-removed"),
+        pytest.param(["a: int", "b: int"], True, id="default-removed"),
+        pytest.param(["a: int", "z: int = 0", "b: int = 1"], True, id="inserted-before-existing"),
+        pytest.param(["a: int", "b: int = 1", "c: list = field()"], True, id="appended-required"),
+        pytest.param(["a: int", "b: int = 1", "c: list = field(default_factory=list)"], False, id="appended-default"),
+    ],
+)
+def test_dataclass_fields_follow_the_constructor_rules(fields, breaks):
+    old = dataclass_source("a: int", "b: int = 1")
+    assert bool(constructor_changes(old, dataclass_source(*fields))) is breaks
+
+
+def test_constructor_that_now_requires_an_argument_is_reported():
+    old = "class C:\n    def __init__(self): pass\n"
+    new = "class C:\n    def __init__(self, store): pass\n"
+    assert constructor_changes(old, new) == ["C.__init__: new required parameter(s): ['store']"]

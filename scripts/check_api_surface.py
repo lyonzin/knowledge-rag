@@ -5,7 +5,9 @@ without HuggingFace, ChromaDB, or any heavy deps installed) and emits a
 structured snapshot of:
 
 - Module-level public functions (no leading underscore)
-- Public classes and their public methods
+- Public classes, their public methods and their constructor: ``__init__``,
+  or for a dataclass the ``__init__`` its fields generate (name, default
+  presence, order), so a removed field or a new required argument breaks
 - Public exception classes
 - Call signatures (argument kinds/names, defaults presence, and sync/async)
 
@@ -51,6 +53,9 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PACKAGE = REPO_ROOT / "mcp_server"
 BASELINE = REPO_ROOT / ".github" / "api-surface-baseline.json"
+DATACLASS_DECORATORS = frozenset({"dataclass", "dataclasses.dataclass"})
+FIELD_FUNCTIONS = frozenset({"field", "dataclasses.field"})
+FIELD_DEFAULT_KEYWORDS = frozenset({"default", "default_factory"})
 
 
 def _is_public(name: str) -> bool:
@@ -126,13 +131,41 @@ def _function_signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[st
     return sig
 
 
+def _is_dataclass(node: ast.ClassDef) -> bool:
+    """True for a class decorated with ``@dataclass`` or ``@dataclass(...)``."""
+    targets = (item.func if isinstance(item, ast.Call) else item for item in node.decorator_list)
+    return any(ast.unparse(target) in DATACLASS_DECORATORS for target in targets)
+
+
+def _field_has_default(value: ast.expr | None) -> bool:
+    """A field has a default unless it is bare or a ``field()`` without default or default_factory."""
+    if value is None:
+        return False
+    if isinstance(value, ast.Call) and ast.unparse(value.func) in FIELD_FUNCTIONS:
+        return any(keyword.arg in FIELD_DEFAULT_KEYWORDS for keyword in value.keywords)
+    return True
+
+
+def _dataclass_init(node: ast.ClassDef) -> dict[str, Any]:
+    """The ``__init__`` a dataclass generates: ``self``, then each field in order."""
+    args = [{"name": "self", "kind": "positional", "has_default": False, "annotated": False}]
+    for item in node.body:
+        if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
+            has_default = _field_has_default(item.value)
+            args.append({"name": item.target.id, "kind": "positional", "has_default": has_default, "annotated": True})
+    return {"args": args, "returns_annotated": False, "is_async": False}
+
+
 def _class_info(node: ast.ClassDef) -> dict[str, Any]:
     bases = [ast.unparse(b) for b in node.bases]
     methods: dict[str, Any] = {}
     for body_node in node.body:
         if isinstance(body_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            if _is_public(body_node.name):
+            # Callers construct the class through __init__, so it is public surface.
+            if _is_public(body_node.name) or body_node.name == "__init__":
                 methods[body_node.name] = _function_signature(body_node)
+    if "__init__" not in methods and _is_dataclass(node):
+        methods["__init__"] = _dataclass_init(node)
     return {"bases": bases, "methods": methods}
 
 
