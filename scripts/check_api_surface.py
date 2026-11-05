@@ -48,7 +48,7 @@ import ast
 import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PACKAGE = REPO_ROOT / "mcp_server"
@@ -56,6 +56,8 @@ BASELINE = REPO_ROOT / ".github" / "api-surface-baseline.json"
 DATACLASS_DECORATORS = frozenset({"dataclass", "dataclasses.dataclass"})
 FIELD_FUNCTIONS = frozenset({"field", "dataclasses.field"})
 FIELD_DEFAULT_KEYWORDS = frozenset({"default", "default_factory"})
+CLASSVAR_ANNOTATIONS = frozenset({"ClassVar", "typing.ClassVar"})
+KW_ONLY_MARKERS = frozenset({"KW_ONLY", "dataclasses.KW_ONLY"})
 
 
 def _is_public(name: str) -> bool:
@@ -131,29 +133,71 @@ def _function_signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[st
     return sig
 
 
-def _is_dataclass(node: ast.ClassDef) -> bool:
-    """True for a class decorated with ``@dataclass`` or ``@dataclass(...)``."""
-    targets = (item.func if isinstance(item, ast.Call) else item for item in node.decorator_list)
-    return any(ast.unparse(target) in DATACLASS_DECORATORS for target in targets)
+def _keyword_flag(keywords: list[ast.keyword], name: str, default: bool) -> bool:
+    """The literal boolean passed as keyword ``name`` (``init=False``), or ``default`` when absent."""
+    for keyword in keywords:
+        if keyword.arg == name and isinstance(keyword.value, ast.Constant):
+            return bool(keyword.value.value)
+    return default
+
+
+def _dataclass_options(node: ast.ClassDef) -> tuple[bool, bool] | None:
+    """``(init, kw_only)`` of the class's ``@dataclass`` decorator, or None when it is not a dataclass."""
+    for decorator in node.decorator_list:
+        call = decorator if isinstance(decorator, ast.Call) else None
+        if ast.unparse(call.func if call else decorator) in DATACLASS_DECORATORS:
+            keywords = call.keywords if call else []
+            return _keyword_flag(keywords, "init", True), _keyword_flag(keywords, "kw_only", False)
+    return None
+
+
+def _is_field_call(value: ast.expr | None) -> TypeGuard[ast.Call]:
+    """True for a ``field(...)`` call."""
+    return isinstance(value, ast.Call) and ast.unparse(value.func) in FIELD_FUNCTIONS
 
 
 def _field_has_default(value: ast.expr | None) -> bool:
     """A field has a default unless it is bare or a ``field()`` without default or default_factory."""
     if value is None:
         return False
-    if isinstance(value, ast.Call) and ast.unparse(value.func) in FIELD_FUNCTIONS:
+    if _is_field_call(value):
         return any(keyword.arg in FIELD_DEFAULT_KEYWORDS for keyword in value.keywords)
     return True
 
 
-def _dataclass_init(node: ast.ClassDef) -> dict[str, Any]:
-    """The ``__init__`` a dataclass generates: ``self``, then each field in order."""
-    args = [{"name": "self", "kind": "positional", "has_default": False, "annotated": False}]
+def _field_parameter(name: str, value: ast.expr | None, kw_only: bool) -> dict[str, Any] | None:
+    """The ``__init__`` parameter a field generates, or None for ``field(init=False)``."""
+    keywords = value.keywords if _is_field_call(value) else []
+    if not _keyword_flag(keywords, "init", True):
+        return None
+    kind = "keyword_only" if _keyword_flag(keywords, "kw_only", kw_only) else "positional"
+    return {"name": name, "kind": kind, "has_default": _field_has_default(value), "annotated": True}
+
+
+def _is_classvar(annotation: ast.expr) -> bool:
+    """True for ``ClassVar`` or ``ClassVar[...]``, which a dataclass leaves out of ``__init__``."""
+    target = annotation.value if isinstance(annotation, ast.Subscript) else annotation
+    return ast.unparse(target) in CLASSVAR_ANNOTATIONS
+
+
+def _dataclass_init(node: ast.ClassDef, kw_only: bool) -> dict[str, Any]:
+    """The ``__init__`` a dataclass generates: ``self``, its positional fields, then its keyword-only ones."""
+    positional = [{"name": "self", "kind": "positional", "has_default": False, "annotated": False}]
+    keyword_only: list[dict[str, Any]] = []
     for item in node.body:
-        if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
-            has_default = _field_has_default(item.value)
-            args.append({"name": item.target.id, "kind": "positional", "has_default": has_default, "annotated": True})
-    return {"args": args, "returns_annotated": False, "is_async": False}
+        if (
+            not isinstance(item, ast.AnnAssign)
+            or not isinstance(item.target, ast.Name)
+            or _is_classvar(item.annotation)
+        ):
+            continue
+        if ast.unparse(item.annotation) in KW_ONLY_MARKERS:
+            kw_only = True
+            continue
+        parameter = _field_parameter(item.target.id, item.value, kw_only)
+        if parameter is not None:
+            (keyword_only if parameter["kind"] == "keyword_only" else positional).append(parameter)
+    return {"args": positional + keyword_only, "returns_annotated": False, "is_async": False}
 
 
 def _class_info(node: ast.ClassDef) -> dict[str, Any]:
@@ -164,8 +208,9 @@ def _class_info(node: ast.ClassDef) -> dict[str, Any]:
             # Callers construct the class through __init__, so it is public surface.
             if _is_public(body_node.name) or body_node.name == "__init__":
                 methods[body_node.name] = _function_signature(body_node)
-    if "__init__" not in methods and _is_dataclass(node):
-        methods["__init__"] = _dataclass_init(node)
+    options = _dataclass_options(node)
+    if "__init__" not in methods and options is not None and options[0]:
+        methods["__init__"] = _dataclass_init(node, kw_only=options[1])
     return {"bases": bases, "methods": methods}
 
 
@@ -277,19 +322,26 @@ def diff_surfaces(old_surface: dict[str, Any], new_surface: dict[str, Any]) -> l
             if cls_name not in new_mod.get("classes", {}):
                 breaks.append(f"class removed: {mod_name}.{cls_name}")
                 continue
-            new_cls = new_mod["classes"][cls_name]
-            for method_name, old_method in old_cls.get("methods", {}).items():
-                if method_name not in new_cls.get("methods", {}):
-                    breaks.append(f"method removed: {mod_name}.{cls_name}.{method_name}")
-                    continue
-                _diff_function(
-                    f"{mod_name}.{cls_name}.{method_name}",
-                    old_method,
-                    new_cls["methods"][method_name],
-                    breaks,
-                )
+            _diff_class(f"{mod_name}.{cls_name}", old_cls, new_mod["classes"][cls_name], breaks)
 
     return breaks
+
+
+def _diff_class(name: str, old: dict[str, Any], new: dict[str, Any], breaks: list[str]) -> None:
+    """Report removed or narrowed methods, and a new constructor that requires arguments."""
+    old_methods, new_methods = old.get("methods", {}), new.get("methods", {})
+    for method_name, old_method in old_methods.items():
+        if method_name not in new_methods:
+            breaks.append(f"method removed: {name}.{method_name}")
+            continue
+        _diff_function(f"{name}.{method_name}", old_method, new_methods[method_name], breaks)
+    if "__init__" in new_methods and "__init__" not in old_methods:
+        # Callers built the class through an inherited constructor, so any argument the
+        # new one requires after the receiver (args[0]) may be one they never passed.
+        arguments = new_methods["__init__"]["args"][1:]
+        required = [a["name"] for a in arguments if not a["has_default"] and a["kind"] not in ("vararg", "kwarg")]
+        if required:
+            breaks.append(f"{name}.__init__: new constructor requires parameter(s): {required}")
 
 
 # ---------------------------------------------------------------------------

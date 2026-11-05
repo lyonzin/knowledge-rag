@@ -178,6 +178,45 @@ def test_given_identical_contracts_when_comparing_then_nothing_is_reported():
     assert compare_contracts(BASE, BASE) == ([], [])
 
 
+def ref_tool(definition: dict, **siblings: object) -> list[dict[str, object]]:
+    """A tool whose parameter reaches ``definition`` through ``$ref``, with optional sibling keywords."""
+    parameter_schema = {"$ref": "#/$defs/Value", **siblings}
+    return tool_parameters({"$defs": {"Value": definition}, "properties": {"value": parameter_schema}})
+
+
+def object_with_default(title: str) -> dict:
+    """A model whose ``meta`` field defaults to an object that has a ``title`` key."""
+    return {"properties": {"meta": {"default": {"title": title}, "type": "object"}}, "type": "object"}
+
+
+@pytest.mark.parametrize(
+    ("base", "head", "expected"),
+    [
+        pytest.param(
+            ref_tool({"minimum": 1, "type": "integer"}, minimum=0),
+            ref_tool({"minimum": 5, "type": "integer"}, minimum=0),
+            "probe.value: schema changed",
+            id="ref-siblings-keep-the-definition",
+        ),
+        pytest.param(
+            ref_tool(object_with_default("Report")),
+            ref_tool(object_with_default("Summary")),
+            "probe.value: schema changed",
+            id="data-values-keep-their-title-key",
+        ),
+        pytest.param(
+            ref_tool({"default": 5, "type": "integer"}),
+            ref_tool({"default": 10, "type": "integer"}),
+            "probe.value: default changed: 5 -> 10",
+            id="definition-default-is-the-parameter-default",
+        ),
+    ],
+)
+def test_given_a_change_inside_a_referenced_schema_when_comparing_then_it_is_reported(base, head, expected):
+    breaks, _ = compare_contracts({"probe": base}, {"probe": head})
+    assert any(item.startswith(expected) for item in breaks), breaks
+
+
 @pytest.mark.parametrize(
     ("head_text", "exit_code"),
     [
