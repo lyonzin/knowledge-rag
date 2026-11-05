@@ -13,7 +13,7 @@ The badge is a project self-assessment, not an independent code audit or a guara
 | User and interface documentation | `README.md`, `docs/INSTALLATION.md`, `docs/CONFIGURATION.md`, `docs/API.md`, `docs/ARCHITECTURE.md`, `docs/TROUBLESHOOTING.md` | Examples must match the installed version and callable tool arguments |
 | Versioning and release notes | `scripts/check_version_sync.py`, `scripts/check_changelog.py`, `CHANGELOG.md` | A branch version is not proof that a release was published |
 | Private vulnerability reporting | `SECURITY.md`, `.github/SECURITY.md`, GitHub's private reporting form | A GitHub noreply email address is not a reporting mailbox |
-| Automated tests | `tests/`, `.github/workflows/ci.yml` | Test count, skips, and expected failures do not prove that a mitigation is integrated |
+| Automated tests | `tests/`, `.github/workflows/quality-gate.yml` (test matrix) | Test count, skips, and expected failures do not prove that a mitigation is integrated |
 | Static and dependency checks | `quality-gate.yml`, `security.yml`, `dependabot.yml`, `.github/gitleaks.toml` | Inspect the actual run and documented exceptions; scanner availability does not prove that all findings were fixed |
 | Release publishing | `.github/workflows/release.yml` | OIDC publishing is distinct from signed Git tags, reproducible builds, and release-specific attestations |
 
@@ -25,7 +25,7 @@ The repository configures a Linux/macOS/Windows × Python 3.11/3.12/3.13 test ma
 
 The previous evidence document asserted account 2FA, protected branches, required approving reviews, signed tags, deterministic wheels, and complete dependency pinning without including verifiable evidence. Those claims are not established by this repository snapshot. In particular, `requirements.txt` and most `pyproject.toml` requirements are version ranges, not a locked dependency closure.
 
-The configured coverage floor is 35%. mypy is a gradual check over selected modules and scripts. Several checks are informational or have explicit exceptions. Review the applicable criterion and actual settings before claiming Silver readiness.
+The configured coverage floor is 80%, enforced in every test matrix cell. mypy is a gradual check over selected modules and scripts. Several checks are informational or have explicit exceptions. Review the applicable criterion and actual settings before claiming Silver readiness.
 
 ## Gold — proposed work, not achieved status
 

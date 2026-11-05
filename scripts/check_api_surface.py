@@ -22,12 +22,15 @@ Two modes:
                  signature narrowed, parameter renamed, sync/async flipped)
             2  = baseline file missing or unparseable
 
-In CI we run with --check on PRs. If a contributor genuinely needs to
-break the public API they:
+In CI we run with --check. On pull requests the baseline is master's copy of
+.github/api-surface-baseline.json, so regenerating it in the PR does not make
+the check pass. If a contributor genuinely needs to break the public API they:
     1. Bump the MAJOR version
     2. Run --snapshot locally to regenerate the baseline
     3. Commit the new baseline alongside the breaking change PR
     4. Justify the break in the PR description and CHANGELOG migration notes
+    5. Ask a maintainer to add the ``skip-api-surface`` label; with it, CI
+       checks against the PR's regenerated baseline instead of master's
 
 Adopting griffe directly would require installing it; the AST approach
 keeps this dependency-free and 100% deterministic.
@@ -302,7 +305,8 @@ def main() -> int:
         "  1. Bump MAJOR version (X+1.0.0)\n"
         "  2. Add migration notes to CHANGELOG\n"
         "  3. Regenerate baseline: python scripts/check_api_surface.py --snapshot\n"
-        "  4. Commit the new baseline with the break\n",
+        "  4. Commit the new baseline with the break\n"
+        "  5. On a PR, ask a maintainer for the 'skip-api-surface' label (CI compares against master's baseline)\n",
         file=sys.stderr,
     )
     return 1

@@ -20,7 +20,8 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install package + test deps
-        # Same install list as ci.yml — collect-only loads every test
+        # Same install list as the quality-gate.yml test matrix (minus
+        # pytest-timeout) — collect-only loads every test
         # module including those that depend on hypothesis / psutil / numpy
         # / pyyaml. Without these the run errors out during collection.
         shell: bash

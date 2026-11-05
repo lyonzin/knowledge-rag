@@ -3,6 +3,7 @@
 Mocks embeddings and ChromaDB to avoid model downloads in CI.
 """
 
+import ctypes
 import sys
 import threading
 import uuid
@@ -10,6 +11,21 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+# chromadb sizes its in-process HNSW pool as msvcrt._getmaxstdio() // 5 (102 on
+# Windows) over 64 shards, about one index per shard. A second index in the same
+# shard evicts the first, and an EphemeralClient recreates it empty (queries
+# return no ids while count() is unchanged). Raise the limit before any client.
+_MSVCRT_MAX_STDIO = 2048  # the most msvcrt.dll accepts
+
+if sys.platform == "win32":
+    # _setmaxstdio returns the new maximum, or -1. Fail loudly: with --reruns a
+    # silent failure would only bring the flaky eviction back.
+    if ctypes.windll.msvcrt._setmaxstdio(_MSVCRT_MAX_STDIO) != _MSVCRT_MAX_STDIO:
+        raise RuntimeError(
+            f"msvcrt._setmaxstdio({_MSVCRT_MAX_STDIO}) failed; chromadb would keep a too-small HNSW "
+            "pool and Windows tests could read empty collections (see tests/conftest.py)."
+        )
 
 
 @pytest.fixture
