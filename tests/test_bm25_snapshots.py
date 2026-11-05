@@ -140,6 +140,22 @@ def test_given_published_bm25_when_smart_reindex_rebuilds_then_queries_keep_it_u
     assert orchestrator.bm25_index.search("delta")
 
 
+def test_given_reindex_empties_the_collection_when_bm25_rebuilds_then_old_generation_is_released(
+    isolated_orchestrator, monkeypatch, tmp_path
+):
+    orchestrator = isolated_orchestrator
+    monkeypatch.setattr(config, "chroma_dir", tmp_path / "chroma")
+    path = config.documents_dir / "a.txt"
+    path.write_text("alpha report", encoding="utf-8")
+    orchestrator.index_all()
+    orchestrator._ensure_bm25_index()
+    assert orchestrator.bm25_index.search("alpha")
+    path.write_text("   \n", encoding="utf-8")
+    orchestrator.reindex_all()
+    assert orchestrator.collection.count() == 0
+    assert orchestrator.bm25_index.search("alpha") == [] and len(orchestrator.bm25_index) == 0
+
+
 def test_lazy_reload_can_run_reentrantly_after_a_write():
     orchestrator = object.__new__(KnowledgeOrchestrator)
     orchestrator._index_lock = threading.RLock()

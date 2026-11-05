@@ -1745,8 +1745,10 @@ class KnowledgeOrchestrator:
             try:
                 count = self.collection.count()
                 if count == 0:
-                    # Empty collection — nothing to build. Leave flag False so
-                    # a later call retries once documents become available.
+                    # Empty collection — nothing to build, and the old generation must
+                    # not outlive its chunks (#259). Leave flag False so a later
+                    # call retries once documents become available.
+                    self.bm25_index.clear()
                     return
 
                 # Batch to avoid SQLite "too many SQL variables" (chromadb 1.x
