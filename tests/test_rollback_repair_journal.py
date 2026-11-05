@@ -100,6 +100,23 @@ def test_valid_id_cannot_delete_another_source(isolated_orchestrator):
     assert doc_id in orch._indexed_docs
 
 
+def test_given_emptied_file_with_pending_repair_when_indexing_then_journal_finishes(isolated_orchestrator):
+    orch = isolated_orchestrator
+    orch.add_document_from_content("Original synthetic orchard", "one.txt", "general")
+    source = next(iter(orch._source_to_docid))
+    journaled = "b" * 16
+    orch.collection.add(
+        ids=[f"{journaled}_0"],
+        documents=["Unconfirmed rollback version"],
+        embeddings=[[1.0, 1.0]],
+        metadatas=[{"doc_id": journaled, "source": source}],
+    )
+    marker = journal(orch, payload({source: [journaled]}))
+    Path(source).write_text("   \n", encoding="utf-8")
+    assert orch.index_all()["errors"] == 0
+    assert orch.collection.count() == 0 and not marker.exists()
+
+
 def test_healthy_incremental_does_not_enumerate_backend(isolated_orchestrator, monkeypatch):
     orch = isolated_orchestrator
     orch.add_document_from_content("Healthy synthetic orchard", "one.txt", "general")

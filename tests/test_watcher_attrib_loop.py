@@ -162,6 +162,20 @@ def test_on_modified_ignores_unsupported_suffix(tmp_path: Path) -> None:
     watcher._schedule_reindex.assert_not_called()
 
 
+def test_given_word_owner_file_when_created_then_watcher_ignores_it(tmp_path: Path) -> None:
+    """Word writes a ~$ owner file while a document is open; it is not a document."""
+    watcher = DocumentWatcher(orchestrator_getter=MagicMock)
+    watcher._schedule_reindex = MagicMock()
+
+    event = MagicMock()
+    event.is_directory = False
+    event.src_path = str(tmp_path / "~$report.docx")
+
+    watcher.on_created(event)
+
+    watcher._schedule_reindex.assert_not_called()
+
+
 def test_on_created_still_enqueues_unconditionally(sample_file: Path) -> None:
     """on_created must not run the real-change check — a create IS the change."""
     orch = _make_orch({str(sample_file.resolve()): _stored_stat(sample_file)})

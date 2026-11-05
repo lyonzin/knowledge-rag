@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Fixed:**
 
+- An unavailable or empty `documents_dir` (unplugged drive, unmounted network share, renamed folder recreated empty at startup) no longer removes every document from the index. The reindex reports an error and keeps the index as it was. Emptying the folder on purpose no longer clears the index through a reindex; use `remove_document` instead (#259).
+- An empty file, such as an empty `__init__.py` or an image-only PDF, no longer makes `reindex_documents(full_rebuild=True)` or the rebuild after an embedding-model change fail. It is skipped, and a file emptied after indexing has its old chunks removed (#259).
+- Office owner files (`~$report.docx`, written while a document is open) are ignored, so an open Word document no longer breaks a full rebuild (#259).
+- Keyword search keeps answering from the previous index while `reindex_documents(force=True)` rebuilds it, instead of finding nothing until the rebuild finishes (#259).
 - The default `search_knowledge` snippet starts at the matching chunk. It used to start at the neighboring chunk added before it for context, so the ~500-character snippet often held only text from before the match. `content_length` is still the full size, and a new `match_offset` field tells where the match starts in the full content (#260).
 - `search_similar` finds similar documents for long reference documents. The reference's own chunks are now excluded in the query; filtered out afterwards, 25 or more of them could take every candidate slot and the tool answered `no_results` (#260).
 - A number in `keyword_routes` or `category_mappings`, such as `blueteam: [sigma, 4624]`, no longer breaks indexing and every search. YAML reads a bare `4624` as an integer; numbers are now converted to text, and empty entries, lists or mappings are skipped with a warning. Quote values such as `0123` or `yes` to keep their exact spelling (#261).
