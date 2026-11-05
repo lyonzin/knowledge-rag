@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+### Unreleased
+
+**Fixed:**
+
+- `add_from_url` no longer overwrites a page from another URL whose title starts with the same 60 characters, such as "Part 1" and "Part 2" of a series, even when both are added at once, nor a file of that name it did not download or cannot read. The new page is saved as `<title>-<first 8 hex characters of the URL's SHA-256>.md`; existing files keep their names, and adding the same URL again still updates its own file. The exception is a page saved before v4.8.0, which carries no provenance marker: adding its URL again creates a second, suffixed file next to the old one, and nothing is lost (#262).
+- `add_from_url` saves a page with no `<title>` from a URL ending in `/` as `page.md`, instead of a hidden `.md` file that all such pages shared (#262).
+
+---
+
 ### v4.11.1 (2026-10-25) — Fresh-install startup fix and Windows-safe state writes
 
 Patch release. On v4.10.0 and v4.11.0, every fresh install and every new data directory, new Docker volumes included, failed to start with `Embedding function conflict … persisted: default`. Installs that already hit the error start normally after upgrading. No breaking changes and no migration steps. Thanks to @mmathoosh and @rshun for the reports, @franzgranlund for tracing it to the preflight probe, @cauger-dev for the detailed Windows analysis in #249, and @vishalhabib99 and @viniciussantos45 for #236 and #242.

@@ -11,6 +11,7 @@ back byte-identical, because ``### System:`` is legitimate prose in a security
 knowledge base.
 """
 
+import threading
 from unittest.mock import MagicMock
 
 import pytest
@@ -278,6 +279,7 @@ def test_add_from_url_flags_content_as_external(monkeypatch):
     monkeypatch.setitem(__import__("sys").modules, "requests", fake_requests)
 
     orch = MagicMock(spec=KnowledgeOrchestrator)
+    orch._index_lock = threading.RLock()
     orch.add_document_from_content = MagicMock(return_value={"chunks_added": 1})
 
     KnowledgeOrchestrator.add_from_url(orch, "https://attacker.test/post", "general", None)
