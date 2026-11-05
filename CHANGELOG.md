@@ -21,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Changed:**
 
-- `list_documents` returns at most 100 documents by default, ordered by source path so pages stay stable while files are re-indexed. `count` is now the number of documents in the page; `total` is the number that match the filter. To check whether one file is indexed, use `get_document` (#260).
+- `list_documents` returns at most 100 documents by default, ordered by source path so pages stay stable while files are re-indexed. `count` is now the number of documents in the page; `total` is the number that match the filter. To list every document, call again with `offset` until it reaches `total` (#260).
 
 **Fixed:**
 

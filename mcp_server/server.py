@@ -4134,7 +4134,8 @@ class KnowledgeOrchestrator:
             if not results["ids"] or embeddings is None or len(embeddings) == 0:
                 return []
             query_embedding = embeddings[0]
-        except Exception:
+        except Exception as exc:
+            print(f"[WARN] search_similar query failed for {filepath!r}: {exc}", file=sys.stderr)
             return []
 
         try:
@@ -4146,7 +4147,8 @@ class KnowledgeOrchestrator:
                 where={"doc_id": {"$ne": doc_id}},
                 include=["documents", "metadatas", "distances"],
             )
-        except Exception:
+        except Exception as exc:
+            print(f"[WARN] search_similar query failed for {filepath!r}: {exc}", file=sys.stderr)
             return []
 
         if not similar["ids"] or not similar["ids"][0]:
@@ -4863,15 +4865,15 @@ def get_document(filepath: str) -> str:
     Args:
         filepath: Relative path to the document within the documents directory
             (e.g., "security/technique.md"). Must be an indexed file — use
-            list_documents() to browse available paths, or search_knowledge()
-            to find the filepath by topic first.
+            search_knowledge() to find the filepath by topic first, or browse
+            list_documents(), which returns one page at a time (see its offset).
 
     Returns:
         JSON string with full document content and metadata (filepath, category, size).
 
     Usage: Use when you need the complete text of a known file — search_knowledge()
     returns chunks, not full docs. Use search_knowledge() first to find the filepath
-    if unknown. Use list_documents() to browse all available files by category.
+    if unknown. Use list_documents() to browse files by category, one page at a time.
     """
     orchestrator = get_orchestrator()
     doc = orchestrator.get_document(filepath)
@@ -5050,8 +5052,8 @@ def list_documents(category: Optional[str] = None, limit: int = 100, offset: int
         JSON string with total (documents matching the filter), offset, limit, count (documents
         in this page) and the filepaths, categories, and metadata of this page, ordered by filepath.
 
-    Usage: Use to browse what's in the index. To check one known file, call get_document()
-    instead of scanning pages. Use list_categories() first to see valid category names. Use
+    Usage: Use to browse what's in the index, one page at a time; to see every document, call
+    again with offset + count until offset reaches total. Use list_categories() first to see valid category names. Use
     search_knowledge() when you want to find documents by topic rather than browsing the full
     list. Use get_document() to read a specific file once you have its filepath.
     """
@@ -5154,7 +5156,7 @@ def update_document(filepath: str, content: str) -> str:
 
     Args:
         filepath: Full or relative path to the document file. Must be an already-indexed
-            file — use list_documents() to find valid paths.
+            file — list_documents() lists indexed paths, one page at a time.
         content: New full-text content to replace the existing content entirely
 
     Returns:
@@ -5189,8 +5191,8 @@ def remove_document(filepath: str, delete_file: bool = False) -> str:
     the file from disk (irreversible, cannot be undone).
 
     Args:
-        filepath: Path to the document file. Must be an indexed document — use
-            list_documents() to find valid paths.
+        filepath: Path to the document file. Must be an indexed document —
+            list_documents() lists indexed paths, one page at a time.
         delete_file: If True, permanently deletes the file from disk in addition to
             removing from the index (default: False).
 
@@ -5259,8 +5261,8 @@ def search_similar(filepath: str, max_results: int = 5) -> str:
     Read-only. No side effects. Uses the document's embedding for similarity comparison.
 
     Args:
-        filepath: Path to the reference document (must already be indexed — use
-            list_documents() to verify). E.g., "security/technique.md"
+        filepath: Path to the reference document (must already be indexed — list_documents()
+            lists indexed paths, one page at a time). E.g., "security/technique.md"
         max_results: Number of similar documents to return (default: 5, max: 20)
 
     Returns:
@@ -5268,8 +5270,8 @@ def search_similar(filepath: str, max_results: int = 5) -> str:
 
     Usage: Use when you have a specific document and want to discover thematically related
     ones. Use search_knowledge() instead when you have a text query rather than a reference
-    document. The reference document must be indexed — call list_documents() to confirm
-    it exists before calling this tool.
+    document. The reference document must be indexed; list_documents() lists indexed paths
+    one page at a time.
     """
     if not filepath:
         return json.dumps({"status": "error", "message": "Filepath required"})

@@ -8,6 +8,7 @@ import chromadb
 import pytest
 
 import mcp_server.server as server
+from mcp_server.fts5_index import Fts5LexicalIndex
 
 
 def test_cache_isolates_mutation_without_copying_immutable_document_text():
@@ -38,9 +39,8 @@ def test_snippet_response_preserves_full_response_on_same_cached_query(monkeypat
     assert "content_length" not in full["results"][0]
 
 
-def test_snippet_starts_at_the_matched_chunk_when_context_comes_before_it(isolated_orchestrator, monkeypatch):
-    """Given a match in a middle chunk, the default snippet shows that chunk, not the one before it (#260)."""
-    orch = isolated_orchestrator
+def _index_guide_matching_only_in_its_middle_chunk(orch, monkeypatch):
+    """Index three markdown sections, one chunk each; only the middle one holds ``needleterm``."""
     monkeypatch.setattr(server.config, "reranker_enabled", False)
     monkeypatch.setattr(server, "get_orchestrator", lambda: orch)
     sections = [
@@ -50,10 +50,27 @@ def test_snippet_starts_at_the_matched_chunk_when_context_comes_before_it(isolat
     ]
     (server.config.documents_dir / "guide.md").write_text("\n\n".join(sections), encoding="utf-8")
     assert orch.index_all()["errors"] == 0
+
+
+def test_snippet_starts_at_the_matched_chunk_when_context_comes_before_it(isolated_orchestrator, monkeypatch):
+    """Given a match in a middle chunk, the default snippet shows that chunk, not the one before it (#260)."""
+    _index_guide_matching_only_in_its_middle_chunk(isolated_orchestrator, monkeypatch)
     full = json.loads(server.search_knowledge("needleterm", hybrid_alpha=0.0, snippet_mode=False))["results"][0]
     snippet = json.loads(server.search_knowledge("needleterm", hybrid_alpha=0.0))["results"][0]  # QueryCache hit
     assert snippet["content"].startswith("## Match\n\nneedleterm")
     assert snippet["content_length"] == len(full["content"])
+
+
+def test_fts5_snippet_starts_at_the_matched_chunk(isolated_orchestrator, monkeypatch, tmp_path):
+    """Given the opt-in FTS5 index, its snippet also starts at the matched chunk (#260)."""
+    orch = isolated_orchestrator
+    monkeypatch.setattr(server.config, "fts5_enabled", True)
+    orch.fts5_index = Fts5LexicalIndex(tmp_path / "fts5.db", tmp_path / "fts5.state")
+    orch.fts5_index._write_state("complete", 0, 0, "", None, None)
+    _index_guide_matching_only_in_its_middle_chunk(orch, monkeypatch)  # chunks sync into FTS5 as they index
+    hit = json.loads(server.search_knowledge("needleterm", search_method="fts5"))["results"][0]
+    assert hit["search_method"] == "fts5"
+    assert hit["content"].startswith("## Match\n\nneedleterm")
 
 
 def test_replacing_cached_key_at_capacity_keeps_other_entry():

@@ -307,6 +307,11 @@ class TestListDocuments:
         r = json.loads(list_documents(limit=limit, offset=offset))
         assert (r["limit"], r["offset"]) == expected
 
+    def test_call_without_arguments_returns_a_page_of_100(self, mock_orch):
+        from mcp_server.server import list_documents
+
+        assert json.loads(list_documents())["limit"] == 100
+
 
 class TestEvaluateRetrieval:
     def test_invalid_json_error(self, mock_orch):
