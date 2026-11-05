@@ -1,0 +1,57 @@
+# Hand-written for #271 in the layout of the config.example.yaml shipped with
+# v3.6.0 and v3.7.0 (79276b4, 25b69ce). Every key Config reads from that layout
+# holds a value other than today's default, so a key that stops being read
+# fails the test. Where that file documents choices (chunking preset, embedding
+# model, collection name, category mappings, the exclude_patterns example),
+# they are used. exclude_patterns sits under documents:, where Config reads it
+# since exclude patterns were added in v3.4.0 (24ca01c).
+#
+# Do not modify — this is a frozen snapshot for regression testing.
+
+paths:
+  documents_dir: "./notes"
+  data_dir: "./index"
+  models_cache_dir: "./cache"
+
+documents:
+  supported_formats:
+    - .md
+    - .py
+  exclude_patterns:
+    - "node_modules"     # Skip node_modules at any depth
+    - ".git"             # Skip .git directories
+    - "__pycache__"      # Skip Python cache
+    - ".venv"            # Skip virtual environments
+    - "*.tmp"            # Skip .tmp files anywhere
+    - "drafts/*"         # Skip everything in top-level drafts/
+  chunking:
+    chunk_size: 1500
+    chunk_overlap: 300
+
+models:
+  embedding:
+    model: "BAAI/bge-base-en-v1.5"
+    dimensions: 768
+    gpu: true
+  reranker:
+    enabled: false
+    model: "BAAI/bge-reranker-base"
+    top_k_multiplier: 5
+
+search:
+  default_results: 8
+  max_results: 50
+  collection_name: "work_kb"
+
+category_mappings:
+  "recipes/italian": "italian"
+  "recipes": "cooking"
+
+keyword_routes:
+  cooking:
+    - pasta
+    - risotto
+
+query_expansions:
+  js:
+    - javascript

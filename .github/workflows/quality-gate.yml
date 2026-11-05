@@ -163,17 +163,64 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - name: Use master's API surface as the baseline
+      - name: Snapshot master's code as the baseline
         # A PR must not approve its own breaking change by regenerating the
-        # baseline. With the skip-api-surface label (an intentional break, set
-        # by a maintainer) the PR's regenerated baseline is used. On push the
-        # tree already is master: keep its own file.
+        # baseline, and a committed baseline only gains what was added when
+        # someone regenerates it: snapshot master's code (AST only, no
+        # dependencies) with this PR's script. With the skip-api-surface label
+        # (an intentional break, set by a maintainer) the PR's committed
+        # baseline is used. On push the tree already is master: keep its own file.
         if: github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'skip-api-surface')
         shell: bash
-        run: git show HEAD^1:.github/api-surface-baseline.json > .github/api-surface-baseline.json
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/base" HEAD^1
+          cp scripts/check_api_surface.py "$RUNNER_TEMP/base/scripts/"
+          python "$RUNNER_TEMP/base/scripts/check_api_surface.py" --snapshot
+          cp "$RUNNER_TEMP/base/.github/api-surface-baseline.json" .github/api-surface-baseline.json
       - name: Compare API surface against baseline
         shell: bash
         run: python scripts/check_api_surface.py --check
+
+  mcp-contract:
+    name: "Pillar 6 — MCP tool contract"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # HEAD is the PR merge commit; HEAD^1 is the master commit it is
+          # tested against, whose registered tools are the baseline below.
+          fetch-depth: 2
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install package
+        shell: bash
+        run: pip install -e .
+      - name: Dump the tools master's code registers
+        # The baseline is what master's server lists over MCP, not a list kept
+        # in the PR's tree. This PR's script runs from the HEAD^1 worktree, so
+        # it imports master's mcp_server, with this PR's dependencies. With the
+        # skip-api-surface label (an intentional break, set by a maintainer)
+        # nothing is compared, so the step is skipped.
+        if: ${{ !contains(github.event.pull_request.labels.*.name, 'skip-api-surface') }}
+        shell: bash
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/base" HEAD^1
+          cp scripts/check_mcp_contract.py "$RUNNER_TEMP/base/scripts/"
+          cd "$RUNNER_TEMP/base"
+          if ! python scripts/check_mcp_contract.py --dump "$RUNNER_TEMP/base-contract.json"; then
+            echo "::error title=mcp-contract::Could not list the MCP tools of master's code with this PR's dependencies. If the PR changes a dependency that master's server imports, a maintainer can add the skip-api-surface label."
+            exit 1
+          fi
+      - name: Dump the tools this PR registers
+        shell: bash
+        run: python scripts/check_mcp_contract.py --dump "$RUNNER_TEMP/head-contract.json"
+      - name: Compare with master's tool contract
+        if: ${{ !contains(github.event.pull_request.labels.*.name, 'skip-api-surface') }}
+        shell: bash
+        run: python scripts/check_mcp_contract.py --compare "$RUNNER_TEMP/base-contract.json" "$RUNNER_TEMP/head-contract.json"
 
   conventional-commit-title:
     name: "Pillar 6 — Conventional commit (PR title)"
@@ -722,6 +769,7 @@ jobs:
       # Pillar 6 — Versioning
       - version-sync
       - api-surface
+      - mcp-contract
       - backwards-compat
       # Pillar 7 — Quality (blocking)
       - mypy
@@ -753,6 +801,7 @@ jobs:
           echo "| 5 Scalability | Perf gate 10% | ${{ needs.perf-bench.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 6 Versioning | Version sync | ${{ needs.version-sync.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 6 Versioning | API surface | ${{ needs.api-surface.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 6 Versioning | MCP tool contract | ${{ needs.mcp-contract.result }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| 6 Versioning | Backwards-compat | ${{ needs.backwards-compat.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 7 Quality | mypy strict | ${{ needs.mypy.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 7 Quality | Docstring coverage | ${{ needs.interrogate.result }} |" >> $GITHUB_STEP_SUMMARY
@@ -761,8 +810,8 @@ jobs:
           # includes a job killed by timeout-minutes) and anything else fail.
           # `skipped` happens only by design: on pull_request every job in
           # `needs` runs (none has its own `needs`, and the only `if:` filters,
-          # on perf-bench and test-count, select pull_request); on push those
-          # two PR-only jobs skip.
+          # on perf-bench, test-count and mcp-contract, select pull_request);
+          # on push those three PR-only jobs skip.
           for r in $RESULTS; do
             if [[ "$r" != "success" && "$r" != "skipped" ]]; then
               echo "" >> $GITHUB_STEP_SUMMARY

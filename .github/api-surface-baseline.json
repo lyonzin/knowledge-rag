@@ -8,7 +8,284 @@
       "classes": {
         "Config": {
           "bases": [],
-          "methods": {}
+          "methods": {
+            "__init__": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "data_dir"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "chroma_dir"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "documents_dir"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "models_cache_dir"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "chunk_size"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "chunk_overlap"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "embedding_model"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "embedding_dim"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "gpu_mode"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "gpu_acceleration"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "gpu_device_id"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "embedding_profile"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "query_prefix"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "passage_prefix"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "reranker_model"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "reranker_enabled"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "reranker_top_k_multiplier"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "fts5_enabled"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "fts5_min_hits"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "fts5_rerank_enabled"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "fts5_patterns"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "collection_name"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "supported_formats"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "exclude_patterns"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "category_mappings"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "keyword_routes"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "query_expansions"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "query_expansion_groups"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "default_results"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "max_results"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "batch_size"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "parallel_workers"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "embed_batch_size"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "transport"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "server_host"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "server_port"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "auth_bearer_token"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "rate_limit_enabled"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "rate_limit_rpm"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "rate_limit_burst"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "metrics_enabled"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "metrics_port"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "log_format"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "log_level"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": false
+            }
+          }
         }
       },
       "functions": {}
@@ -18,6 +295,30 @@
         "StagedTextFile": {
           "bases": [],
           "methods": {
+            "__init__": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "destination"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "content"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
             "close": {
               "args": [
                 {
@@ -142,6 +443,30 @@
         "Fts5LexicalIndex": {
           "bases": [],
           "methods": {
+            "__init__": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "db_path"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "state_path"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
             "add_document": {
               "args": [
                 {
@@ -405,6 +730,24 @@
         "Fts5MigrationState": {
           "bases": [],
           "methods": {
+            "__init__": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "path"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
             "is_complete": {
               "args": [
                 {
@@ -484,7 +827,38 @@
       "classes": {
         "HealthMiddleware": {
           "bases": [],
-          "methods": {}
+          "methods": {
+            "__init__": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "app"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "get_orchestrator"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "paths"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            }
+          }
         }
       },
       "functions": {}
@@ -493,11 +867,114 @@
       "classes": {
         "Chunk": {
           "bases": [],
-          "methods": {}
+          "methods": {
+            "__init__": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "content"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "index"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "start_char"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "end_char"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "metadata"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": false
+            }
+          }
         },
         "Document": {
           "bases": [],
           "methods": {
+            "__init__": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "id"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "content"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "source"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "format"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "category"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "metadata"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "chunks"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "keywords"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": false
+            },
             "filename": {
               "args": [
                 {
@@ -527,6 +1004,30 @@
         "DocumentParser": {
           "bases": [],
           "methods": {
+            "__init__": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "chunk_size"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "chunk_overlap"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": false
+            },
             "iter_files": {
               "args": [
                 {
@@ -693,6 +1194,18 @@
         "MetricsCollector": {
           "bases": [],
           "methods": {
+            "__init__": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
             "exposition": {
               "args": [
                 {
@@ -911,6 +1424,18 @@
         "PublicationLock": {
           "bases": [],
           "methods": {
+            "__init__": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
             "read": {
               "args": [
                 {
@@ -970,6 +1495,24 @@
         "QueryRouter": {
           "bases": [],
           "methods": {
+            "__init__": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "patterns"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
             "classify": {
               "args": [
                 {
@@ -998,6 +1541,36 @@
         "SlidingWindowCounter": {
           "bases": [],
           "methods": {
+            "__init__": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "window_seconds"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "max_requests"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "burst"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": false
+            },
             "allow": {
               "args": [
                 {
@@ -1068,6 +1641,36 @@
         "FolderScope": {
           "bases": [],
           "methods": {
+            "__init__": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "root"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "include"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "exclude"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": false
+            },
             "active": {
               "args": [
                 {
@@ -1149,7 +1752,38 @@
       "classes": {
         "BearerAuthMiddleware": {
           "bases": [],
-          "methods": {}
+          "methods": {
+            "__init__": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "app"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "token"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "exempt_paths"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            }
+          }
         },
         "PathEscapeError": {
           "bases": [
@@ -1310,6 +1944,18 @@
         "BM25Index": {
           "bases": [],
           "methods": {
+            "__init__": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": false
+            },
             "add_documents": {
               "args": [
                 {
@@ -1411,6 +2057,24 @@
         "CrossEncoderReranker": {
           "bases": [],
           "methods": {
+            "__init__": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "model"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": false
+            },
             "rerank": {
               "args": [
                 {
@@ -1448,6 +2112,30 @@
             "FileSystemEventHandler"
           ],
           "methods": {
+            "__init__": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "orchestrator_getter"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "debounce_seconds"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": false
+            },
             "on_created": {
               "args": [
                 {
@@ -1537,6 +2225,24 @@
         "FastEmbedEmbeddings": {
           "bases": [],
           "methods": {
+            "__init__": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "model"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": false
+            },
             "embed_documents": {
               "args": [
                 {
@@ -1600,11 +2306,72 @@
         },
         "GPUStatus": {
           "bases": [],
-          "methods": {}
+          "methods": {
+            "__init__": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "available"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "provider"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "device_name"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "vram_mb"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "missing_deps"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "fallback_reason"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": false
+            }
+          }
         },
         "KnowledgeOrchestrator": {
           "bases": [],
           "methods": {
+            "__init__": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": false
+            },
             "add_document_from_content": {
               "args": [
                 {
@@ -1982,6 +2749,30 @@
         "QueryCache": {
           "bases": [],
           "methods": {
+            "__init__": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "max_size"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "ttl_seconds"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": false
+            },
             "generation": {
               "args": [
                 {
@@ -2229,6 +3020,18 @@
               "has_default": true,
               "kind": "positional",
               "name": "category"
+            },
+            {
+              "annotated": true,
+              "has_default": true,
+              "kind": "positional",
+              "name": "limit"
+            },
+            {
+              "annotated": true,
+              "has_default": true,
+              "kind": "positional",
+              "name": "offset"
             }
           ],
           "is_async": false,

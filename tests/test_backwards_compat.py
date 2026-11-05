@@ -1,14 +1,18 @@
 """Backwards-compatibility regression tests (Pillar 6: Versioning).
 
-These tests freeze the public surface promises of knowledge-rag so future
-PRs cannot silently break existing user setups. Two layers:
+These tests freeze promises that existing user setups rely on:
 
-1. **Legacy config files** load without raising. We keep verbatim YAML
-   snapshots from prior releases under tests/fixtures/legacy_configs/ and
-   feed them through Config so any breaking schema change shows up here.
-2. **Public MCP tool signatures** preserve their parameter names. The
-   downstream LLMs (Claude, GPT, etc.) call these tools by name; renaming
-   a parameter is silently breaking even if Python imports still work.
+1. **Legacy config files** load the way the server loads ``config.yaml`` at
+   startup (``_load_yaml_config`` into ``Config``) with every setting they make
+   in effect: the ``config.example.yaml`` shipped with v3.6.0 and v3.7.0,
+   which catches a changed default it relies on, and a config in the same
+   layout with a non-default value for every key, which catches a key that
+   stops being read.
+2. **Public Python signatures and exception classes** that callers bind to.
+
+The MCP tool contract (tool names, parameters in order, types, required
+parameters, defaults) is checked in the quality gate by
+scripts/check_mcp_contract.py against the tools that master's code registers.
 
 When a real breaking change is required:
 
@@ -16,7 +20,7 @@ When a real breaking change is required:
     2. Document migration path in CHANGELOG
     3. Update or quarantine the affected legacy fixture (with a
        migration helper if appropriate)
-    4. Update the expected-signature dict below
+    4. Ask a maintainer for the ``skip-api-surface`` label
 """
 
 from __future__ import annotations
@@ -24,99 +28,115 @@ from __future__ import annotations
 import inspect
 from pathlib import Path
 
-import yaml
+import pytest
+
+import mcp_server.config as config_module
 
 LEGACY_CONFIGS = Path(__file__).parent / "fixtures" / "legacy_configs"
-
-
-# ---------------------------------------------------------------------------
-# Layer 1: legacy YAML configs still parse
-# ---------------------------------------------------------------------------
-
-
-def test_legacy_v3_6_0_config_parses():
-    """v3.6.0 minimal config must load without error."""
-    cfg_path = LEGACY_CONFIGS / "v3.6.0_minimal.yaml"
-    assert cfg_path.exists(), f"Fixture missing: {cfg_path}"
-    data = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-
-    # Spot-check structural promises that v3.6.0 users rely on
-    assert data["models"]["embedding"]["name"] == "BAAI/bge-small-en-v1.5"
-    assert data["models"]["embedding"]["dim"] == 384
-    assert data["models"]["reranker"]["enabled"] is True
-    assert data["chunking"]["chunk_size"] == 1000
-    assert data["search"]["hybrid_alpha"] == 0.3
-
-
-def test_legacy_v3_7_0_config_with_excludes_parses():
-    """v3.7.0 config including exclude_patterns must load without error."""
-    cfg_path = LEGACY_CONFIGS / "v3.7.0_with_excludes.yaml"
-    assert cfg_path.exists(), f"Fixture missing: {cfg_path}"
-    data = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-
-    assert isinstance(data["exclude_patterns"], list)
-    assert "*.tmp" in data["exclude_patterns"]
-    assert "node_modules/" in data["exclude_patterns"]
-
-
-# ---------------------------------------------------------------------------
-# Layer 2: MCP tool signatures preserve parameter names
-# ---------------------------------------------------------------------------
-
-
-# Frozen contract: parameter names callers (LLMs) supply by name.
-# Bumping requires MAJOR version + CHANGELOG migration entry.
-MCP_TOOL_SIGNATURES = {
-    # Task 03 (ADR-006, v4.8.2+): appended ``search_method`` opt-in override.
-    # Insertion is additive with default ``"auto"`` — legacy callers unaffected.
-    "search_knowledge": [
-        "query",
-        "max_results",
-        "category",
-        "hybrid_alpha",
-        "min_score",
-        "snippet_mode",
-        "search_method",
-        "include_folders",
-        "exclude_folders",
+# Provenance: config.example.yaml at 79276b4 (v3.6.0) and 25b69ce (v3.7.0), the
+# same blob 3c42f58, unchanged from v3.6.0 to v3.7.0. The repository has no v3.x tags.
+SHIPPED_V3_EXAMPLE = "v3.6.0-v3.7.0_config.example.yaml"
+# Every setting the shipped example makes, as Config exposes it. The empty
+# mappings disable categories, keyword routing and query expansion, as the
+# example's comments say.
+SHIPPED_V3_SETTINGS = {
+    "supported_formats": [
+        ".md",
+        ".txt",
+        ".pdf",
+        ".docx",
+        ".py",
+        ".c",
+        ".h",
+        ".cpp",
+        ".js",
+        ".jsx",
+        ".ts",
+        ".tsx",
+        ".json",
+        ".xml",
     ],
-    "search_similar": ["filepath", "max_results"],
-    "get_document": ["filepath"],
-    "add_document": ["content", "filepath", "category"],
-    "add_from_url": ["url", "category", "title"],
-    "update_document": ["filepath", "content"],
-    "remove_document": ["filepath", "delete_file"],
-    "reindex_documents": ["force", "full_rebuild", "resume"],
-    "list_categories": [],
-    # #260: appended optional ``limit``/``offset`` paging; ``category`` stays first.
-    "list_documents": ["category", "limit", "offset"],
-    "get_index_stats": [],
-    "get_reindex_status": [],
-    "evaluate_retrieval": ["test_cases"],
+    "exclude_patterns": [],
+    "chunk_size": 1000,
+    "chunk_overlap": 200,
+    "embedding_model": "BAAI/bge-small-en-v1.5",
+    "embedding_dim": 384,
+    "gpu_mode": "false",
+    "reranker_enabled": True,
+    "reranker_model": "Xenova/ms-marco-MiniLM-L-6-v2",
+    "reranker_top_k_multiplier": 3,
+    "default_results": 5,
+    "max_results": 20,
+    "collection_name": "knowledge_base",
+    "category_mappings": {},
+    "keyword_routes": {},
+    "query_expansions": {},
 }
+SHIPPED_V3_PATHS = {
+    "documents_dir": "documents",
+    "data_dir": "data",
+    "chroma_dir": "data/chroma_db",
+    "models_cache_dir": "models_cache",
+}
+# Hand-written in that example's layout (provenance in the file's header). Every
+# value differs from today's default, so a key that stops being read fails;
+# the shipped example above catches a changed default instead.
+V3_LAYOUT_FIXTURE = "v3.7.0_layout_non_default_values.yaml"
+V3_LAYOUT_SETTINGS = {
+    "supported_formats": [".md", ".py"],
+    "exclude_patterns": ["node_modules", ".git", "__pycache__", ".venv", "*.tmp", "drafts/*"],
+    "chunk_size": 1500,
+    "chunk_overlap": 300,
+    "embedding_model": "BAAI/bge-base-en-v1.5",
+    "embedding_dim": 768,
+    "gpu_mode": "true",
+    "reranker_enabled": False,
+    "reranker_model": "BAAI/bge-reranker-base",
+    "reranker_top_k_multiplier": 5,
+    "default_results": 8,
+    "max_results": 50,
+    "collection_name": "work_kb",
+    "category_mappings": {"recipes/italian": "italian", "recipes": "cooking"},
+    "keyword_routes": {"cooking": ["pasta", "risotto"]},
+    "query_expansions": {"js": ["javascript"]},
+}
+V3_LAYOUT_PATHS = {
+    "documents_dir": "notes",
+    "data_dir": "index",
+    "chroma_dir": "index/chroma_db",
+    "models_cache_dir": "cache",
+}
+LEGACY_CASES = [
+    pytest.param((SHIPPED_V3_EXAMPLE, SHIPPED_V3_SETTINGS, SHIPPED_V3_PATHS), id="shipped-v3-example"),
+    pytest.param((V3_LAYOUT_FIXTURE, V3_LAYOUT_SETTINGS, V3_LAYOUT_PATHS), id="v3-layout-non-default-values"),
+]
 
 
-def test_mcp_tool_parameter_names_preserved():
-    """Renaming an MCP tool parameter is a breaking change for all LLM callers."""
-    from mcp_server import server
+def load_legacy_config(name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> config_module.Config:
+    """Load a fixture as ``config.yaml`` the way the server does at startup, isolated in ``tmp_path``."""
+    (tmp_path / "config.yaml").write_bytes((LEGACY_CONFIGS / name).read_bytes())
+    monkeypatch.setattr(config_module, "BASE_DIR", tmp_path)
+    monkeypatch.setattr(config_module, "_yaml", config_module._load_yaml_config())
+    return config_module.Config()
 
-    for tool_name, expected_params in MCP_TOOL_SIGNATURES.items():
-        fn = getattr(server, tool_name, None)
-        assert fn is not None, f"MCP tool removed: {tool_name}"
 
-        sig = inspect.signature(fn)
-        actual_params = [
-            p.name
-            for p in sig.parameters.values()
-            if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY, p.POSITIONAL_ONLY)
-        ]
+# ---------------------------------------------------------------------------
+# Layer 1: legacy YAML configs load through Config
+# ---------------------------------------------------------------------------
 
-        assert actual_params == expected_params, (
-            f"MCP tool '{tool_name}' parameter names changed.\n"
-            f"  expected: {expected_params}\n"
-            f"  actual:   {actual_params}\n"
-            f"This is a BREAKING change for every LLM client that calls this tool by name."
-        )
+
+@pytest.mark.parametrize("case", LEGACY_CASES)
+def test_legacy_config_loads_with_every_setting_in_effect(case, tmp_path, monkeypatch):
+    """Paths, documents, models, search and mappings keep the values the legacy config sets."""
+    fixture, settings, paths = case
+    loaded = load_legacy_config(fixture, tmp_path, monkeypatch)
+    expected = {**settings, **{name: tmp_path / path for name, path in paths.items()}}
+    assert {name: getattr(loaded, name) for name in expected} == expected
+
+
+# ---------------------------------------------------------------------------
+# Layer 2: public Python signatures
+# ---------------------------------------------------------------------------
 
 
 def test_folder_parameters_are_optional_and_preserve_existing_positional_call():
