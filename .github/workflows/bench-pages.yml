@@ -71,7 +71,7 @@ jobs:
           echo "Site contents:"
           ls -la site/
 
-      - name: Preserve raw timings and RSS byte samples
+      - name: Preserve raw timings and traced byte samples
         if: always()
         uses: actions/upload-artifact@v7
         with:
