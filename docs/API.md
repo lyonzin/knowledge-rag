@@ -26,7 +26,7 @@ Search using semantic retrieval and BM25 with optional cross-encoder reranking, 
 | `category` | string | null | Filter by category |
 | `hybrid_alpha` | float | 0.3 | Balance: 0.0 = keyword only, 1.0 = semantic only |
 | `min_score` | float | 0.0 | Minimum relevance score (0.0-1.0) to include a result. Use 0.2-0.4 to cut noise |
-| `snippet_mode` | bool | true | Truncate content to ~500 chars at natural break points. Adds `content_length` field |
+| `snippet_mode` | bool | true | Truncate content to ~500 chars from the start of the matching chunk, at natural break points. Adds `content_length` field. With `snippet_mode=false`, `content` can include the adjacent chunks and `match_offset` (when present) is where the matching chunk starts in it |
 | `search_method` | string | "auto" | `auto`, `hybrid`, or `fts5`; explicit `fts5` requires the feature to be enabled and ready |
 | `include_folders` | list[string] | null | Recursively search only these directories relative to `documents_dir`, before top-k selection |
 | `exclude_folders` | list[string] | null | Recursively exclude these directories before top-k; exclusions override inclusions |
@@ -154,13 +154,15 @@ List all document categories with their document counts.
 
 #### `list_documents`
 
-List all indexed documents, optionally filtered by category.
+List indexed documents one page at a time, optionally filtered by category.
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `category` | string | Optional category filter |
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `category` | string | null | Optional category filter |
+| `limit` | int | 100 | Maximum documents to return, clamped to 1–200 |
+| `offset` | int | 0 | Matching documents to skip; negative values count as 0 |
 
-**Returns:** JSON array of documents with id, source, category, format, chunks, and keywords.
+**Returns:** JSON with `total` (documents matching the filter), `offset`, `limit`, `count` (documents in this page) and `documents`, ordered by source path, each with id, source, category, format, chunks, and keywords. For the next page, call again with `offset + count` until `offset` reaches `total`.
 
 ---
 

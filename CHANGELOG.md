@@ -15,8 +15,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Unreleased
 
+**Added:**
+
+- `list_documents` takes optional `limit` (default 100, at most 200) and `offset` arguments and reports `total`, `offset` and `limit` next to `count`, so a large index is listed page by page instead of in one huge response (#260).
+
+**Changed:**
+
+- `list_documents` returns at most 100 documents by default, ordered by source path so pages stay stable while files are re-indexed. `count` is now the number of documents in the page; `total` is the number that match the filter. To list every document, call again with `offset` until it reaches `total` (#260).
+
 **Fixed:**
 
+- The default `search_knowledge` snippet starts at the matching chunk. It used to start at the neighboring chunk added before it for context, so the ~500-character snippet often held only text from before the match. `content_length` is still the full size, and a new `match_offset` field tells where the match starts in the full content (#260).
+- `search_similar` finds similar documents for long reference documents. The reference's own chunks are now excluded in the query; filtered out afterwards, 25 or more of them could take every candidate slot and the tool answered `no_results` (#260).
 - A number in `keyword_routes` or `category_mappings`, such as `blueteam: [sigma, 4624]`, no longer breaks indexing and every search. YAML reads a bare `4624` as an integer; numbers are now converted to text, and empty entries, lists or mappings are skipped with a warning. Quote values such as `0123` or `yes` to keep their exact spelling (#261).
 - A `category_mappings` key with capital letters, such as `Projetos/Clientes`, now matches its folder. Document paths were compared in lower case and the keys were not (#261).
 - The `reindex_documents` description no longer calls `force=True` a changed-files pass: it re-embeds every file. After editing files outside `add_document`/`update_document`, call it without flags (#261).
