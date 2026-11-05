@@ -52,9 +52,16 @@ def _memory_fields(bench: dict[str, Any]) -> dict[str, Any]:
     """Keep traced byte measurements separate from pytest's wall-clock statistics."""
     extra = bench.get("extra_info") or {}
     name = bench.get("fullname", bench.get("name", "")).replace("\\", "/")
-    is_memory = extra.get("measurement") == "tracemalloc_peak_bytes" or (
+    # Historical artifacts carry the RSS marker (workload version 2) or the pre-tracemalloc name
+    # test_bench_orchestrator_idle_rss, sometimes without a file-qualified fullname.
+    is_memory = extra.get("measurement") in {"tracemalloc_peak_bytes", "rss_peak_delta_bytes"} or (
         "test_bench_memory.py" in name
-        or bench.get("name") in {"test_bench_orchestrator_idle_memory", "test_bench_query_cache_5000_entries"}
+        or bench.get("name")
+        in {
+            "test_bench_orchestrator_idle_rss",
+            "test_bench_orchestrator_idle_memory",
+            "test_bench_query_cache_5000_entries",
+        }
     )
     if not is_memory:
         return {}

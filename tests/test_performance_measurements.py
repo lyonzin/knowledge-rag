@@ -15,6 +15,7 @@ from scripts.check_perf_regression import BYTES_FLOOR, IMPROVED, NEW, REGRESSED,
 MIB = 1024 * 1024
 THRESHOLD = check_perf_regression.REGRESSION_THRESHOLD
 MISSING_VALUE = {"measurement": "tracemalloc_peak_bytes", "workload_version": 3}
+LEGACY_RSS = {"measurement": "rss_peak_delta_bytes", "rss_peak_delta_bytes": 4096, "workload_version": 2}
 
 
 def _row(name, seconds, traced=None, version=1):
@@ -129,6 +130,19 @@ def test_given_a_new_benchmark_when_gated_then_it_is_only_reported(tmp_path, mon
     assert "['added']" in capsys.readouterr().out
 
 
+def test_given_a_new_benchmark_without_its_value_when_gated_then_it_fails(tmp_path, monkeypatch, capsys):
+    broken = {"name": "memory", "stats": {"median": 1}, "extra_info": MISSING_VALUE}
+    assert _gate(tmp_path, monkeypatch, [[_row("search", 1)]], [[_row("search", 1), broken]]) == 1
+    assert "[INCOMPARABLE] memory: no bytes value recorded" in capsys.readouterr().err
+
+
+def test_given_a_benchmark_missing_from_one_branch_run_when_gated_then_it_fails(tmp_path, monkeypatch, capsys):
+    master = [[_row("search", 1), _row("skipped", 1)], [_row("search", 1), _row("skipped", 1)]]
+    branch = [[_row("search", 1), _row("skipped", 1)], [_row("search", 1)]]
+    assert _gate(tmp_path, monkeypatch, master, branch) == 1
+    assert f"[INCOMPLETE] skipped: missing from {tmp_path / 'branch-2.json'}" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize(
     "case",
     [
@@ -141,6 +155,11 @@ def test_given_a_new_benchmark_when_gated_then_it_is_only_reported(tmp_path, mon
         (_row("memory", 1, traced=0, version=3), _row("memory", 1, traced=0, version=3), "zero baseline"),
         ({"name": "memory", "stats": {"median": 1}, "extra_info": MISSING_VALUE}, _row("memory", 1), "no bytes value"),
         (_row("memory", 1), _row("memory", 1, traced=9000, version=1), "different units: bytes / seconds"),
+        (
+            {"name": "memory", "stats": {"median": 1}, "extra_info": LEGACY_RSS},
+            _row("memory", 1, traced=9000, version=3),
+            "legacy artifact has no tracemalloc byte measurement",
+        ),
     ],
 )
 def test_given_runs_that_cannot_be_compared_when_gated_then_it_fails_with_the_reason(
@@ -157,11 +176,16 @@ def test_given_a_duplicate_benchmark_name_in_one_run_when_gated_then_the_input_i
     assert raised.value.code == 2
 
 
-def test_given_a_missing_master_file_when_gated_then_it_fails(tmp_path, monkeypatch):
+@pytest.mark.parametrize("content", [None, "", "{not json", '{"benchmarks": [{"name": "search"'])
+def test_given_a_missing_or_unreadable_master_file_when_gated_then_the_input_is_rejected(
+    tmp_path, monkeypatch, content
+):
+    master = tmp_path / "master-1.json"
+    if content is not None:
+        master.write_text(content, encoding="utf-8")
     branch = tmp_path / "branch-1.json"
     branch.write_text(json.dumps({"benchmarks": [_row("search", 1)]}), encoding="utf-8")
-    argv = ["check_perf_regression.py", "--master", str(tmp_path / "master-1.json"), "--branch", str(branch)]
-    monkeypatch.setattr(sys, "argv", argv)
+    monkeypatch.setattr(sys, "argv", ["check_perf_regression.py", "--master", str(master), "--branch", str(branch)])
     with pytest.raises(SystemExit) as raised:
         check_perf_regression.main()
     assert raised.value.code == 2
@@ -182,8 +206,12 @@ def test_given_gate_failures_then_only_the_run_adding_the_bypass_label_passes(tm
     monkeypatch.setenv("PR_LABELS", "skip-perf-gate")
     monkeypatch.setenv("PR_EVENT_ACTION", event[0])
     monkeypatch.setenv("PR_EVENT_LABEL", event[1])
+    # One failure of each kind: regressed, removed, incomplete and incomparable.
     master = [[_row("search", 1), _row("removed", 1), _row("memory", 1, traced=1000, version=2)]]
-    branch = [[_row("search", 2), _row("memory", 1, traced=1000, version=3)]]
+    branch = [
+        [_row("search", 2), _row("memory", 1, traced=1000, version=3), _row("partial", 1)],
+        [_row("search", 2), _row("memory", 1, traced=1000, version=3)],
+    ]
     assert _gate(tmp_path, monkeypatch, master, branch) == expected
 
 
@@ -266,6 +294,18 @@ def test_dashboard_keeps_byte_units_and_marks_legacy_unavailable():
     assert by_name["search"]["measurement_value"] == 1_000_000
     assert by_name["search"]["measurement_unit"] == "nanoseconds"
     assert by_name["test_bench_orchestrator_idle_memory"]["measurement_value"] is None
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        {"name": "test_bench_orchestrator_idle_rss", "stats": {"median": 0.17}},
+        {"name": "custom_memory_probe", "stats": {"median": 0.17}, "extra_info": LEGACY_RSS},
+    ],
+)
+def test_given_a_historical_memory_row_without_fullname_when_built_then_it_is_unavailable_memory(row):
+    built = build_payload({"benchmarks": [row]}, "abc123", "4.7.1")["results"][0]
+    assert (built["measurement_unit"], built["measurement_value"], built["median_ns"]) == ("bytes", None, None)
 
 
 def test_audit_exports_requested_and_transitive_dependencies_only():

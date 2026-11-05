@@ -10,8 +10,9 @@ A benchmark regresses only when its lowest branch median is above its highest
 master median by more than ``REGRESSION_THRESHOLD`` (10% by default); a byte
 measurement must also grow by more than ``BYTES_FLOOR``. Spreads that overlap
 are noise and pass; improvements are reported, never blocking. A benchmark that
-master has and the branch lacks, or whose runs cannot be compared, fails too:
-otherwise renaming, skipping or re-versioning a slow benchmark would pass.
+master has and the branch lacks, that some runs of a side lack, or whose runs
+cannot be compared fails too: otherwise renaming, skipping or re-versioning a
+slow benchmark would pass.
 
 Exit codes: 0 the gate passes (or the bypass applies), 1 the gate fails,
 2 the input is unusable (missing or empty file, duplicate benchmark name).
@@ -40,13 +41,24 @@ REGRESSION_THRESHOLD = 0.10  # 10%
 BYTES_FLOOR = 32 * 1024
 BYPASS_LABEL = "skip-perf-gate"
 BYTES_MEASUREMENT = "tracemalloc_peak_bytes"
-MEMORY_BENCHMARKS = {"test_bench_orchestrator_idle_memory", "test_bench_query_cache_5000_entries"}
+LEGACY_RSS_MEASUREMENT = "rss_peak_delta_bytes"
+# test_bench_orchestrator_idle_rss is the pre-tracemalloc name that legacy artifacts still carry.
+MEMORY_BENCHMARKS = {
+    "test_bench_orchestrator_idle_rss",
+    "test_bench_orchestrator_idle_memory",
+    "test_bench_query_cache_5000_entries",
+}
 # An exact 10% change computes as 0.10000000000000009; it must not count as above the threshold.
 FLOAT_TOLERANCE = 1e-12
 REGRESSED, IMPROVED, UNCHANGED, NEW, REMOVED = "regressed", "improved", "unchanged", "new", "removed"
-INCOMPARABLE, WIDE_SPREAD = "incomparable", "wide spread"
+INCOMPARABLE, INCOMPLETE, WIDE_SPREAD = "incomparable", "incomplete", "wide spread"
 COMPARED = (REGRESSED, IMPROVED, UNCHANGED)
-FAILURE_TAGS = ((REGRESSED, "REGRESSION"), (REMOVED, "REMOVED"), (INCOMPARABLE, "INCOMPARABLE"))
+FAILURE_TAGS = (
+    (REGRESSED, "REGRESSION"),
+    (REMOVED, "REMOVED"),
+    (INCOMPLETE, "INCOMPLETE"),
+    (INCOMPARABLE, "INCOMPARABLE"),
+)
 BYPASS_HELP = f"""
 If the change is intentional and accepted:
   - Document the trade-off in the PR description.
@@ -65,7 +77,10 @@ def _load(path: Path) -> dict[str, dict[str, Any]]:
     """Return one measurement per benchmark name; a duplicate name would hide one of its rows."""
     if not path.exists():
         _input_error(f"Benchmark file missing: {path}")
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError as error:  # JSONDecodeError or UnicodeDecodeError: empty, truncated or not text
+        _input_error(f"Benchmark file is not valid JSON: {path} ({error})")
     out: dict[str, dict[str, Any]] = {}
     for bench in payload.get("benchmarks", []):
         if bench["name"] in out:
@@ -80,7 +95,11 @@ def _measurement(bench: dict[str, Any]) -> dict[str, Any]:
     """Read traced bytes from extra_info without relabelling pytest timing stats."""
     extra = bench.get("extra_info") or {}
     name = bench.get("fullname", bench["name"]).replace("\\", "/")
-    memory = "test_bench_memory.py" in name or bench["name"] in MEMORY_BENCHMARKS
+    memory = (
+        "test_bench_memory.py" in name
+        or bench["name"] in MEMORY_BENCHMARKS
+        or extra.get("measurement") == LEGACY_RSS_MEASUREMENT
+    )
     result = {
         "median": bench["stats"]["median"],
         "unit": "seconds",
@@ -99,12 +118,10 @@ def _measurement(bench: dict[str, Any]) -> dict[str, Any]:
 
 
 def _collect(paths: Sequence[Path]) -> dict[str, list[dict[str, Any]]]:
-    """Map each benchmark to its measurement in every run file that contains it."""
-    runs: dict[str, list[dict[str, Any]]] = {}
-    for path in paths:
-        for name, row in _load(path).items():
-            runs.setdefault(name, []).append(row)
-    return runs
+    """Map each benchmark to one row per run; a run that lacks it holds a ``missing_from`` placeholder."""
+    runs = {str(path): _load(path) for path in paths}
+    names = {name for rows in runs.values() for name in rows}
+    return {name: [rows.get(name, {"missing_from": run}) for run, rows in runs.items()] for name in names}
 
 
 def _medians(rows: list[dict[str, Any]]) -> list[float]:
@@ -112,13 +129,13 @@ def _medians(rows: list[dict[str, Any]]) -> list[float]:
 
 
 def _incomparable(master: list[dict[str, Any]], branch: list[dict[str, Any]]) -> str | None:
-    """Explain why the runs of a benchmark measured on both sides do not describe the same workload."""
-    if not master or not branch:
-        return None  # judge() reports a benchmark measured on one side only
+    """Explain why a benchmark cannot be judged: a row without its value, or sides measuring different things."""
     rows = master + branch
     reasons = [row["reason"] for row in rows if row["median"] is None]
     if reasons:
         return str(reasons[0])
+    if not master or not branch:
+        return None  # judge() reports a benchmark measured on one side only
     units = sorted({row["unit"] for row in rows})
     if len(units) > 1:
         return f"different units: {' / '.join(units)}"
@@ -198,6 +215,9 @@ def _evaluate(
     name: str, master: list[dict[str, Any]], branch: list[dict[str, Any]], threshold: float
 ) -> dict[str, str]:
     """Return this benchmark's report lines keyed by verdict, plus a WIDE_SPREAD warning when it applies."""
+    missing = [row["missing_from"] for row in master + branch if "missing_from" in row]
+    if missing:
+        return {INCOMPLETE: f"{name}: missing from {', '.join(missing)}"}
     reason = _incomparable(master, branch)
     if reason:
         return {INCOMPARABLE: f"{name}: {reason}"}
@@ -242,7 +262,7 @@ def _report_failures(failures: list[tuple[str, str]]) -> int:
 
 
 def _report(report: dict[str, list[str]], threshold: float) -> int:
-    """Print every verdict; REGRESSED, REMOVED and INCOMPARABLE rows fail the gate unless bypassed."""
+    """Print every verdict; REGRESSED, REMOVED, INCOMPLETE and INCOMPARABLE rows fail unless bypassed."""
     if report.get(NEW):
         print(f"[INFO] New benchmarks added by branch: {report[NEW]}")
     compared = sum(len(report.get(verdict, [])) for verdict in COMPARED)
