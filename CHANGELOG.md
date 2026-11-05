@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+### Unreleased
+
+**Fixed:**
+
+- Startup auto-repair no longer fills the disk with old backups. Each time the preflight probe failed three times in a row, the active index was moved to a new `data/backups/auto-repair-*` folder and none was ever deleted, so a corruption loop could pile up hundreds of full copies (one install had 197 of them, 76 GB, next to a 0.6 GB index). After each repair, only the 3 most recent `auto-repair-*` folders are kept, the new one included. Nothing else in `data/backups/` is touched, and a folder that cannot be deleted, for example because a file in it is still open on Windows, is logged in `data/preflight.log` and retried on the next repair. A repair that moves nothing, because the move failed (exit code 75) or there was no index left to move, no longer leaves an empty `auto-repair-*` folder behind. Existing piles are pruned on the next repair; until then, older `auto-repair-*` folders can be deleted by hand (#267).
+
+---
+
 ### v4.11.1 (2026-10-25) — Fresh-install startup fix and Windows-safe state writes
 
 Patch release. On v4.10.0 and v4.11.0, every fresh install and every new data directory, new Docker volumes included, failed to start with `Embedding function conflict … persisted: default`. Installs that already hit the error start normally after upgrading. No breaking changes and no migration steps. Thanks to @mmathoosh and @rshun for the reports, @franzgranlund for tracing it to the preflight probe, @cauger-dev for the detailed Windows analysis in #249, and @vishalhabib99 and @viniciussantos45 for #236 and #242.
