@@ -141,7 +141,9 @@ source = ["mcp_server"]
 
 [tool.coverage.report]
 show_missing = true
-fail_under = 35
+# pytest-cov enforces this in every test matrix cell; each cell measured
+# 84.2-84.4% on 2026-11-05, so the floor catches a real drop, not noise.
+fail_under = 80
 
 # ── mypy: strict gradual rollout (Pillar 7) ─────────────────────────────────
 # Strict mode is enabled GLOBALLY but with a per-module exclusion list while

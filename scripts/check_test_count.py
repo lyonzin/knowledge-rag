@@ -33,6 +33,21 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 BASELINE_FILE = REPO_ROOT / ".github" / "test-count-baseline.txt"
 TESTS_DIR = REPO_ROOT / "tests"
 BYPASS_LABEL = "skip-test-count"
+# pytest -q prints "144 tests collected in 1.23s", or with deselection (addopts
+# `-m 'not chaos'`) "1312/1317 tests collected (5 deselected) in 3.21s". Capture
+# the first number, the selected tests (skipped ones included): counting the
+# total would let a PR move tests under a deselected marker without lowering
+# the count.
+COLLECTED_SUMMARY = re.compile(r"(\d+)(?:/\d+)?\s+tests?\s+collected")
+
+
+def parse_collected_count(output: str) -> int | None:
+    """Return the selected-test count from ``pytest --collect-only -q`` output."""
+    for line in reversed(output.splitlines()):
+        match = COLLECTED_SUMMARY.search(line)
+        if match:
+            return int(match.group(1))
+    return None
 
 
 def collect_test_count() -> int:
@@ -50,16 +65,12 @@ def collect_test_count() -> int:
         print(result.stderr, file=sys.stderr)
         raise SystemExit(2)
 
-    # pytest -q prints something like:
-    #     "144 tests collected in 1.23s"
-    # We grab the first integer on the summary line.
-    for line in reversed(result.stdout.splitlines()):
-        match = re.search(r"(\d+)\s+tests?\s+collected", line)
-        if match:
-            return int(match.group(1))
-    print("[ERROR] Could not parse test count from pytest output:", file=sys.stderr)
-    print(result.stdout, file=sys.stderr)
-    raise SystemExit(2)
+    count = parse_collected_count(result.stdout)
+    if count is None:
+        print("[ERROR] Could not parse test count from pytest output:", file=sys.stderr)
+        print(result.stdout, file=sys.stderr)
+        raise SystemExit(2)
+    return count
 
 
 def read_baseline() -> int | None:

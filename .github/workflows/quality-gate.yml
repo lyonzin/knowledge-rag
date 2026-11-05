@@ -1,7 +1,9 @@
 name: Quality Gate
 
 # 7 Pillars Quality Gate — wave 2 of 5 (Security + Versioning).
-# Each job below maps to a status check that branch protection requires.
+# Branch protection requires only "Quality Gate Summary" (plus "Lint &
+# Format" in ci.yml); the summary fails when any job in its `needs` fails,
+# is cancelled or times out. A job left out of `needs` does not block merges.
 # More pillars (Stability, Memory, Versatility, Scalability, Quality) are
 # added by subsequent waves.
 
@@ -9,7 +11,8 @@ on:
   pull_request:
     branches: [master]
     # labeled/unlabeled so bypass labels (skip-changelog, skip-test-count,
-    # skip-perf-gate) re-evaluate the gate without needing a forced push.
+    # skip-perf-gate, skip-api-surface) re-evaluate the gate without needing
+    # a forced push.
     types: [opened, synchronize, reopened, labeled, unlabeled]
   push:
     branches: [master]
@@ -19,10 +22,12 @@ on:
 permissions:
   contents: read
 
-# Cancel earlier runs of the same PR when a new push lands
+# Cancel earlier runs of the same PR when a new push lands. A running master
+# run is never cancelled (a cancelled run fails the summary); GitHub still
+# replaces a *pending* master run when a newer push arrives.
 concurrency:
   group: quality-gate-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # ════════════════════════════════════════════════════════════════════════
@@ -32,6 +37,7 @@ jobs:
   bandit:
     name: "Pillar 1 — Bandit SAST"
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -47,6 +53,7 @@ jobs:
   semgrep:
     name: "Pillar 1 — Semgrep"
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -62,6 +69,7 @@ jobs:
   pip-audit:
     name: "Pillar 1 — pip-audit (CVEs)"
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -98,6 +106,7 @@ jobs:
   gitleaks:
     name: "Pillar 1 — Gitleaks (secrets)"
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
         with:
@@ -111,6 +120,7 @@ jobs:
   dependency-review:
     name: "Pillar 1 — Dependency Review"
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     if: github.event_name == 'pull_request'
     # Requires GitHub Dependency Graph to be enabled on the repo
     # (Settings -> Code security -> Dependency graph). Until the maintainer
@@ -130,6 +140,7 @@ jobs:
   version-sync:
     name: "Pillar 6 — Version sync (3 files)"
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -142,11 +153,24 @@ jobs:
   api-surface:
     name: "Pillar 6 — Public API surface"
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+        with:
+          # On pull_request HEAD is the merge commit; HEAD^1 is the master
+          # commit the PR is tested against.
+          fetch-depth: 2
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+      - name: Use master's API surface as the baseline
+        # A PR must not approve its own breaking change by regenerating the
+        # baseline. With the skip-api-surface label (an intentional break, set
+        # by a maintainer) the PR's regenerated baseline is used. On push the
+        # tree already is master: keep its own file.
+        if: github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'skip-api-surface')
+        shell: bash
+        run: git show HEAD^1:.github/api-surface-baseline.json > .github/api-surface-baseline.json
       - name: Compare API surface against baseline
         shell: bash
         run: python scripts/check_api_surface.py --check
@@ -154,6 +178,7 @@ jobs:
   conventional-commit-title:
     name: "Pillar 6 — Conventional commit (PR title)"
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     if: github.event_name == 'pull_request'
     steps:
       - uses: amannn/action-semantic-pull-request@v6
@@ -181,6 +206,7 @@ jobs:
   changelog:
     name: "Pillar 6 — CHANGELOG entry"
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v7
@@ -199,6 +225,7 @@ jobs:
   backwards-compat:
     name: "Pillar 6 — Backwards-compat tests"
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -224,6 +251,7 @@ jobs:
   versatility-presets:
     name: "Pillar 4 — Preset matrix"
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -239,6 +267,7 @@ jobs:
   versatility-locale:
     name: "Pillar 4 — Locale matrix"
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -260,6 +289,7 @@ jobs:
   versatility-formats:
     name: "Pillar 4 — Format smoke matrix"
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -285,6 +315,7 @@ jobs:
   mypy:
     name: "Pillar 7 — mypy strict (gradual)"
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -304,6 +335,7 @@ jobs:
   interrogate:
     name: "Pillar 7 — Docstring coverage"
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -317,6 +349,7 @@ jobs:
   radon:
     name: "Pillar 7 — Cyclomatic complexity"
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     # Report-only for now: we know Config / orchestrator.query are D/E
     # (legacy hot-spots). Visibility helps the maintainer prioritize
     # refactors without blocking unrelated PRs.
@@ -340,6 +373,7 @@ jobs:
   vulture:
     name: "Pillar 7 — Dead code (vulture)"
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     continue-on-error: true   # report-only initially
     steps:
       - uses: actions/checkout@v7
@@ -362,6 +396,7 @@ jobs:
   pr-size:
     name: "Pillar 7 — PR size guard"
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     if: github.event_name == 'pull_request'
     continue-on-error: true   # warn-only by design
     steps:
@@ -396,9 +431,14 @@ jobs:
   test-count:
     name: "Pillar 2 — Test count anti-regression"
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v7
+        with:
+          # HEAD is the PR merge commit; HEAD^1 is the master commit it is
+          # tested against, whose test count is the baseline below.
+          fetch-depth: 2
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -410,6 +450,28 @@ jobs:
         run: |
           pip install -e .
           pip install pytest hypothesis psutil numpy pyyaml
+      - name: Count master's tests as the baseline
+        # The committed baseline is whatever the PR says it is; count the
+        # tests of the master commit under test instead, in this same
+        # environment and with this PR's counting script. With the bypass
+        # label the comparison passes anyway, so the step is skipped.
+        # Master's tests are collected with this PR's dependencies: if the PR
+        # changes a dependency that they import, collection fails and the
+        # label is the way through (a second venv would double the install).
+        if: ${{ !contains(github.event.pull_request.labels.*.name, 'skip-test-count') }}
+        shell: bash
+        env:
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+          HF_HUB_DISABLE_PROGRESS_BARS: "1"
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/base" HEAD^1
+          cp scripts/check_test_count.py "$RUNNER_TEMP/base/scripts/"
+          if ! python "$RUNNER_TEMP/base/scripts/check_test_count.py" --update; then
+            echo "::error title=test-count::Could not collect master's tests with this PR's dependencies. If the PR changes a dependency that master's tests import, a maintainer can add the skip-test-count label."
+            exit 1
+          fi
+          cp "$RUNNER_TEMP/base/.github/test-count-baseline.txt" .github/test-count-baseline.txt
       - name: Verify test count has not regressed
         shell: bash
         env:
@@ -426,6 +488,7 @@ jobs:
   memory-baseline:
     name: "Pillar 3 — Memory baseline"
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -447,6 +510,7 @@ jobs:
   property-fuzz:
     name: "Pillar 4 (innovation) — Property-based fuzz"
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -472,6 +536,7 @@ jobs:
   perf-bench:
     name: "Pillar 5 — Performance regression gate (10%)"
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     if: github.event_name == 'pull_request'
     env:
       HF_HUB_OFFLINE: "1"
@@ -535,12 +600,101 @@ jobs:
           fi
 
   # ════════════════════════════════════════════════════════════════════════
+  # PILLARS 2 + 4: FULL TEST SUITE (3 OS x 3 Python)
+  # ════════════════════════════════════════════════════════════════════════
+
+  test:
+    name: Test (Python ${{ matrix.python-version }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write  # Codecov OIDC upload (ubuntu-latest / 3.12 cell only)
+    # Pillar 4 (Versatility): 3 OS x 3 Python = 9 combos, all required.
+    # All cells were green for two consecutive Quality Gate cycles
+    # (Onda 3 + Onda 4) on macOS and Python 3.13 — promoted from
+    # experimental to required at v3.9.0.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        # bash (-eo pipefail) stops at the first failing command; on Windows
+        # the default pwsh only checks the exit code of the last one.
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov pytest-rerunfailures pytest-timeout hypothesis psutil numpy pyyaml hatchling
+
+      - name: Run tests with coverage
+        # Force bash on Windows too — the default pwsh shell propagates ANY
+        # stderr write as a non-zero exit code through its $LASTEXITCODE
+        # handling in some configurations, even when pytest itself exited
+        # cleanly. Bash inherits pytest's actual return code.
+        shell: bash
+        env:
+          # Forbid any HuggingFace network call. Tests must mock TextEmbedding
+          # / TextCrossEncoder. A leaked real download (race condition spawning
+          # a daemon thread, missing mock, etc.) would otherwise hang on slow
+          # Windows runners and produce "ValueError: I/O operation on closed
+          # file" during interpreter shutdown. With OFFLINE=1, any leak fails
+          # fast and visibly.
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+          # Disable HF Hub download progress bars (they spawn worker threads
+          # that race against pytest's interpreter shutdown).
+          HF_HUB_DISABLE_PROGRESS_BARS: "1"
+        # --reruns=1 retries flaky tests once (Pillar 2: Stability); the next
+        # step lists every rerun in the job summary so flakes stay visible.
+        # --timeout=300 fails a hung test instead of burning the job budget.
+        # pipefail keeps pytest's exit status through the tee.
+        run: |
+          set -o pipefail
+          pytest tests/ -v --cov=mcp_server --cov-report=xml --cov-report=term-missing --reruns=1 --timeout=300 --junit-xml=junit.xml | tee pytest.log
+
+      - name: List reruns in the job summary
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          if grep -q RERUN pytest.log 2>/dev/null; then
+            {
+              echo "### Reruns (Python ${{ matrix.python-version }}, ${{ matrix.os }})"
+              echo '```'
+              grep RERUN pytest.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload coverage
+        if: matrix.python-version == '3.12' && matrix.os == 'ubuntu-latest'
+        # Advisory: an OIDC or Codecov outage must not fail a green test run
+        # (fail_ci_if_error does not cover the OIDC token step).
+        continue-on-error: true
+        uses: codecov/codecov-action@v7
+        with:
+          files: coverage.xml
+          use_oidc: true
+          fail_ci_if_error: false
+
+  # ════════════════════════════════════════════════════════════════════════
   # SUMMARY
   # ════════════════════════════════════════════════════════════════════════
 
   summary:
     name: "Quality Gate Summary"
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # always(), not !cancelled(): GitHub counts a skipped required check as
+    # passing, so the summary must still run, and fail, in a cancelled run.
     if: always()
     needs:
       # Pillar 1 — Security
@@ -566,9 +720,15 @@ jobs:
       # Pillar 7 — Quality (blocking)
       - mypy
       - interrogate
+      # Pillars 2 + 4 — full test suite, 3 OS x 3 Python
+      - test
     steps:
       - name: Aggregate results
         shell: bash
+        env:
+          # Every job in `needs`, so a job added there can never be left out
+          # of the check below.
+          RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
           echo "## Quality Gate Status" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -590,29 +750,17 @@ jobs:
           echo "| 6 Versioning | Backwards-compat | ${{ needs.backwards-compat.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 7 Quality | mypy strict | ${{ needs.mypy.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 7 Quality | Docstring coverage | ${{ needs.interrogate.result }} |" >> $GITHUB_STEP_SUMMARY
-          # `skipped` is acceptable (PR-only jobs running on push events skip cleanly).
-          # `cancelled` is acceptable (concurrency cancel of older runs).
-          # Only `failure` blocks the gate.
-          for r in \
-            "${{ needs.bandit.result }}" \
-            "${{ needs.semgrep.result }}" \
-            "${{ needs.pip-audit.result }}" \
-            "${{ needs.gitleaks.result }}" \
-            "${{ needs.memory-baseline.result }}" \
-            "${{ needs.versatility-presets.result }}" \
-            "${{ needs.versatility-locale.result }}" \
-            "${{ needs.versatility-formats.result }}" \
-            "${{ needs.property-fuzz.result }}" \
-            "${{ needs.test-count.result }}" \
-            "${{ needs.perf-bench.result }}" \
-            "${{ needs.version-sync.result }}" \
-            "${{ needs.api-surface.result }}" \
-            "${{ needs.backwards-compat.result }}" \
-            "${{ needs.mypy.result }}" \
-            "${{ needs.interrogate.result }}"; do
-            if [[ "$r" == "failure" ]]; then
+          echo "| 2+4 Stability/Versatility | Test matrix (3 OS x 3 Python) | ${{ needs.test.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          # Only `success` and `skipped` pass. `failure`, `cancelled` (which
+          # includes a job killed by timeout-minutes) and anything else fail.
+          # `skipped` happens only by design: on pull_request every job in
+          # `needs` runs (none has its own `needs`, and the only `if:` filters,
+          # on perf-bench and test-count, select pull_request); on push those
+          # two PR-only jobs skip.
+          for r in $RESULTS; do
+            if [[ "$r" != "success" && "$r" != "skipped" ]]; then
               echo "" >> $GITHUB_STEP_SUMMARY
-              echo "❌ One or more pillars failed. Address the issues above before review." >> $GITHUB_STEP_SUMMARY
+              echo "❌ A required job ended as '$r'. Address the issues above before review." >> "$GITHUB_STEP_SUMMARY"
               exit 1
             fi
           done
