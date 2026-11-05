@@ -122,6 +122,15 @@ _ROUTE_AND_MAPPING_CASES = [
         id="mapping-date-key",
     ),
     pytest.param(
+        (
+            "category_mappings:\n  Projetos/Clientes: clientes\n",
+            "category_mappings",
+            {"projetos/clientes": "clientes"},
+            [],
+        ),
+        id="mapping-uppercase-key",
+    ),
+    pytest.param(
         ("category_mappings:\n  ~: general\n", "category_mappings", {}, ["category_mappings: ignoring key None"]),
         id="mapping-null-key",
     ),

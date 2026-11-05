@@ -1091,7 +1091,8 @@ class Config:
             elif not isinstance(category, _TEXT_SCALAR_TYPES):
                 print(f"[WARN] category_mappings.{path}: ignoring {category!r}", file=sys.stderr)
             else:
-                mappings[str(path)] = str(category)
+                # _detect_category matches against the lower-cased relative path.
+                mappings[str(path).lower()] = str(category)
         self.category_mappings = mappings
 
     def _validate_query_expansions(self) -> None:
