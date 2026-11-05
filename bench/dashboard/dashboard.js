@@ -93,10 +93,10 @@
     return row.measurement_unit === 'bytes' ? fmtBytes(row.measurement_value) : fmtDuration(row.median_ns);
   }
   function memoryStatus(row) {
-    if (row.measurement_value == null || row.rss_budget_bytes == null) return { level: 'warn', label: 'unavailable' };
-    return row.measurement_value < row.rss_budget_bytes
-      ? { level: 'good', label: 'within RSS budget' }
-      : { level: 'danger', label: 'over RSS budget' };
+    if (row.measurement_value == null || row.budget_bytes == null) return { level: 'warn', label: 'unavailable' };
+    return row.measurement_value < row.budget_bytes
+      ? { level: 'good', label: 'within budget' }
+      : { level: 'danger', label: 'over budget' };
   }
   function fmtShortDate(iso) {
     if (!iso) return '—';
@@ -204,7 +204,7 @@
         <div class="kpi-label">${escapeHtml(cat)}</div>
         <div class="kpi-value">${fmtMeasurement(repr)}</div>
         <div class="kpi-sub">
-          <span>${repr.measurement_unit === 'bytes' ? 'sampled peak RSS growth' : `${list.length} bench${list.length === 1 ? '' : 'es'}`}</span>
+          <span>${repr.measurement_unit === 'bytes' ? 'peak traced allocation' : `${list.length} bench${list.length === 1 ? '' : 'es'}`}</span>
           <span class="kpi-status kpi-status--${status.level}">${status.label}</span>
         </div>
       `;
@@ -315,7 +315,7 @@
         <div class="cat-name">${escapeHtml(list[0].category_label)}</div>
         <div class="cat-stats">
           <span><strong>${list.length}</strong> tests</span>
-          <span>${list[0].measurement_unit === 'bytes' ? 'RSS growth' : 'median'} <strong>${fmt(median)}</strong></span>
+          <span>${list[0].measurement_unit === 'bytes' ? 'peak allocation' : 'median'} <strong>${fmt(median)}</strong></span>
           <span>range <strong>${fmt(min)}</strong>–<strong>${fmt(max)}</strong></span>
         </div>
       `;

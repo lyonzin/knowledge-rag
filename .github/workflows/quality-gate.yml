@@ -542,12 +542,16 @@ jobs:
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
       HF_HUB_DISABLE_PROGRESS_BARS: "1"
-    # Promoted to required at v3.9.0. Bootstrap-resilient: when master
-    # does not yet contain bench/, the gate skips with [INFO] message
-    # rather than failing.
+    # Promoted to required at v3.9.0. There is no bootstrap skip: a master
+    # that cannot be benchmarked fails the gate, because skipping it would
+    # let every later PR pass without being measured.
     steps:
       - name: Checkout PR branch
         uses: actions/checkout@v7
+        with:
+          # HEAD is the PR merge commit; HEAD^1 is the master commit it is
+          # tested against, the same baseline as test-count and api-surface.
+          fetch-depth: 2
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -556,48 +560,50 @@ jobs:
         run: |
           pip install -e .
           pip install pytest pytest-benchmark psutil numpy
-      - name: Bench against PR branch
+      - name: Check out master (HEAD^1) in a separate worktree
         shell: bash
-        env:
-          HF_HUB_OFFLINE: "1"
-          TRANSFORMERS_OFFLINE: "1"
-          HF_HUB_DISABLE_PROGRESS_BARS: "1"
-        run: pytest bench/ --benchmark-only --benchmark-min-rounds=3 --benchmark-json=branch.json
-      - name: Benchmark master in a separate checkout
-        shell: bash
-        # First-run resilience: if master does not yet contain bench/ (the
-        # PR that introduces it), the perf gate is informational. Once bench/
-        # exists in master, the gate compares medians and enforces the 10%
-        # ceiling.
         run: |
-          git fetch origin master:master-base
-          if git show master-base:bench/test_bench_search.py > /dev/null 2>&1; then
-            git worktree add --detach "$RUNNER_TEMP/knowledge-rag-baseline" master-base
-            cd "$RUNNER_TEMP/knowledge-rag-baseline"
-            PYTHONPATH="$PWD" python -m pytest bench/ --benchmark-only --benchmark-min-rounds=3 \
-              --benchmark-json="$GITHUB_WORKSPACE/master.json"
-          else
-            echo "[INFO] master does not yet contain bench/; this is the bootstrap PR. Perf gate skipped."
+          git worktree add --detach "$RUNNER_TEMP/knowledge-rag-baseline" HEAD^1
+          if ! git diff --quiet HEAD^1 -- bench/; then
+            echo "::warning title=perf-bench::This PR changes bench/, so a changed benchmark runs different code on each side and its comparison is not like-for-like."
           fi
-      - name: Preserve benchmark measurements and RSS byte samples
+      - name: Benchmark branch and master interleaved
+        shell: bash
+        # Sub-100 µs medians move ±15–19% between runs of identical code and
+        # the runner can drift during the job. Running branch, master, master,
+        # branch gives each side runs early and late in the job, and the gate
+        # compares the spread of each side's runs instead of a single pair.
+        run: |
+          run_bench() {  # $1: checkout to measure, $2: JSON file to write
+            (cd "$1" && PYTHONPATH="$1" python -m pytest bench/ --benchmark-only --benchmark-min-rounds=3 \
+              --benchmark-json="$GITHUB_WORKSPACE/$2")
+          }
+          master="$RUNNER_TEMP/knowledge-rag-baseline"
+          run_bench "$GITHUB_WORKSPACE" branch-1.json
+          run_bench "$master" master-1.json
+          run_bench "$master" master-2.json
+          run_bench "$GITHUB_WORKSPACE" branch-2.json
+      - name: Preserve benchmark measurements and traced byte samples
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: performance-gate-measurements
           path: |
-            branch.json
-            master.json
+            branch-1.json
+            master-1.json
+            master-2.json
+            branch-2.json
           if-no-files-found: warn
       - name: Compare and gate
         shell: bash
         env:
-          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          # skip-perf-gate bypasses only the run that adding it triggers; a
+          # later push, another label or removing it is measured normally.
+          PR_EVENT_ACTION: ${{ github.event.action }}
+          PR_EVENT_LABEL: ${{ github.event.label.name }}
         run: |
-          if [ -f master.json ] && [ -f branch.json ]; then
-            python scripts/check_perf_regression.py master.json branch.json
-          else
-            echo "[INFO] Master bench unavailable on first run; gate is non-blocking."
-          fi
+          python scripts/check_perf_regression.py --master master-1.json master-2.json \
+            --branch branch-1.json branch-2.json
 
   # ════════════════════════════════════════════════════════════════════════
   # PILLARS 2 + 4: FULL TEST SUITE (3 OS x 3 Python)
