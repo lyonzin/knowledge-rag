@@ -8,6 +8,7 @@ import chromadb
 import pytest
 
 import mcp_server.server as server
+from mcp_server.fts5_index import Fts5LexicalIndex
 
 
 def test_cache_isolates_mutation_without_copying_immutable_document_text():
@@ -36,6 +37,40 @@ def test_snippet_response_preserves_full_response_on_same_cached_query(monkeypat
     assert snippet["results"][0]["content_length"] == len(content)
     assert full["results"][0]["content"] == content
     assert "content_length" not in full["results"][0]
+
+
+def _index_guide_matching_only_in_its_middle_chunk(orch, monkeypatch):
+    """Index three markdown sections, one chunk each; only the middle one holds ``needleterm``."""
+    monkeypatch.setattr(server.config, "reranker_enabled", False)
+    monkeypatch.setattr(server, "get_orchestrator", lambda: orch)
+    sections = [
+        "## Before\n\n" + "preface " * 80,
+        "## Match\n\nneedleterm " + "detail " * 80,
+        "## After\n\n" + "ending " * 80,
+    ]
+    (server.config.documents_dir / "guide.md").write_text("\n\n".join(sections), encoding="utf-8")
+    assert orch.index_all()["errors"] == 0
+
+
+def test_snippet_starts_at_the_matched_chunk_when_context_comes_before_it(isolated_orchestrator, monkeypatch):
+    """Given a match in a middle chunk, the default snippet shows that chunk, not the one before it (#260)."""
+    _index_guide_matching_only_in_its_middle_chunk(isolated_orchestrator, monkeypatch)
+    full = json.loads(server.search_knowledge("needleterm", hybrid_alpha=0.0, snippet_mode=False))["results"][0]
+    snippet = json.loads(server.search_knowledge("needleterm", hybrid_alpha=0.0))["results"][0]  # QueryCache hit
+    assert snippet["content"].startswith("## Match\n\nneedleterm")
+    assert snippet["content_length"] == len(full["content"])
+
+
+def test_fts5_snippet_starts_at_the_matched_chunk(isolated_orchestrator, monkeypatch, tmp_path):
+    """Given the opt-in FTS5 index, its snippet also starts at the matched chunk (#260)."""
+    orch = isolated_orchestrator
+    monkeypatch.setattr(server.config, "fts5_enabled", True)
+    orch.fts5_index = Fts5LexicalIndex(tmp_path / "fts5.db", tmp_path / "fts5.state")
+    orch.fts5_index._write_state("complete", 0, 0, "", None, None)
+    _index_guide_matching_only_in_its_middle_chunk(orch, monkeypatch)  # chunks sync into FTS5 as they index
+    hit = json.loads(server.search_knowledge("needleterm", search_method="fts5"))["results"][0]
+    assert hit["search_method"] == "fts5"
+    assert hit["content"].startswith("## Match\n\nneedleterm")
 
 
 def test_replacing_cached_key_at_capacity_keeps_other_entry():
@@ -72,6 +107,28 @@ def test_search_similar_accepts_real_chroma_ndarrays_and_document_relative_paths
         assert hits[0]["source"] == str(neighbor)
     finally:
         client.delete_collection(collection.name)
+
+
+def test_search_similar_returns_neighbors_of_a_document_with_many_similar_chunks(isolated_orchestrator):
+    """Given a reference whose own chunks outrank every neighbor, the neighbors still come back (#260)."""
+    orch = isolated_orchestrator
+    reference = str((server.config.documents_dir / "reference.md").resolve())
+    neighbor = str((server.config.documents_dir / "neighbor.md").resolve())
+    orch._source_to_docid[reference] = "reference"
+    chunk_count = 30  # more than the 25 candidates search_similar(max_results=5) asks Chroma for
+    orch.collection.add(
+        ids=[f"reference_{index}" for index in range(chunk_count)],
+        documents=["reference chunk"] * chunk_count,
+        embeddings=[[1.0, 1.0]] * chunk_count,
+        metadatas=[{"doc_id": "reference", "source": reference}] * chunk_count,
+    )
+    orch.collection.add(
+        ids=["neighbor_0"],
+        documents=["neighbor chunk"],
+        embeddings=[[0.5, 1.0]],
+        metadatas=[{"doc_id": "neighbor", "source": neighbor}],
+    )
+    assert [hit["source"] for hit in orch.search_similar(reference, max_results=5)] == [neighbor]
 
 
 def test_adjacent_chunk_expansion_deduplicates_real_chroma_ids(tmp_path):

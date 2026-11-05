@@ -85,8 +85,12 @@ from .ratelimit import rate_limited
 from .search_candidates import select_rerank_candidates
 from .search_scope import FolderScope, ScopeKey
 from .security import (
+    _MAX_SOURCE_CHARS,
     BearerAuthMiddleware,
     PathEscapeError,
+    _escape_attribute,
+    content_sha256,
+    detect_external_marker,
     is_path_within,
     sanitize_external_content,
     validate_path_within,
@@ -1468,7 +1472,7 @@ class DocumentWatcher(FileSystemEventHandler):
         Suffixes are lowercased to match DocumentParser.parse_directory().
         """
         p = Path(path)
-        if p.name.startswith(".rag-pending-"):
+        if p.name.startswith((".rag-pending-", "~$")):  # staging file or Office owner file
             return False
         return p.suffix.lower() in config.supported_formats or p.name in config.supported_formats
 
@@ -1540,6 +1544,30 @@ class DocumentWatcher(FileSystemEventHandler):
 # Sentinel returned by _resolve_existing_or_skip to signal "skip this doc" —
 # distinguishes from ``None`` (no existing doc yet, index as fresh).
 _SKIP_DOC = object()
+
+# Characters read to find a saved page's provenance marker. It is the first line,
+# and its tag, source (at most 512 characters) and SHA-256 take at most 614.
+_MARKER_HEAD_CHARS = 1024
+
+
+def _is_saved_from(path: Path, url: str) -> bool:
+    """Whether the provenance marker at the top of ``path`` proves it holds ``url``'s page.
+
+    A file without the marker, or one that cannot be read, proves nothing. The
+    marker keeps the URL as ``_escape_attribute`` leaves it (quotes, angle brackets
+    and non-printable characters removed), so two URLs that differ only in those
+    characters count as the same page. A marker URL cut at ``_MAX_SOURCE_CHARS``
+    proves nothing either, so each re-add of a URL that long takes the next free
+    name, until the full-digest name is reached and then refreshed.
+    """
+    try:
+        with path.open(encoding="utf-8", errors="replace") as page:
+            marker = detect_external_marker(page.read(_MARKER_HEAD_CHARS))
+    except OSError as exc:
+        # Held by another program or an offline cloud placeholder: owner unproven.
+        print(f"[WARN] add_from_url: cannot read {path}, saving under a hashed name: {exc}", file=sys.stderr)
+        return False
+    return marker is not None and len(marker[0]) < _MAX_SOURCE_CHARS and marker[0] == _escape_attribute(url)
 
 
 class KnowledgeOrchestrator:
@@ -1745,8 +1773,10 @@ class KnowledgeOrchestrator:
             try:
                 count = self.collection.count()
                 if count == 0:
-                    # Empty collection — nothing to build. Leave flag False so
-                    # a later call retries once documents become available.
+                    # Empty collection — nothing to build, and the old generation must
+                    # not outlive its chunks (#259). Leave flag False so a later
+                    # call retries once documents become available.
+                    self.bm25_index.clear()
                     return
 
                 # Batch to avoid SQLite "too many SQL variables" (chromadb 1.x
@@ -1875,8 +1905,17 @@ class KnowledgeOrchestrator:
 
         Done BEFORE indexing so moved files are not blocked by stale content
         hashes. Mutates ``stats`` (chunks_removed, deleted) and evicts from
-        both ``_indexed_docs`` and ``_source_to_docid``.
+        both ``_indexed_docs`` and ``_source_to_docid``. An unavailable or empty
+        ``documents_dir`` (unplugged drive, unmounted share, folder recreated at
+        startup) prunes nothing; remove_document removes on purpose (#259).
         """
+        if not io_path(config.documents_dir).is_dir() or (not documents and self._indexed_docs):
+            print(
+                f"[WARN] documents_dir unavailable or empty, skipping orphan pruning: {config.documents_dir}",
+                file=sys.stderr,
+            )
+            stats["errors"] += 1
+            return
         current_paths = {str(Path(getattr(doc, "source", doc)).resolve()) for doc in documents}
         for doc_id, info in list(self._indexed_docs.items()):
             source = Path(info.get("source", ""))
@@ -1969,11 +2008,20 @@ class KnowledgeOrchestrator:
                 if not is_path_within(config.documents_dir, doc):
                     raise PathEscapeError(f"File escaped documents directory: {doc}")
                 doc = self.parser.parse_file(doc)
-                if doc is None:
-                    raise ValueError("Document has no indexable content")
                 after_parse = io_path(source).stat()
                 if (source_stat.st_mtime_ns, source_stat.st_size) != (after_parse.st_mtime_ns, after_parse.st_size):
                     raise RuntimeError("Source changed during parsing; retry indexing this document")
+                # Empty or text-less files are skipped, never an error that aborts a rebuild (#259).
+                if doc is None:
+                    if repair_ids is not None:
+                        self._remove_repair_chunks(source, [value for value in repair_ids if value != existing])
+                    if existing:
+                        self._evict_stale_doc(existing, stats)
+                    else:
+                        stats["skipped"] += 1
+                    if repair_ids is not None:
+                        tracking["repaired_sources"].add(str(source.resolve()))
+                    return
             existing_doc_id = self._resolve_existing_or_skip(doc, force, path_to_docid, stats, tracking)
             if existing_doc_id is _SKIP_DOC:
                 return
@@ -2066,14 +2114,15 @@ class KnowledgeOrchestrator:
         return stored_mtime == current_mtime and stored_size == current_size
 
     def _evict_stale_doc(self, existing_doc_id: str, stats: Dict[str, Any]) -> None:
-        """Remove chunks + metadata for a doc that needs reindexing. Bumps updated."""
+        """Remove chunks + metadata of a doc whose file has no indexable content left. Bumps deleted."""
         removed = self._remove_document_chunks(existing_doc_id)
         stats["chunks_removed"] += removed
         src = self._indexed_docs[existing_doc_id].get("source", "")
         if src:
             self._source_to_docid.pop(str(Path(src).resolve()), None)
         del self._indexed_docs[existing_doc_id]
-        stats["updated"] += 1
+        stats["deleted"] += 1
+        print(f"[WARN] Removed {removed} chunks of {src}: the file has no indexable content", file=sys.stderr)
 
     def _register_indexed_doc(self, doc, chunks_added: int, source_stat=None) -> None:
         """Record the source version actually parsed, before potentially slow inference."""
@@ -2475,7 +2524,7 @@ class KnowledgeOrchestrator:
         resume_state: Optional[Dict[str, Any]] = None,
         force: bool = False,
     ) -> Dict[str, Any]:
-        """Smart reindex: incremental detection + BM25 rebuild + orphan cleanup.
+        """Smart reindex: index_all (unchanged files skipped unless ``force``) + BM25 rebuild + orphan cleanup.
 
         When ``resume_state`` is provided (v4.8.0 Fase 4), docs listed in
         it are skipped so the interrupted previous run picks up where it
@@ -2506,7 +2555,7 @@ class KnowledgeOrchestrator:
             return stats
 
         print("[REINDEX] Rebuilding BM25 index...", file=sys.stderr)
-        self.bm25_index.clear()
+        # No clear(): queries keep the published generation until the rebuild replaces it (#259).
         self._bm25_initialized = False
         self._ensure_bm25_index()
 
@@ -3739,7 +3788,8 @@ class KnowledgeOrchestrator:
             window: Number of adjacent chunks to fetch on each side (default: 1)
 
         Returns:
-            Results with expanded content field
+            Results with expanded content field; ``match_offset`` marks where the
+            matched chunk starts inside it, so snippets can skip the context before it.
         """
         if not results:
             return results
@@ -3792,6 +3842,7 @@ class KnowledgeOrchestrator:
                 expanded = "\n\n".join(parts_before + [results[result_idx]["content"]] + parts_after)
                 results[result_idx]["content"] = expanded
                 results[result_idx]["context_expanded"] = True
+                results[result_idx]["match_offset"] = sum(len(part) + len("\n\n") for part in parts_before)
 
         return results
 
@@ -4099,14 +4150,36 @@ class KnowledgeOrchestrator:
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         clean_text = f"# {title}\n\nSource: {url}\n\n" + "\n\n".join(lines)
 
-        safe_title = re.sub(r"[^\w\s-]", "", title).strip().replace(" ", "-").lower()[:60]
-        filename = f"{safe_title}.md"
-        filepath = f"{category}/{filename}"
+        safe_title = re.sub(r"[^\w\s-]", "", title).strip().replace(" ", "-").lower()[:60] or "page"
 
         # The body was fetched from an untrusted URL; the sanitizer inserts a
         # provenance fence and defuses model control tokens before the text
         # ever reaches the parser or the LLM that will consume the RAG output.
-        return self.add_document_from_content(clean_text, filepath, category, external_source=url)
+        # The lock spans name check and write, so parallel adds cannot both claim a free name.
+        with self._index_lock:
+            filepath = self._url_document_path(url, category, safe_title)
+            return self.add_document_from_content(clean_text, filepath, category, external_source=url)
+
+    @staticmethod
+    def _url_document_path(url: str, category: str, safe_title: str) -> str:
+        """Pick the first name that no other source owns for ``url``'s page (GH #262).
+
+        Titles are cut to 60 characters, so different pages can map to one name.
+        Tried in order: the title-based name, then that name plus the first 8 and
+        16 hex characters of the URL's SHA-256. The first that is free, or that
+        ``_is_saved_from`` shows already holds this URL's page, wins. The name with
+        the full digest is the last resort and is used without a check.
+        """
+        digest = content_sha256(url)
+        for stem in (safe_title, f"{safe_title}-{digest[:8]}", f"{safe_title}-{digest[:16]}"):
+            filepath = f"{category}/{stem}.md"
+            try:
+                existing = validate_path_within(config.documents_dir, filepath)
+            except PathEscapeError:
+                return filepath  # add_document_from_content rejects it and reports why
+            if not existing.is_file() or _is_saved_from(existing, url):
+                return filepath
+        return f"{category}/{safe_title}-{digest}.md"
 
     @collection_reader
     def search_similar(self, filepath: str, max_results: int = 5) -> List[Dict[str, Any]]:
@@ -4132,16 +4205,21 @@ class KnowledgeOrchestrator:
             if not results["ids"] or embeddings is None or len(embeddings) == 0:
                 return []
             query_embedding = embeddings[0]
-        except Exception:
+        except Exception as exc:
+            print(f"[WARN] search_similar query failed for {filepath!r}: {exc}", file=sys.stderr)
             return []
 
         try:
+            # Exclude the reference in the query: filtering afterwards let a long
+            # document's own chunks take every candidate slot.
             similar = self.collection.query(
                 query_embeddings=[query_embedding],
                 n_results=max_results + 20,
+                where={"doc_id": {"$ne": doc_id}},
                 include=["documents", "metadatas", "distances"],
             )
-        except Exception:
+        except Exception as exc:
+            print(f"[WARN] search_similar query failed for {filepath!r}: {exc}", file=sys.stderr)
             return []
 
         if not similar["ids"] or not similar["ids"][0]:
@@ -4153,8 +4231,6 @@ class KnowledgeOrchestrator:
             meta = (similar["metadatas"][0][i] or {}) if similar["metadatas"] else {}
             source = meta.get("source", "")
 
-            if meta.get("doc_id") == doc_id:
-                continue
             if source in seen_sources:
                 continue
             seen_sources.add(source)
@@ -4747,9 +4823,10 @@ def search_knowledge(
         min_score: Minimum normalized relevance score (0.0–1.0) to include a result. Results scoring
             below this threshold are discarded. Default 0.0 returns all results. Use 0.2–0.4 to cut
             low-relevance noise.
-        snippet_mode: When true (default), truncates content to ~500 characters at a natural break
-            point and adds a content_length field with the original size. Use get_document() to
-            fetch full content when needed. Set to false to return full chunk content.
+        snippet_mode: When true (default), truncates content to ~500 characters from the start of the
+            matching chunk, at a natural break point, and adds a content_length field with the full
+            size. Use get_document() to fetch full content when needed. Set to false to return the full
+            content, which can include adjacent chunks; match_offset, when present, is where the match starts.
         search_method: Dispatch selector (v4.8.2+). One of ``"auto"`` (router picks FTS5 fast-path
             for lexical queries when enabled, hybrid otherwise), ``"hybrid"`` (force hybrid path —
             kill switch for suspected router misclassification), or ``"fts5"`` (force FTS5 fast-path
@@ -4824,7 +4901,11 @@ def search_knowledge(
 
     if snippet_mode:
         results = [
-            {**row, "content": _make_snippet(row["content"]), "content_length": len(row.get("content", ""))}
+            {
+                **row,
+                "content": _make_snippet(row["content"][row.get("match_offset", 0) :]),
+                "content_length": len(row.get("content", "")),
+            }
             for row in results
         ]
 
@@ -4855,15 +4936,15 @@ def get_document(filepath: str) -> str:
     Args:
         filepath: Relative path to the document within the documents directory
             (e.g., "security/technique.md"). Must be an indexed file — use
-            list_documents() to browse available paths, or search_knowledge()
-            to find the filepath by topic first.
+            search_knowledge() to find the filepath by topic first, or browse
+            list_documents(), which returns one page at a time (see its offset).
 
     Returns:
         JSON string with full document content and metadata (filepath, category, size).
 
     Usage: Use when you need the complete text of a known file — search_knowledge()
     returns chunks, not full docs. Use search_knowledge() first to find the filepath
-    if unknown. Use list_documents() to browse all available files by category.
+    if unknown. Use list_documents() to browse files by category, one page at a time.
     """
     orchestrator = get_orchestrator()
     doc = orchestrator.get_document(filepath)
@@ -4949,8 +5030,12 @@ def reindex_documents(
 ) -> str:
     """Index or reindex all documents in the knowledge base (runs in background).
 
-    ``force`` — smart reindex (detect changed files + rebuild BM25). Use after
-    filesystem edits outside add_document/update_document.
+    No flags — incremental pass: index new or changed files, skip unchanged
+    ones, prune deleted sources. Use after filesystem edits outside
+    add_document/update_document.
+    ``force`` — smart reindex: re-embed every file, unchanged ones included,
+    and rebuild BM25. Slow on a large corpus; use after changing the
+    query/passage prefixes or chunking settings.
     ``full_rebuild`` — nuclear rebuild (delete + re-embed). Use only after
     embedding-model change or index corruption. Mutually exclusive with resume.
     ``resume`` — pick up an interrupted smart reindex from
@@ -5018,12 +5103,15 @@ def list_categories() -> str:
     )
 
 
+_LIST_DOCUMENTS_MAX_LIMIT = 200  # ~75 KB of JSON: stays under common MCP client output limits
+
+
 @mcp.tool()
 @rate_limited
 @instrument("list_documents")
-def list_documents(category: Optional[str] = None) -> str:
+def list_documents(category: Optional[str] = None, limit: int = 100, offset: int = 0) -> str:
     """
-    List all indexed documents, optionally filtered by category.
+    List indexed documents one page at a time, optionally filtered by category.
 
     Read-only. No side effects.
 
@@ -5031,19 +5119,35 @@ def list_documents(category: Optional[str] = None) -> str:
         category: Optional category filter. Must be a valid category name — call
             list_categories() to see available options (e.g., security, ctf, logscale,
             development, general, redteam, blueteam).
+        limit: Maximum number of documents to return (default: 100, max: 200).
+        offset: Number of matching documents to skip (default: 0). For the next page, call
+            again with offset + count until offset reaches total.
 
     Returns:
-        JSON string with list of document filepaths, categories, and metadata for each indexed file.
+        JSON string with total (documents matching the filter), offset, limit, count (documents
+        in this page) and the filepaths, categories, and metadata of this page, ordered by filepath.
 
-    Usage: Use to browse what's in the index or verify a specific file is indexed. Use
-    list_categories() first to see valid category names. Use search_knowledge() when you
-    want to find documents by topic rather than browsing the full list. Use get_document()
-    to read a specific file once you have its filepath.
+    Usage: Use to browse what's in the index, one page at a time; to see every document, call
+    again with offset + count until offset reaches total. Use list_categories() first to see valid category names. Use
+    search_knowledge() when you want to find documents by topic rather than browsing the full
+    list. Use get_document() to read a specific file once you have its filepath.
     """
+    offset = max(0, offset)
+    limit = max(1, min(limit, _LIST_DOCUMENTS_MAX_LIMIT))
     orchestrator = get_orchestrator()
-    docs = orchestrator.list_documents(category=category)
+    # Source order keeps pages stable: re-indexing an edited file moves it to the end of the index.
+    docs = sorted(orchestrator.list_documents(category=category), key=lambda doc: doc["source"])
+    page = docs[offset : offset + limit]
     return json.dumps(
-        {"status": "success", "filter": category or "all", "count": len(docs), "documents": docs},
+        {
+            "status": "success",
+            "filter": category or "all",
+            "total": len(docs),
+            "offset": offset,
+            "limit": limit,
+            "count": len(page),
+            "documents": page,
+        },
         indent=2,
         ensure_ascii=False,
     )
@@ -5127,7 +5231,7 @@ def update_document(filepath: str, content: str) -> str:
 
     Args:
         filepath: Full or relative path to the document file. Must be an already-indexed
-            file — use list_documents() to find valid paths.
+            file — list_documents() lists indexed paths, one page at a time.
         content: New full-text content to replace the existing content entirely
 
     Returns:
@@ -5162,8 +5266,8 @@ def remove_document(filepath: str, delete_file: bool = False) -> str:
     the file from disk (irreversible, cannot be undone).
 
     Args:
-        filepath: Path to the document file. Must be an indexed document — use
-            list_documents() to find valid paths.
+        filepath: Path to the document file. Must be an indexed document —
+            list_documents() lists indexed paths, one page at a time.
         delete_file: If True, permanently deletes the file from disk in addition to
             removing from the index (default: False).
 
@@ -5232,8 +5336,8 @@ def search_similar(filepath: str, max_results: int = 5) -> str:
     Read-only. No side effects. Uses the document's embedding for similarity comparison.
 
     Args:
-        filepath: Path to the reference document (must already be indexed — use
-            list_documents() to verify). E.g., "security/technique.md"
+        filepath: Path to the reference document (must already be indexed — list_documents()
+            lists indexed paths, one page at a time). E.g., "security/technique.md"
         max_results: Number of similar documents to return (default: 5, max: 20)
 
     Returns:
@@ -5241,8 +5345,8 @@ def search_similar(filepath: str, max_results: int = 5) -> str:
 
     Usage: Use when you have a specific document and want to discover thematically related
     ones. Use search_knowledge() instead when you have a text query rather than a reference
-    document. The reference document must be indexed — call list_documents() to confirm
-    it exists before calling this tool.
+    document. The reference document must be indexed; list_documents() lists indexed paths
+    one page at a time.
     """
     if not filepath:
         return json.dumps({"status": "error", "message": "Filepath required"})

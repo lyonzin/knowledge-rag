@@ -117,6 +117,8 @@ def test_orphan_failure_preserves_failed_doc_and_persists_successes(isolated_orc
     orch = isolated_orchestrator
     first = seed(orch)
     second = seed(orch, "two.txt", "second document to retain")
+    # An emptied documents_dir never prunes (#259), so another file stays.
+    seed(orch, "kept.txt", "document that stays")
     first_id = orch._source_to_docid[str(first)]
     second_id = orch._source_to_docid[str(second)]
     remove = orch._remove_document_chunks
@@ -133,7 +135,7 @@ def test_orphan_failure_preserves_failed_doc_and_persists_successes(isolated_orc
     assert stats["deleted"] == 1 and stats["errors"] == 1
     assert first_id not in orch._indexed_docs and second_id in orch._indexed_docs
     assert orch._load_metadata() == orch._indexed_docs
-    assert orch.collection.count() == 1
+    assert orch.collection.count() == 2
 
 
 def test_ttl_cleans_backup_retired_by_current_production(isolated_orchestrator, monkeypatch):

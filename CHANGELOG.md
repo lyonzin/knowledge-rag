@@ -15,9 +15,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Unreleased
 
+**Added:**
+
+- `list_documents` takes optional `limit` (default 100, at most 200) and `offset` arguments and reports `total`, `offset` and `limit` next to `count`, so a large index is listed page by page instead of in one huge response (#260).
+
+**Changed:**
+
+- `list_documents` returns at most 100 documents by default, ordered by source path so pages stay stable while files are re-indexed. `count` is now the number of documents in the page; `total` is the number that match the filter. To list every document, call again with `offset` until it reaches `total` (#260).
+
 **Fixed:**
 
 - Startup auto-repair no longer fills the disk with old backups. Each time the preflight probe failed three times in a row, the active index was moved to a new `data/backups/auto-repair-*` folder and none was ever deleted, so a corruption loop could pile up hundreds of full copies (one install had 197 of them, 76 GB, next to a 0.6 GB index). After each repair, only the 3 most recent `auto-repair-*` folders are kept, the new one included. Nothing else in `data/backups/` is touched, and a folder that cannot be deleted, for example because a file in it is still open on Windows, is logged in `data/preflight.log` and retried on the next repair. A repair that moves nothing, because the move failed (exit code 75) or there was no index left to move, no longer leaves an empty `auto-repair-*` folder behind. Existing piles are pruned on the next repair; until then, older `auto-repair-*` folders can be deleted by hand (#267).
+- `add_from_url` no longer replaces a file it did not save from the same URL: another page whose title starts with the same 60 characters, such as "Part 1" and "Part 2" of a series (even when both are added at once), a note with that name, or a file it cannot read. The page goes to the first of these names that is free or already holds this URL's page: `<title>.md`, then `<title>-<first 8 hex characters of the URL's SHA-256>.md`, then the first 16; the name with the full SHA-256 is the last resort and is used without a check. Existing files keep their names (#262).
+- Adding the same URL again updates its own file, recognised by its provenance marker. A page saved before v4.8.0 (no marker) or a file it cannot read gets one suffixed copy instead, and a URL of 512 characters or more (the marker keeps only the first 512) gets a new copy on each re-add, up to three, after which the last one is updated. URLs that differ only in quotes, angle brackets or non-printable characters count as the same page (#262).
+- `add_from_url` saves a page with no `<title>` from a URL ending in `/` as `page.md`, instead of a hidden `.md` file that all such pages shared (#262).
+- An unavailable or empty `documents_dir` (unplugged drive, unmounted network share, renamed folder recreated empty at startup) no longer removes every document from the index. The reindex reports an error and keeps the index as it was. Emptying the folder on purpose no longer clears the index through a reindex; use `remove_document` instead (#259).
+- An empty file, such as an empty `__init__.py` or an image-only PDF, no longer makes `reindex_documents(full_rebuild=True)` or the rebuild after an embedding-model change fail. It is skipped, and a file emptied after indexing has its old chunks removed (#259).
+- Office owner files (`~$report.docx`, written while a document is open) are ignored, so an open Word document no longer breaks a full rebuild (#259).
+- Keyword search keeps answering from the previous index while `reindex_documents(force=True)` rebuilds it, instead of finding nothing until the rebuild finishes (#259).
+- The default `search_knowledge` snippet starts at the matching chunk. It used to start at the neighboring chunk added before it for context, so the ~500-character snippet often held only text from before the match. `content_length` is still the full size, and a new `match_offset` field tells where the match starts in the full content (#260).
+- `search_similar` finds similar documents for long reference documents. The reference's own chunks are now excluded in the query; filtered out afterwards, 25 or more of them could take every candidate slot and the tool answered `no_results` (#260).
+- A number in `keyword_routes` or `category_mappings`, such as `blueteam: [sigma, 4624]`, no longer breaks indexing and every search. YAML reads a bare `4624` as an integer; numbers are now converted to text, and empty entries, lists or mappings are skipped with a warning. Quote values such as `0123` or `yes` to keep their exact spelling (#261).
+- A `category_mappings` key with capital letters, such as `Projetos/Clientes`, now matches its folder. Document paths were compared in lower case and the keys were not (#261).
+- The `reindex_documents` description no longer calls `force=True` a changed-files pass: it re-embeds every file. After editing files outside `add_document`/`update_document`, call it without flags (#261).
+- Following Option A in `config.example.yaml` (`profile: "multilingual"`) now keeps the e5 `"query: "`/`"passage: "` prefixes. The template's empty `query_prefix`/`passage_prefix` lines overrode them and are now commented out, and startup warns when an explicit prefix overrides a profile's. If you enabled the profile on a copy of the old template, delete those two lines and run `reindex_documents(force=True)` (#261).
 
 ---
 
