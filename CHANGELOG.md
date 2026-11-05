@@ -15,12 +15,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Unreleased
 
+**Added:**
+
+- `list_documents` takes optional `limit` (default 100, at most 200) and `offset` arguments and reports `total`, `offset` and `limit` next to `count`, so a large index is listed page by page instead of in one huge response (#260).
+
+**Changed:**
+
+- `list_documents` returns at most 100 documents by default, ordered by source path so pages stay stable while files are re-indexed. `count` is now the number of documents in the page; `total` is the number that match the filter. To list every document, call again with `offset` until it reaches `total` (#260).
+
 **Fixed:**
 
 - An unavailable or empty `documents_dir` (unplugged drive, unmounted network share, renamed folder recreated empty at startup) no longer removes every document from the index. The reindex reports an error and keeps the index as it was. Emptying the folder on purpose no longer clears the index through a reindex; use `remove_document` instead (#259).
 - An empty file, such as an empty `__init__.py` or an image-only PDF, no longer makes `reindex_documents(full_rebuild=True)` or the rebuild after an embedding-model change fail. It is skipped, and a file emptied after indexing has its old chunks removed (#259).
 - Office owner files (`~$report.docx`, written while a document is open) are ignored, so an open Word document no longer breaks a full rebuild (#259).
 - Keyword search keeps answering from the previous index while `reindex_documents(force=True)` rebuilds it, instead of finding nothing until the rebuild finishes (#259).
+- The default `search_knowledge` snippet starts at the matching chunk. It used to start at the neighboring chunk added before it for context, so the ~500-character snippet often held only text from before the match. `content_length` is still the full size, and a new `match_offset` field tells where the match starts in the full content (#260).
+- `search_similar` finds similar documents for long reference documents. The reference's own chunks are now excluded in the query; filtered out afterwards, 25 or more of them could take every candidate slot and the tool answered `no_results` (#260).
+- A number in `keyword_routes` or `category_mappings`, such as `blueteam: [sigma, 4624]`, no longer breaks indexing and every search. YAML reads a bare `4624` as an integer; numbers are now converted to text, and empty entries, lists or mappings are skipped with a warning. Quote values such as `0123` or `yes` to keep their exact spelling (#261).
+- A `category_mappings` key with capital letters, such as `Projetos/Clientes`, now matches its folder. Document paths were compared in lower case and the keys were not (#261).
+- The `reindex_documents` description no longer calls `force=True` a changed-files pass: it re-embeds every file. After editing files outside `add_document`/`update_document`, call it without flags (#261).
+- Following Option A in `config.example.yaml` (`profile: "multilingual"`) now keeps the e5 `"query: "`/`"passage: "` prefixes. The template's empty `query_prefix`/`passage_prefix` lines overrode them and are now commented out, and startup warns when an explicit prefix overrides a profile's. If you enabled the profile on a copy of the old template, delete those two lines and run `reindex_documents(force=True)` (#261).
 
 ---
 

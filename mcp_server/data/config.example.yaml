@@ -221,11 +221,11 @@ models:
 
     # Query / passage prefixes — prepended to text BEFORE embedding.
     # Required by some model families (intfloat/e5, thenlper/gte, ...);
-    # leave empty for bge / mxbai. When a profile ships prefixes, this
-    # override wins ONLY if the key is present here (empty string "" IS
-    # an explicit override).
-    query_prefix: ""
-    passage_prefix: ""
+    # not used by bge / mxbai. Keep them commented out with a profile: it
+    # sets its own prefixes, and any value here, even "", overrides them.
+    # Uncomment only for a custom model that needs them (e5 shown).
+    # query_prefix: "query: "
+    # passage_prefix: "passage: "
 
     # GPU acceleration mode (v4.8.0+):
     #   "auto"  → probe CUDA at first embedding; use if ready, fall back to CPU (default)
