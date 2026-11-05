@@ -3,6 +3,9 @@
 import os
 from pathlib import Path
 
+import pytest
+import yaml
+
 from mcp_server.config import _merge_query_expansion_sources, config
 
 
@@ -56,6 +59,111 @@ def test_category_mappings():
     for cat in must_have:
         found = any(cat in v for v in config.category_mappings.values())
         assert found, f"Missing category mapping for: {cat}"
+
+
+def test_given_numeric_yaml_keys_when_indexing_and_routing_then_they_work_as_text(isolated_orchestrator, monkeypatch):
+    """GH #261: YAML reads a bare 4624 as int; it must not break indexing or query routing."""
+    import mcp_server.config as config_module
+    from mcp_server import server
+
+    raw = yaml.safe_load("category_mappings:\n  4624: blueteam\nkeyword_routes:\n  blueteam: [sigma, 4624]\n")
+    monkeypatch.setattr(config_module, "_yaml", raw)
+    loaded = config_module.Config()
+    monkeypatch.setattr(server.config, "category_mappings", loaded.category_mappings)
+    monkeypatch.setattr(server.config, "keyword_routes", loaded.keyword_routes)
+    source = server.config.documents_dir / "4624" / "logon.md"
+    source.parent.mkdir()
+    source.write_text("# Logon\n\nEvent 4624 matched a sigma rule.\n", encoding="utf-8")
+
+    stats = isolated_orchestrator.index_all()
+    routed = isolated_orchestrator._route_by_keywords("why did event 4624 fire")
+
+    assert stats["errors"] == 0
+    assert isolated_orchestrator.collection.get(include=["metadatas"])["metadatas"][0]["category"] == "blueteam"
+    assert routed == "blueteam"
+
+
+# (YAML text, Config field, expected table, expected [WARN] messages)
+_ROUTE_AND_MAPPING_CASES = [
+    pytest.param(
+        ("keyword_routes:\n  2024: [alpha, 7]\n", "keyword_routes", {"2024": ["alpha", "7"]}, []), id="route-number"
+    ),
+    pytest.param(
+        ("keyword_routes:\n  ~: [alpha]\n", "keyword_routes", {}, ["keyword_routes: ignoring key None"]),
+        id="route-null-key",
+    ),
+    pytest.param(
+        (
+            "keyword_routes:\n  blue: [alpha, ~]\n",
+            "keyword_routes",
+            {"blue": ["alpha"]},
+            ["keyword_routes.blue: ignoring None"],
+        ),
+        id="route-null-keyword",
+    ),
+    pytest.param(
+        (
+            "keyword_routes:\n  blue: [alpha, [beta, gamma]]\n",
+            "keyword_routes",
+            {"blue": ["alpha"]},
+            ["keyword_routes.blue: ignoring ['beta', 'gamma']"],
+        ),
+        id="route-list-keyword",
+    ),
+    pytest.param(
+        ("keyword_routes:\n  bad: sigma\n", "keyword_routes", {}, ["keyword_routes.bad is not a list, removing"]),
+        id="route-not-list",
+    ),
+    pytest.param(
+        ("category_mappings:\n  docs: 2024\n", "category_mappings", {"docs": "2024"}, []), id="mapping-number"
+    ),
+    pytest.param(
+        ("category_mappings:\n  2024-01-01: incidents\n", "category_mappings", {"2024-01-01": "incidents"}, []),
+        id="mapping-date-key",
+    ),
+    pytest.param(
+        (
+            "category_mappings:\n  Projetos/Clientes: clientes\n",
+            "category_mappings",
+            {"projetos/clientes": "clientes"},
+            [],
+        ),
+        id="mapping-uppercase-key",
+    ),
+    pytest.param(
+        ("category_mappings:\n  ~: general\n", "category_mappings", {}, ["category_mappings: ignoring key None"]),
+        id="mapping-null-key",
+    ),
+    pytest.param(
+        ("category_mappings:\n  empty:\n", "category_mappings", {}, ["category_mappings.empty: ignoring None"]),
+        id="mapping-null-value",
+    ),
+    pytest.param(
+        (
+            "category_mappings:\n  docs: [a, b]\n",
+            "category_mappings",
+            {},
+            ["category_mappings.docs: ignoring ['a', 'b']"],
+        ),
+        id="mapping-list-value",
+    ),
+]
+
+
+@pytest.mark.parametrize("case", _ROUTE_AND_MAPPING_CASES)
+def test_given_yaml_route_or_mapping_when_loading_then_only_scalars_become_text(monkeypatch, tmp_path, capsys, case):
+    """GH #261: scalars become text; null, list and mapping entries are skipped with a warning."""
+    import mcp_server.config as config_module
+
+    yaml_text, field, expected, warnings = case
+    (tmp_path / "config.yaml").write_text(yaml_text, encoding="utf-8")
+    monkeypatch.setattr(config_module, "BASE_DIR", tmp_path)
+    monkeypatch.setattr(config_module, "_yaml", config_module._load_yaml_config())
+
+    loaded = config_module.Config()
+    printed = [line for line in capsys.readouterr().err.splitlines() if line.startswith("[WARN]")]
+
+    assert (getattr(loaded, field), printed) == (expected, [f"[WARN] {message}" for message in warnings])
 
 
 def test_chunk_settings():

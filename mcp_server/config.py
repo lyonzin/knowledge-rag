@@ -1,5 +1,6 @@
 """Configuration for Knowledge RAG System v4.0.0 — YAML-configurable"""
 
+import datetime
 import os
 import sys
 from dataclasses import dataclass, field
@@ -559,6 +560,11 @@ def _yaml_embedding_has(key: str) -> bool:
     return key in emb
 
 
+# YAML scalars that keyword_routes / category_mappings convert to text (GH #261).
+# YAML reads an unquoted 2024-01-01 as a date; str() gives the folder name back.
+_TEXT_SCALAR_TYPES = (str, int, float, bool, datetime.date)
+
+
 # ============================================================================
 # CONFIG DATACLASS
 # ============================================================================
@@ -939,7 +945,11 @@ class Config:
         self._apply_embedding_profile(profile)
 
     def _apply_embedding_profile(self, profile: dict) -> None:
-        """Copy profile model/dim into config; prefixes only if user did not declare them."""
+        """Copy profile model/dim into config; prefixes only if user did not declare them.
+
+        A declared prefix that differs from a non-empty profile prefix still wins,
+        with a warning, so an empty one left from an old template is visible (GH #261).
+        """
         if _yaml_embedding_has("model"):
             print(
                 f"[WARN] Both models.embedding.model and profile="
@@ -953,6 +963,13 @@ class Config:
             self.query_prefix = profile["query_prefix"]
         if not _yaml_embedding_has("passage_prefix"):
             self.passage_prefix = profile["passage_prefix"]
+        for key in ("query_prefix", "passage_prefix"):
+            if profile[key] and getattr(self, key) != profile[key]:
+                print(
+                    f"[WARN] models.embedding.{key}={getattr(self, key)!r} overrides profile="
+                    f"'{self.embedding_profile}' prefix {profile[key]!r}; remove the key to use the profile's",
+                    file=sys.stderr,
+                )
 
     def _validate_embedding_types(self) -> None:
         """Type-check prefixes + embedding_dim + reranker settings (runs AFTER profile)."""
@@ -1036,22 +1053,47 @@ class Config:
         self.supported_formats = list(_DEFAULT_SUPPORTED_FORMATS)
 
     def _validate_lists_and_maps(self) -> None:
-        """Type-check exclude_patterns + keyword_routes + query_expansions in order."""
+        """Type-check exclude_patterns + keyword_routes + category_mappings + query_expansions in order."""
         self._validate_exclude_and_routes()
         self._validate_query_expansions()
 
     def _validate_exclude_and_routes(self) -> None:
-        """Ensure exclude_patterns is a str-only list and keyword_routes values are lists."""
+        """Keep exclude_patterns str-only; convert keyword_routes and category_mappings scalars to text.
+
+        YAML parses a bare ``4624`` as int, which breaks the str methods that
+        indexing and query routing call on these tables (GH #261). YAML has
+        already converted the scalar, so ``0123`` or ``yes`` must be quoted to
+        keep their spelling. Null, list and mapping entries are skipped with a
+        warning rather than turned into names such as ``"['a', 'b']"``. New
+        dicts are built so the module-level defaults are never mutated.
+        """
         if not isinstance(self.exclude_patterns, list):
             print(f"[WARN] exclude_patterns={self.exclude_patterns!r} invalid, using []", file=sys.stderr)
             self.exclude_patterns = []
         else:
             self.exclude_patterns = [p for p in self.exclude_patterns if isinstance(p, str)]
 
-        for cat, keywords in list(self.keyword_routes.items()):
-            if not isinstance(keywords, list):
+        routes: Dict[str, List[str]] = {}
+        for cat, keywords in self.keyword_routes.items():
+            if not isinstance(cat, _TEXT_SCALAR_TYPES):
+                print(f"[WARN] keyword_routes: ignoring key {cat!r}", file=sys.stderr)
+            elif not isinstance(keywords, list):
                 print(f"[WARN] keyword_routes.{cat} is not a list, removing", file=sys.stderr)
-                del self.keyword_routes[cat]
+            else:
+                routes[str(cat)] = [str(k) for k in keywords if isinstance(k, _TEXT_SCALAR_TYPES)]
+                for ignored in (k for k in keywords if not isinstance(k, _TEXT_SCALAR_TYPES)):
+                    print(f"[WARN] keyword_routes.{cat}: ignoring {ignored!r}", file=sys.stderr)
+        self.keyword_routes = routes
+        mappings: Dict[str, str] = {}
+        for path, category in self.category_mappings.items():
+            if not isinstance(path, _TEXT_SCALAR_TYPES):
+                print(f"[WARN] category_mappings: ignoring key {path!r}", file=sys.stderr)
+            elif not isinstance(category, _TEXT_SCALAR_TYPES):
+                print(f"[WARN] category_mappings.{path}: ignoring {category!r}", file=sys.stderr)
+            else:
+                # _detect_category matches against the lower-cased relative path.
+                mappings[str(path).lower()] = str(category)
+        self.category_mappings = mappings
 
     def _validate_query_expansions(self) -> None:
         """Type-check + merge query_expansions with query_expansion_groups."""

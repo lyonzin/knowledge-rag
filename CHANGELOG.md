@@ -13,6 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+### Unreleased
+
+**Fixed:**
+
+- A number in `keyword_routes` or `category_mappings`, such as `blueteam: [sigma, 4624]`, no longer breaks indexing and every search. YAML reads a bare `4624` as an integer; numbers are now converted to text, and empty entries, lists or mappings are skipped with a warning. Quote values such as `0123` or `yes` to keep their exact spelling (#261).
+- A `category_mappings` key with capital letters, such as `Projetos/Clientes`, now matches its folder. Document paths were compared in lower case and the keys were not (#261).
+- The `reindex_documents` description no longer calls `force=True` a changed-files pass: it re-embeds every file. After editing files outside `add_document`/`update_document`, call it without flags (#261).
+- Following Option A in `config.example.yaml` (`profile: "multilingual"`) now keeps the e5 `"query: "`/`"passage: "` prefixes. The template's empty `query_prefix`/`passage_prefix` lines overrode them and are now commented out, and startup warns when an explicit prefix overrides a profile's. If you enabled the profile on a copy of the old template, delete those two lines and run `reindex_documents(force=True)` (#261).
+
+---
+
 ### v4.11.1 (2026-10-25) — Fresh-install startup fix and Windows-safe state writes
 
 Patch release. On v4.10.0 and v4.11.0, every fresh install and every new data directory, new Docker volumes included, failed to start with `Embedding function conflict … persisted: default`. Installs that already hit the error start normally after upgrading. No breaking changes and no migration steps. Thanks to @mmathoosh and @rshun for the reports, @franzgranlund for tracing it to the preflight probe, @cauger-dev for the detailed Windows analysis in #249, and @vishalhabib99 and @viniciussantos45 for #236 and #242.
