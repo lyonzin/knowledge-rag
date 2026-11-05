@@ -55,13 +55,26 @@ def test_given_unavailable_documents_dir_when_indexing_then_index_is_kept(
     assert len(orch._indexed_docs) == 1
 
 
-def test_given_indexed_file_when_emptied_then_its_chunks_are_evicted(isolated_orchestrator):
+def test_given_indexed_file_when_emptied_then_its_chunks_are_evicted(isolated_orchestrator, monkeypatch):
     orch = isolated_orchestrator
+    monkeypatch.setattr(server.config, "reranker_enabled", False)
     path = seed(orch)
+    assert orch.query("document", 1, hybrid_alpha=1.0)  # cached while the document is indexed
     path.write_text("   \n", encoding="utf-8")
     stats = orch.index_all()
-    assert stats["errors"] == 0
+    assert stats["errors"] == 0 and stats["deleted"] == 1
     assert orch.collection.count() == 0 and orch._indexed_docs == {}
+    assert orch.query("document", 1, hybrid_alpha=1.0) == []
+
+
+def test_given_last_file_deleted_when_removed_explicitly_then_index_is_cleared(isolated_orchestrator):
+    orch = isolated_orchestrator
+    path = seed(orch)
+    path.unlink()
+    assert orch.index_all()["errors"] == 1 and orch.collection.count() == 1
+    orch.remove_document_by_path("one.txt", delete_file=False)
+    assert orch.collection.count() == 0
+    assert orch.index_all()["errors"] == 0
 
 
 def test_given_file_rewritten_during_parse_when_read_is_empty_then_index_is_kept(isolated_orchestrator, monkeypatch):
@@ -86,6 +99,7 @@ def test_given_empty_file_when_full_rebuild_then_it_is_skipped(isolated_orchestr
     (server.config.documents_dir / "__init__.py").write_text("", encoding="utf-8")
     stats = orch.nuclear_rebuild()
     assert stats["skipped"] == 1 and stats["errors"] == 0
+    assert orch.collection.count() == 1
 
 
 def test_given_word_owner_file_when_indexing_then_it_is_ignored(isolated_orchestrator):

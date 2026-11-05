@@ -1982,11 +1982,15 @@ class KnowledgeOrchestrator:
                 if (source_stat.st_mtime_ns, source_stat.st_size) != (after_parse.st_mtime_ns, after_parse.st_size):
                     raise RuntimeError("Source changed during parsing; retry indexing this document")
                 # Empty or text-less files are skipped, never an error that aborts a rebuild (#259).
-                if doc is None and existing:
-                    self._evict_stale_doc(existing, stats)
-                    return
                 if doc is None:
-                    stats["skipped"] += 1
+                    if repair_ids is not None:
+                        self._remove_repair_chunks(source, [value for value in repair_ids if value != existing])
+                    if existing:
+                        self._evict_stale_doc(existing, stats)
+                    else:
+                        stats["skipped"] += 1
+                    if repair_ids is not None:
+                        tracking["repaired_sources"].add(str(source.resolve()))
                     return
             existing_doc_id = self._resolve_existing_or_skip(doc, force, path_to_docid, stats, tracking)
             if existing_doc_id is _SKIP_DOC:
@@ -2080,14 +2084,15 @@ class KnowledgeOrchestrator:
         return stored_mtime == current_mtime and stored_size == current_size
 
     def _evict_stale_doc(self, existing_doc_id: str, stats: Dict[str, Any]) -> None:
-        """Remove chunks + metadata for a doc that needs reindexing. Bumps updated."""
+        """Remove chunks + metadata of a doc whose file has no indexable content left. Bumps deleted."""
         removed = self._remove_document_chunks(existing_doc_id)
         stats["chunks_removed"] += removed
         src = self._indexed_docs[existing_doc_id].get("source", "")
         if src:
             self._source_to_docid.pop(str(Path(src).resolve()), None)
         del self._indexed_docs[existing_doc_id]
-        stats["updated"] += 1
+        stats["deleted"] += 1
+        print(f"[WARN] Removed {removed} chunks of {src}: the file has no indexable content", file=sys.stderr)
 
     def _register_indexed_doc(self, doc, chunks_added: int, source_stat=None) -> None:
         """Record the source version actually parsed, before potentially slow inference."""
