@@ -18,6 +18,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from mcp_server import server
+from mcp_server.security import detect_external_marker, wrap_external_content
 
 SERIES = "Kubernetes Security Best Practices for Production Clusters"
 SHARED_NAME = "kubernetes-security-best-practices-for-production-clusters--.md"
@@ -25,6 +26,12 @@ SHARED_NAME = "kubernetes-security-best-practices-for-production-clusters--.md"
 PART_1 = "https://blog.example.test/o'brien/k8s-security-part-1"
 PART_2 = "https://blog.example.test/o'brien/k8s-security-part-2"
 TITLES = {PART_1: f"{SERIES} - Part 1", PART_2: f"{SERIES} - Part 2"}
+# How much of a URL the provenance marker keeps, read back rather than hardcoded.
+MARKER_URL_LIMIT = len(detect_external_marker(wrap_external_content("", "u" * 4096))[0])
+SIGNED = "https://cdn.example.test/k8s-security?signature="
+LONG_1 = SIGNED.ljust(MARKER_URL_LIMIT + 100, "f") + "&part=1"
+LONG_2 = SIGNED.ljust(MARKER_URL_LIMIT + 100, "f") + "&part=2"
+NEAR_LIMIT = SIGNED.ljust(MARKER_URL_LIMIT - 1, "f")
 
 
 def _page(title, body):
@@ -106,7 +113,7 @@ def test_a_file_without_provenance_is_never_overwritten(isolated_orchestrator, m
     assert note.read_text(encoding="utf-8") == "# My own notes\n"
 
 
-def test_a_file_that_cannot_be_read_is_never_overwritten(isolated_orchestrator, monkeypatch):
+def test_a_file_that_cannot_be_read_is_never_overwritten(isolated_orchestrator, monkeypatch, capsys):
     """A sharing violation or an offline cloud placeholder leaves the file's owner unproven."""
     orch = isolated_orchestrator
     _serve_series(monkeypatch)
@@ -127,6 +134,69 @@ def test_a_file_that_cannot_be_read_is_never_overwritten(isolated_orchestrator, 
     suffix = hashlib.sha256(PART_1.encode()).hexdigest()[:8]
     assert Path(result["filepath"]).name == f"{Path(SHARED_NAME).stem}-{suffix}.md"
     assert held.read_text(encoding="utf-8") == "# Locked by another program\n"
+    warning = capsys.readouterr().err
+    assert "[WARN] add_from_url: cannot read" in warning and SHARED_NAME in warning
+
+
+def test_long_urls_sharing_the_marker_prefix_keep_separate_files(isolated_orchestrator, monkeypatch):
+    """Signed or tracking URLs can share far more than the part of a URL the marker keeps."""
+    orch = isolated_orchestrator
+    _serve(monkeypatch, {LONG_1: _page(SERIES, "Signed part one."), LONG_2: _page(SERIES, "Signed part two.")})
+
+    first = orch.add_from_url(LONG_1, "general")
+    second = orch.add_from_url(LONG_2, "general")
+
+    assert first["filepath"] != second["filepath"]
+    assert "Signed part one." in Path(first["filepath"]).read_text(encoding="utf-8")
+
+
+def test_re_adding_a_long_url_never_overwrites_another_page(isolated_orchestrator, monkeypatch):
+    orch = isolated_orchestrator
+    pages = _serve(monkeypatch, {LONG_1: _page(SERIES, "Signed part one."), LONG_2: _page(SERIES, "Signed part two.")})
+    first = orch.add_from_url(LONG_1, "general")["filepath"]
+    second = orch.add_from_url(LONG_2, "general")["filepath"]
+    pages[LONG_1] = _page(SERIES, "Signed part one, revised.")
+
+    orch.add_from_url(LONG_1, "general")
+
+    assert "Signed part one." in Path(first).read_text(encoding="utf-8")
+    assert "Signed part two." in Path(second).read_text(encoding="utf-8")
+
+
+def test_a_url_just_under_the_marker_limit_refreshes_in_place(isolated_orchestrator, monkeypatch):
+    """The marker of the longest URL kept whole must still fit in the part of the file that is read."""
+    orch = isolated_orchestrator
+    pages = _serve(monkeypatch, {NEAR_LIMIT: _page(SERIES, "First edition.")})
+    first = orch.add_from_url(NEAR_LIMIT, "general")
+    pages[NEAR_LIMIT] = _page(SERIES, "Second edition.")
+
+    second = orch.add_from_url(NEAR_LIMIT, "general")
+
+    assert second["filepath"] == first["filepath"]
+    assert "Second edition." in Path(first["filepath"]).read_text(encoding="utf-8")
+
+
+def test_a_category_outside_documents_dir_is_rejected_untouched(isolated_orchestrator, monkeypatch):
+    orch = isolated_orchestrator
+    _serve_series(monkeypatch)
+    outside = server.config.documents_dir.parent / "evil" / SHARED_NAME
+    outside.parent.mkdir()
+    outside.write_text("# Outside the corpus\n", encoding="utf-8")
+    opened = []
+    open_path = Path.open
+
+    def record(path, *args, **kwargs):
+        opened.append(path)
+        return open_path(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "open", record)
+        result = orch.add_from_url(PART_1, "../evil")
+
+    assert result["error"].startswith("Filepath rejected")
+    assert opened == []
+    assert list(outside.parent.iterdir()) == [outside]
+    assert outside.read_text(encoding="utf-8") == "# Outside the corpus\n"
 
 
 def test_untitled_pages_at_trailing_slash_urls_get_valid_distinct_files(isolated_orchestrator, monkeypatch):

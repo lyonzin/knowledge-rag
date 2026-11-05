@@ -85,6 +85,7 @@ from .ratelimit import rate_limited
 from .search_candidates import select_rerank_candidates
 from .search_scope import FolderScope, ScopeKey
 from .security import (
+    _MAX_SOURCE_CHARS,
     BearerAuthMiddleware,
     PathEscapeError,
     _escape_attribute,
@@ -4124,9 +4125,10 @@ class KnowledgeOrchestrator:
         the provenance marker at the top of the saved file records its URL. A file
         without that marker, or one that cannot be read, is never taken over. The
         marker keeps the URL as ``_escape_attribute`` leaves it (quotes, angle
-        brackets and non-printable characters removed, cut at 512 characters), so
-        two URLs that differ only in those characters or after the 512th character
-        count as the same page.
+        brackets and non-printable characters removed), so two URLs that differ
+        only in those characters count as the same page. A marker URL cut at
+        ``_MAX_SOURCE_CHARS`` proves nothing, so re-adding a URL that long saves a
+        hashed copy instead of refreshing its file in place.
         """
         filepath = f"{category}/{safe_title}.md"
         try:
@@ -4138,9 +4140,11 @@ class KnowledgeOrchestrator:
         try:
             with existing.open(encoding="utf-8", errors="replace") as page:
                 marker = detect_external_marker(page.read(_MARKER_HEAD_CHARS))
-        except OSError:
-            marker = None  # held by another program or an offline cloud placeholder: owner unproven
-        if marker and marker[0] == _escape_attribute(url):
+        except OSError as exc:
+            # Held by another program or an offline cloud placeholder: owner unproven.
+            print(f"[WARN] add_from_url: cannot read {existing}, saving under a hashed name: {exc}", file=sys.stderr)
+            marker = None
+        if marker and len(marker[0]) < _MAX_SOURCE_CHARS and marker[0] == _escape_attribute(url):
             return filepath
         return f"{category}/{safe_title}-{content_sha256(url)[:8]}.md"
 
