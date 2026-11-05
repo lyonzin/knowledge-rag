@@ -1036,22 +1036,39 @@ class Config:
         self.supported_formats = list(_DEFAULT_SUPPORTED_FORMATS)
 
     def _validate_lists_and_maps(self) -> None:
-        """Type-check exclude_patterns + keyword_routes + query_expansions in order."""
+        """Type-check exclude_patterns + keyword_routes + category_mappings + query_expansions in order."""
         self._validate_exclude_and_routes()
         self._validate_query_expansions()
 
     def _validate_exclude_and_routes(self) -> None:
-        """Ensure exclude_patterns is a str-only list and keyword_routes values are lists."""
+        """Keep exclude_patterns str-only; convert keyword_routes and category_mappings to text.
+
+        YAML parses a bare ``4624`` as int, which breaks the str methods that
+        indexing and query routing call on these tables (GH #261). YAML has
+        already converted the scalar, so ``0123`` or ``yes`` must be quoted to
+        keep their spelling. New dicts are built so the module-level defaults
+        are never mutated.
+        """
         if not isinstance(self.exclude_patterns, list):
             print(f"[WARN] exclude_patterns={self.exclude_patterns!r} invalid, using []", file=sys.stderr)
             self.exclude_patterns = []
         else:
             self.exclude_patterns = [p for p in self.exclude_patterns if isinstance(p, str)]
 
-        for cat, keywords in list(self.keyword_routes.items()):
+        routes: Dict[str, List[str]] = {}
+        for cat, keywords in self.keyword_routes.items():
+            if cat is None:
+                continue
             if not isinstance(keywords, list):
                 print(f"[WARN] keyword_routes.{cat} is not a list, removing", file=sys.stderr)
-                del self.keyword_routes[cat]
+                continue
+            routes[str(cat)] = [str(keyword) for keyword in keywords if keyword is not None]
+        self.keyword_routes = routes
+        self.category_mappings = {
+            str(path): str(category)
+            for path, category in self.category_mappings.items()
+            if path is not None and category is not None
+        }
 
     def _validate_query_expansions(self) -> None:
         """Type-check + merge query_expansions with query_expansion_groups."""

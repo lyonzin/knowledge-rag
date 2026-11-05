@@ -3,6 +3,8 @@
 import os
 from pathlib import Path
 
+import yaml
+
 from mcp_server.config import _merge_query_expansion_sources, config
 
 
@@ -56,6 +58,28 @@ def test_category_mappings():
     for cat in must_have:
         found = any(cat in v for v in config.category_mappings.values())
         assert found, f"Missing category mapping for: {cat}"
+
+
+def test_given_numeric_yaml_keys_when_indexing_and_routing_then_they_work_as_text(isolated_orchestrator, monkeypatch):
+    """GH #261: YAML reads a bare 4624 as int; it must not break indexing or query routing."""
+    import mcp_server.config as config_module
+    from mcp_server import server
+
+    raw = yaml.safe_load("category_mappings:\n  4624: blueteam\nkeyword_routes:\n  blueteam: [sigma, 4624]\n")
+    monkeypatch.setattr(config_module, "_yaml", raw)
+    loaded = config_module.Config()
+    monkeypatch.setattr(server.config, "category_mappings", loaded.category_mappings)
+    monkeypatch.setattr(server.config, "keyword_routes", loaded.keyword_routes)
+    source = server.config.documents_dir / "4624" / "logon.md"
+    source.parent.mkdir()
+    source.write_text("# Logon\n\nEvent 4624 matched a sigma rule.\n", encoding="utf-8")
+
+    stats = isolated_orchestrator.index_all()
+    routed = isolated_orchestrator._route_by_keywords("why did event 4624 fire")
+
+    assert stats["errors"] == 0
+    assert isolated_orchestrator.collection.get(include=["metadatas"])["metadatas"][0]["category"] == "blueteam"
+    assert routed == "blueteam"
 
 
 def test_chunk_settings():
