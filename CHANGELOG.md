@@ -13,6 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+### Unreleased
+
+**Fixed:**
+
+- An unavailable or empty `documents_dir` (unplugged drive, unmounted network share, renamed folder recreated empty at startup) no longer removes every document from the index. The reindex reports an error and keeps the index as it was. Emptying the folder on purpose no longer clears the index through a reindex; use `remove_document` instead (#259).
+- An empty file, such as an empty `__init__.py` or an image-only PDF, no longer makes `reindex_documents(full_rebuild=True)` or the rebuild after an embedding-model change fail. It is skipped, and a file emptied after indexing has its old chunks removed (#259).
+- Office owner files (`~$report.docx`, written while a document is open) are ignored, so an open Word document no longer breaks a full rebuild (#259).
+- Keyword search keeps answering from the previous index while `reindex_documents(force=True)` rebuilds it, instead of finding nothing until the rebuild finishes (#259).
+
+---
+
 ### v4.11.1 (2026-10-25) — Fresh-install startup fix and Windows-safe state writes
 
 Patch release. On v4.10.0 and v4.11.0, every fresh install and every new data directory, new Docker volumes included, failed to start with `Embedding function conflict … persisted: default`. Installs that already hit the error start normally after upgrading. No breaking changes and no migration steps. Thanks to @mmathoosh and @rshun for the reports, @franzgranlund for tracing it to the preflight probe, @cauger-dev for the detailed Windows analysis in #249, and @vishalhabib99 and @viniciussantos45 for #236 and #242.

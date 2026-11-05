@@ -6,7 +6,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from mcp_server.server import BM25Index, KnowledgeOrchestrator
+from mcp_server.server import BM25Index, KnowledgeOrchestrator, config
 
 
 def _index():
@@ -113,6 +113,31 @@ def test_lazy_build_never_waits_behind_active_ingestion(has_published_index):
     assert orchestrator.bm25_index.search("alpha") == before
     assert not orchestrator._bm25_initialized
     orchestrator.collection.count.assert_not_called()
+
+
+def test_given_published_bm25_when_smart_reindex_rebuilds_then_queries_keep_it_until_replaced(
+    isolated_orchestrator, monkeypatch, tmp_path
+):
+    orchestrator = isolated_orchestrator
+    monkeypatch.setattr(config, "chroma_dir", tmp_path / "chroma")
+    for name, text in {"a.txt": "alpha report", "b.txt": "beta review", "c.txt": "gamma notes"}.items():
+        (config.documents_dir / name).write_text(text, encoding="utf-8")
+    orchestrator.index_all()
+    orchestrator._ensure_bm25_index()
+    published = orchestrator.bm25_index.search("alpha")
+    assert published
+    (config.documents_dir / "d.txt").write_text("delta summary", encoding="utf-8")
+    seen_during_rebuild = []
+    build = orchestrator.bm25_index.build_index
+
+    def observed_build():
+        seen_during_rebuild.append(orchestrator.bm25_index.search("alpha"))
+        build()
+
+    monkeypatch.setattr(orchestrator.bm25_index, "build_index", observed_build)
+    orchestrator.reindex_all()
+    assert seen_during_rebuild == [published]
+    assert orchestrator.bm25_index.search("delta")
 
 
 def test_lazy_reload_can_run_reentrantly_after_a_write():

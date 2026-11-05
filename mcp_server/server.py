@@ -1468,7 +1468,7 @@ class DocumentWatcher(FileSystemEventHandler):
         Suffixes are lowercased to match DocumentParser.parse_directory().
         """
         p = Path(path)
-        if p.name.startswith(".rag-pending-"):
+        if p.name.startswith((".rag-pending-", "~$")):  # staging file or Office owner file
             return False
         return p.suffix.lower() in config.supported_formats or p.name in config.supported_formats
 
@@ -1875,8 +1875,17 @@ class KnowledgeOrchestrator:
 
         Done BEFORE indexing so moved files are not blocked by stale content
         hashes. Mutates ``stats`` (chunks_removed, deleted) and evicts from
-        both ``_indexed_docs`` and ``_source_to_docid``.
+        both ``_indexed_docs`` and ``_source_to_docid``. An unavailable or empty
+        ``documents_dir`` (unplugged drive, unmounted share, folder recreated at
+        startup) prunes nothing; remove_document removes on purpose (#259).
         """
+        if not io_path(config.documents_dir).is_dir() or (not documents and self._indexed_docs):
+            print(
+                f"[WARN] documents_dir unavailable or empty, skipping orphan pruning: {config.documents_dir}",
+                file=sys.stderr,
+            )
+            stats["errors"] += 1
+            return
         current_paths = {str(Path(getattr(doc, "source", doc)).resolve()) for doc in documents}
         for doc_id, info in list(self._indexed_docs.items()):
             source = Path(info.get("source", ""))
@@ -1969,11 +1978,16 @@ class KnowledgeOrchestrator:
                 if not is_path_within(config.documents_dir, doc):
                     raise PathEscapeError(f"File escaped documents directory: {doc}")
                 doc = self.parser.parse_file(doc)
-                if doc is None:
-                    raise ValueError("Document has no indexable content")
                 after_parse = io_path(source).stat()
                 if (source_stat.st_mtime_ns, source_stat.st_size) != (after_parse.st_mtime_ns, after_parse.st_size):
                     raise RuntimeError("Source changed during parsing; retry indexing this document")
+                # Empty or text-less files are skipped, never an error that aborts a rebuild (#259).
+                if doc is None and existing:
+                    self._evict_stale_doc(existing, stats)
+                    return
+                if doc is None:
+                    stats["skipped"] += 1
+                    return
             existing_doc_id = self._resolve_existing_or_skip(doc, force, path_to_docid, stats, tracking)
             if existing_doc_id is _SKIP_DOC:
                 return
@@ -2506,7 +2520,7 @@ class KnowledgeOrchestrator:
             return stats
 
         print("[REINDEX] Rebuilding BM25 index...", file=sys.stderr)
-        self.bm25_index.clear()
+        # No clear(): queries keep the published generation until the rebuild replaces it (#259).
         self._bm25_initialized = False
         self._ensure_bm25_index()
 

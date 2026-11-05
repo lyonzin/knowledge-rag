@@ -406,7 +406,7 @@ class DocumentParser:
             ]
 
             for fname in files:
-                if fname.startswith(".rag-pending-"):
+                if fname.startswith((".rag-pending-", "~$")):  # staging file or Office owner file
                     continue
                 filepath = Path(root) / fname
                 # supported_formats holds suffixes (".go") and exact filenames ("Dockerfile")
