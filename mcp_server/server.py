@@ -1550,6 +1550,26 @@ _SKIP_DOC = object()
 _MARKER_HEAD_CHARS = 1024
 
 
+def _is_saved_from(path: Path, url: str) -> bool:
+    """Whether the provenance marker at the top of ``path`` proves it holds ``url``'s page.
+
+    A file without the marker, or one that cannot be read, proves nothing. The
+    marker keeps the URL as ``_escape_attribute`` leaves it (quotes, angle brackets
+    and non-printable characters removed), so two URLs that differ only in those
+    characters count as the same page. A marker URL cut at ``_MAX_SOURCE_CHARS``
+    proves nothing either, so each re-add of a URL that long takes the next free
+    name, until the full-digest name is reached and then refreshed.
+    """
+    try:
+        with path.open(encoding="utf-8", errors="replace") as page:
+            marker = detect_external_marker(page.read(_MARKER_HEAD_CHARS))
+    except OSError as exc:
+        # Held by another program or an offline cloud placeholder: owner unproven.
+        print(f"[WARN] add_from_url: cannot read {path}, saving under a hashed name: {exc}", file=sys.stderr)
+        return False
+    return marker is not None and len(marker[0]) < _MAX_SOURCE_CHARS and marker[0] == _escape_attribute(url)
+
+
 class KnowledgeOrchestrator:
     """Main orchestrator for knowledge retrieval with semantic search + keyword routing"""
 
@@ -4119,34 +4139,24 @@ class KnowledgeOrchestrator:
 
     @staticmethod
     def _url_document_path(url: str, category: str, safe_title: str) -> str:
-        """Keep the title-based name unless a different URL already saved that file (GH #262).
+        """Pick the first name that no other source owns for ``url``'s page (GH #262).
 
-        Titles are cut to 60 characters, so different pages can map to one name;
-        the provenance marker at the top of the saved file records its URL. A file
-        without that marker, or one that cannot be read, is never taken over. The
-        marker keeps the URL as ``_escape_attribute`` leaves it (quotes, angle
-        brackets and non-printable characters removed), so two URLs that differ
-        only in those characters count as the same page. A marker URL cut at
-        ``_MAX_SOURCE_CHARS`` proves nothing, so re-adding a URL that long saves a
-        hashed copy instead of refreshing its file in place.
+        Titles are cut to 60 characters, so different pages can map to one name.
+        Tried in order: the title-based name, then that name plus the first 8 and
+        16 hex characters of the URL's SHA-256. The first that is free, or that
+        ``_is_saved_from`` shows already holds this URL's page, wins. The name with
+        the full digest is the last resort and is used without a check.
         """
-        filepath = f"{category}/{safe_title}.md"
-        try:
-            existing = validate_path_within(config.documents_dir, filepath)
-        except PathEscapeError:
-            return filepath  # add_document_from_content rejects it and reports why
-        if not existing.is_file():
-            return filepath
-        try:
-            with existing.open(encoding="utf-8", errors="replace") as page:
-                marker = detect_external_marker(page.read(_MARKER_HEAD_CHARS))
-        except OSError as exc:
-            # Held by another program or an offline cloud placeholder: owner unproven.
-            print(f"[WARN] add_from_url: cannot read {existing}, saving under a hashed name: {exc}", file=sys.stderr)
-            marker = None
-        if marker and len(marker[0]) < _MAX_SOURCE_CHARS and marker[0] == _escape_attribute(url):
-            return filepath
-        return f"{category}/{safe_title}-{content_sha256(url)[:8]}.md"
+        digest = content_sha256(url)
+        for stem in (safe_title, f"{safe_title}-{digest[:8]}", f"{safe_title}-{digest[:16]}"):
+            filepath = f"{category}/{stem}.md"
+            try:
+                existing = validate_path_within(config.documents_dir, filepath)
+            except PathEscapeError:
+                return filepath  # add_document_from_content rejects it and reports why
+            if not existing.is_file() or _is_saved_from(existing, url):
+                return filepath
+        return f"{category}/{safe_title}-{digest}.md"
 
     @collection_reader
     def search_similar(self, filepath: str, max_results: int = 5) -> List[Dict[str, Any]]:

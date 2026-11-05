@@ -17,7 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Fixed:**
 
-- `add_from_url` no longer overwrites a page from another URL whose title starts with the same 60 characters, such as "Part 1" and "Part 2" of a series, even when both are added at once. If a file with the title-based name exists and its provenance marker does not show the same URL, the page is saved as `<title>-<first 8 hex characters of the URL's SHA-256>.md` instead. Existing files keep their names, and adding the same URL again updates its own file, except for pages saved before v4.8.0 (no provenance marker), files it cannot read and URLs of 512 characters or more (the marker keeps only the first 512): those get a second, suffixed file, and the old one is kept (#262).
+- `add_from_url` no longer replaces a file it did not save from the same URL: another page whose title starts with the same 60 characters, such as "Part 1" and "Part 2" of a series (even when both are added at once), a note with that name, or a file it cannot read. The page goes to the first of these names that is free or already holds this URL's page: `<title>.md`, then `<title>-<first 8 hex characters of the URL's SHA-256>.md`, then the first 16; the name with the full SHA-256 is the last resort and is used without a check. Existing files keep their names (#262).
+- Adding the same URL again updates its own file, recognised by its provenance marker. A page saved before v4.8.0 (no marker) or a file it cannot read gets one suffixed copy instead, and a URL of 512 characters or more (the marker keeps only the first 512) gets a new copy on each re-add, up to three, after which the last one is updated. URLs that differ only in quotes, angle brackets or non-printable characters count as the same page (#262).
 - `add_from_url` saves a page with no `<title>` from a URL ending in `/` as `page.md`, instead of a hidden `.md` file that all such pages shared (#262).
 
 ---

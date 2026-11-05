@@ -57,6 +57,20 @@ def _serve_series(monkeypatch):
     )
 
 
+def _hashed_name(url, hex_chars):
+    """Name of ``url``'s page when shorter names are taken: ``<title>-<first hex_chars of its SHA-256>.md``."""
+    return f"{Path(SHARED_NAME).stem}-{hashlib.sha256(url.encode()).hexdigest()[:hex_chars]}.md"
+
+
+def _crowd_part_1_names(orch, monkeypatch, *notes):
+    """Let Part 2 own the title-based name and put a note without a marker under each name in ``notes``."""
+    pages = _serve_series(monkeypatch)
+    owner = Path(orch.add_from_url(PART_2, "general")["filepath"])
+    for name in notes:
+        (owner.parent / name).write_text("# My own notes\n", encoding="utf-8")
+    return pages, owner
+
+
 class _AnnouncingLock:
     """Index lock that counts the threads arriving at it, before they wait."""
 
@@ -131,11 +145,46 @@ def test_a_file_that_cannot_be_read_is_never_overwritten(isolated_orchestrator, 
         patch.setattr(Path, "open", deny_held)
         result = orch.add_from_url(PART_1, "general")
 
-    suffix = hashlib.sha256(PART_1.encode()).hexdigest()[:8]
-    assert Path(result["filepath"]).name == f"{Path(SHARED_NAME).stem}-{suffix}.md"
+    assert Path(result["filepath"]).name == _hashed_name(PART_1, 8)
     assert held.read_text(encoding="utf-8") == "# Locked by another program\n"
     warning = capsys.readouterr().err
     assert "[WARN] add_from_url: cannot read" in warning and SHARED_NAME in warning
+
+
+def test_a_taken_8_hex_name_moves_the_page_to_the_16_hex_name(isolated_orchestrator, monkeypatch):
+    orch = isolated_orchestrator
+    note = _hashed_name(PART_1, 8)
+    _, owner = _crowd_part_1_names(orch, monkeypatch, note)
+
+    result = orch.add_from_url(PART_1, "general")
+
+    assert Path(result["filepath"]).name == _hashed_name(PART_1, 16)
+    assert "Pin admission webhooks" in owner.read_text(encoding="utf-8")
+    assert (owner.parent / note).read_text(encoding="utf-8") == "# My own notes\n"
+
+
+def test_re_adding_after_a_16_hex_save_refreshes_that_file(isolated_orchestrator, monkeypatch):
+    orch = isolated_orchestrator
+    pages, _ = _crowd_part_1_names(orch, monkeypatch, _hashed_name(PART_1, 8))
+    first = orch.add_from_url(PART_1, "general")
+    pages[PART_1] = _page(TITLES[PART_1], "Revised guidance.")
+
+    second = orch.add_from_url(PART_1, "general")
+
+    assert Path(second["filepath"]).name == _hashed_name(PART_1, 16)
+    assert second["filepath"] == first["filepath"]
+    assert "Revised guidance." in Path(second["filepath"]).read_text(encoding="utf-8")
+
+
+def test_when_every_shorter_name_is_taken_the_full_digest_name_is_used(isolated_orchestrator, monkeypatch):
+    orch = isolated_orchestrator
+    notes = (_hashed_name(PART_1, 8), _hashed_name(PART_1, 16))
+    _, owner = _crowd_part_1_names(orch, monkeypatch, *notes)
+
+    result = orch.add_from_url(PART_1, "general")
+
+    assert Path(result["filepath"]).name == _hashed_name(PART_1, 64)
+    assert all((owner.parent / note).read_text(encoding="utf-8") == "# My own notes\n" for note in notes)
 
 
 def test_long_urls_sharing_the_marker_prefix_keep_separate_files(isolated_orchestrator, monkeypatch):
