@@ -1,20 +1,20 @@
-"""Compare two pytest-benchmark JSON outputs and fail on >10% regression.
+"""Compare interleaved benchmark runs of master and the PR branch; fail on a consistent >10% regression.
 
-Pillar 5 — Scalability: every PR runs ``bench/`` against master AND
-against the branch. This script ingests both result files and emits a
-regression report. Median is the comparison metric (least sensitive to
-outlier samples).
+Pillar 5 — Scalability: the perf-bench job runs ``bench/`` four times, in the
+order branch, master, master, branch, and writes one pytest-benchmark JSON per
+run. Each run gives every benchmark one median: wall time, or tracemalloc peak
+bytes for the memory benchmarks. Sub-100 µs medians move by ±15–19% between
+runs of identical code, so one median per side cannot tell noise from a change.
 
-A benchmark regresses when its median wall time or measured RSS bytes grow by more than
-``REGRESSION_THRESHOLD`` (10% by default). Improvements (faster) are
-celebrated, never blocking.
+A benchmark regresses only when its lowest branch median is above its highest
+master median by more than ``REGRESSION_THRESHOLD`` (10% by default). Spreads
+that overlap are noise and pass; improvements are reported, never blocking.
 
-Run locally:
-    pytest bench/ --benchmark-json=branch.json
-    git stash; git checkout master
-    pytest bench/ --benchmark-json=master.json
-    git checkout -; git stash pop
-    python scripts/check_perf_regression.py master.json branch.json
+Run locally, with master checked out as a worktree in ../master:
+    pytest bench/ --benchmark-only --benchmark-json=branch-1.json
+    (cd ../master; PYTHONPATH="$PWD" python -m pytest bench/ --benchmark-only --benchmark-json="$OLDPWD/master-1.json")
+    # ...the same for master-2.json, then branch-2.json...
+    python scripts/check_perf_regression.py --master master-1.json master-2.json --branch branch-1.json branch-2.json
 """
 
 from __future__ import annotations
@@ -24,15 +24,21 @@ import json
 import math
 import os
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 REGRESSION_THRESHOLD = 0.10  # 10%
 BYPASS_LABEL = "skip-perf-gate"
+BYTES_MEASUREMENT = "tracemalloc_peak_bytes"
+LEGACY_MEMORY_BENCHMARKS = {"test_bench_orchestrator_idle_rss", "test_bench_query_cache_5000_entries"}
+# An exact 10% change computes as 0.10000000000000009; it must not count as above the threshold.
+FLOAT_TOLERANCE = 1e-12
+REGRESSED, IMPROVED, UNCHANGED, NEW, REMOVED = "regressed", "improved", "unchanged", "new", "removed"
 
 
 def _load(path: Path) -> dict[str, dict[str, Any]]:
-    """Return explicit units; legacy memory timings are not RSS measurements."""
+    """Return explicit units; legacy memory rows carry no byte measurement."""
     if not path.exists():
         print(f"[ERROR] Benchmark file missing: {path}", file=sys.stderr)
         raise SystemExit(2)
@@ -47,39 +53,81 @@ def _load(path: Path) -> dict[str, dict[str, Any]]:
 
 
 def _measurement(bench: dict[str, Any]) -> dict[str, Any]:
-    """Read RSS bytes from extra_info without relabelling pytest timing stats."""
+    """Read traced bytes from extra_info without relabelling pytest timing stats."""
     extra = bench.get("extra_info") or {}
     name = bench.get("fullname", bench["name"]).replace("\\", "/")
-    legacy_memory = "test_bench_memory.py" in name or bench["name"] in {
-        "test_bench_orchestrator_idle_rss",
-        "test_bench_query_cache_5000_entries",
-    }
+    legacy_memory = "test_bench_memory.py" in name or bench["name"] in LEGACY_MEMORY_BENCHMARKS
     result = {
         "median": bench["stats"]["median"],
         "unit": "seconds",
         "workload_version": extra.get("workload_version", 1),
     }
-    if extra.get("measurement") == "rss_peak_delta_bytes":
-        result.update(median=extra.get("rss_peak_delta_bytes"), unit="bytes")
+    if extra.get("measurement") == BYTES_MEASUREMENT:
+        result.update(median=extra.get(BYTES_MEASUREMENT), unit="bytes")
     elif legacy_memory:
-        result.update(median=None, unit="bytes", reason="legacy artifact has no RSS byte measurement")
+        result.update(median=None, unit="bytes", reason="legacy artifact has no tracemalloc byte measurement")
     value = result["median"]
     if value is not None and (not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0):
         raise ValueError(f"Invalid {result['unit']} measurement for {bench['name']}: {value!r}")
     return result
 
 
-def _incomparable(master: dict[str, Any], branch: dict[str, Any]) -> str | None:
-    """Explain why two rows do not describe the same measurement/workload."""
-    if master["median"] is None or branch["median"] is None:
-        return str(master.get("reason") or branch.get("reason"))
-    if master["unit"] != branch["unit"]:
-        return f"different units: {master['unit']} / {branch['unit']}"
-    if master["workload_version"] != branch["workload_version"]:
+def _collect(paths: Sequence[Path]) -> dict[str, list[dict[str, Any]]]:
+    """Map each benchmark to its measurement in every run file that contains it."""
+    runs: dict[str, list[dict[str, Any]]] = {}
+    for path in paths:
+        for name, row in _load(path).items():
+            runs.setdefault(name, []).append(row)
+    return runs
+
+
+def _medians(rows: list[dict[str, Any]]) -> list[float]:
+    return [row["median"] for row in rows]
+
+
+def _incomparable(master: list[dict[str, Any]], branch: list[dict[str, Any]]) -> str | None:
+    """Explain why the runs of a benchmark measured on both sides do not describe the same workload."""
+    if not master or not branch:
+        return None  # judge() reports a benchmark measured on one side only
+    rows = master + branch
+    reasons = [row["reason"] for row in rows if row["median"] is None]
+    if reasons:
+        return str(reasons[0])
+    units = sorted({row["unit"] for row in rows})
+    if len(units) > 1:
+        return f"different units: {' / '.join(units)}"
+    if len({row["workload_version"] for row in rows}) > 1:
         return "workload definition changed; a new baseline is required for this benchmark"
-    if master["median"] == 0:
+    if min(_medians(master)) == 0:
         return "zero baseline: relative change is undefined; absolute test budget still applies"
     return None
+
+
+def judge(master: Sequence[float], branch: Sequence[float], threshold: float) -> tuple[str, float | None]:
+    """Classify one benchmark from its per-run medians on each side (master medians must be positive).
+
+    ``REGRESSED`` needs the lowest branch median above the highest master median by more
+    than ``threshold``, ``IMPROVED`` the highest branch median below the lowest master
+    median by more than ``threshold``; anything in between is ``UNCHANGED``. A benchmark
+    with no run on one side is ``NEW`` or ``REMOVED``. The returned change is the relative
+    gap between the nearest edges of the two spreads, or None when nothing moved.
+    """
+    if not master:
+        return NEW, None
+    if not branch:
+        return REMOVED, None
+    slowdown = (min(branch) - max(master)) / max(master)
+    if slowdown > threshold and not math.isclose(slowdown, threshold, rel_tol=FLOAT_TOLERANCE, abs_tol=FLOAT_TOLERANCE):
+        return REGRESSED, slowdown
+    speedup = (max(branch) - min(master)) / min(master)
+    if speedup < -threshold:
+        return IMPROVED, speedup
+    return UNCHANGED, None
+
+
+def _bypass_requested() -> bool:
+    """Only the run that adding the bypass label triggers skips the gate; every later run measures again."""
+    return os.environ.get("PR_EVENT_ACTION") == "labeled" and os.environ.get("PR_EVENT_LABEL") == BYPASS_LABEL
 
 
 def _format_delta(pct: float) -> str:
@@ -87,90 +135,95 @@ def _format_delta(pct: float) -> str:
     return f"{sign}{pct * 100:.1f}%"
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("master_json", type=Path, help="benchmark JSON from master")
-    parser.add_argument("branch_json", type=Path, help="benchmark JSON from PR branch")
+def _spread(rows: list[dict[str, Any]]) -> str:
+    low, high = min(_medians(rows)), max(_medians(rows))
+    return f"{low:.6g}" if low == high else f"{low:.6g}..{high:.6g}"
+
+
+def _describe(name: str, master: list[dict[str, Any]], branch: list[dict[str, Any]], change: float | None) -> str:
+    if change is None:
+        return name
+    unit = branch[0]["unit"]
+    return f"{name}  median {_spread(master)} -> {_spread(branch)} {unit} ({_format_delta(change)})"
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--master", nargs="+", type=Path, required=True, help="benchmark JSON of each master run")
+    parser.add_argument("--branch", nargs="+", type=Path, required=True, help="benchmark JSON of each PR branch run")
     parser.add_argument(
         "--threshold",
         type=float,
         default=REGRESSION_THRESHOLD,
-        help=f"Fractional regression that fails the gate (default: {REGRESSION_THRESHOLD})",
+        help=f"Fractional gap beyond the master spread that fails the gate (default: {REGRESSION_THRESHOLD})",
     )
     args = parser.parse_args()
     if not math.isfinite(args.threshold) or args.threshold < 0:
         parser.error("--threshold must be finite and non-negative")
+    return args
 
-    master = _load(args.master_json)
-    branch = _load(args.branch_json)
 
-    common = sorted(set(master) & set(branch))
-    only_master = sorted(set(master) - set(branch))
-    only_branch = sorted(set(branch) - set(master))
-
-    if only_master:
-        print(f"[WARN] Benchmarks present in master but missing from branch: {only_master}", file=sys.stderr)
-    if only_branch:
-        print(f"[INFO] New benchmarks added by branch: {only_branch}")
-
-    regressions: list[tuple[str, float, float, float, str]] = []
-    improvements: list[tuple[str, float]] = []
-    compared = 0
-
-    for name in common:
-        reason = _incomparable(master[name], branch[name])
-        if reason:
-            print(f"[INCOMPARABLE] {name}: {reason}")
-            continue
-        m_median = master[name]["median"]
-        b_median = branch[name]["median"]
-        compared += 1
-        delta = (b_median - m_median) / m_median
-        if delta > args.threshold and not math.isclose(delta, args.threshold, rel_tol=1e-12, abs_tol=1e-12):
-            regressions.append((name, m_median, b_median, delta, branch[name]["unit"]))
-        elif delta < -args.threshold:
-            improvements.append((name, delta))
-
-    print(f"\nBenchmarks compared: {compared} ({len(common) - compared} explicitly incomparable)")
-    print(f"Threshold: ±{args.threshold * 100:.0f}%\n")
-
-    if improvements:
-        print("Improvements (lower latency or memory, no action needed):")
-        for name, delta in improvements:
-            print(f"  [IMPROVED] {name}  {_format_delta(delta)}")
-        print()
-
-    if regressions:
-        # Honor the bypass label when set deliberately on a PR
-        labels = {label.strip() for label in os.environ.get("PR_LABELS", "").split(",") if label.strip()}
-        if BYPASS_LABEL in labels:
-            print(f"[WARN] Regressions detected but PR has '{BYPASS_LABEL}' label — bypassing:", file=sys.stderr)
-            for name, m, b, delta, unit in regressions:
-                print(
-                    f"  - {name}  median {m:.6g} -> {b:.6g} {unit} ({_format_delta(delta)})",
-                    file=sys.stderr,
-                )
-            return 0
-
-        print("[FAIL] Performance regressions detected:", file=sys.stderr)
-        for name, m, b, delta, unit in regressions:
-            print(
-                f"  [REGRESSION] {name}  median {m:.6g} -> {b:.6g} {unit} ({_format_delta(delta)})",
-                file=sys.stderr,
-            )
+def _report_regressions(lines: list[str]) -> int:
+    if _bypass_requested():
         print(
-            "\nIf this regression is intentional and accepted:\n"
-            "  - Document the trade-off in the PR description\n"
-            f"  - Apply the '{BYPASS_LABEL}' label to bypass\n",
+            f"[WARN] Regressions detected; this run was triggered by adding '{BYPASS_LABEL}', bypassing:",
             file=sys.stderr,
         )
-        return 1
+        for line in lines:
+            print(f"  - {line}", file=sys.stderr)
+        return 0
+    print("[FAIL] Performance regressions detected:", file=sys.stderr)
+    for line in lines:
+        print(f"  [REGRESSION] {line}", file=sys.stderr)
+    print(
+        "\nIf this regression is intentional and accepted:\n"
+        "  - Document the trade-off in the PR description\n"
+        f"  - Add the '{BYPASS_LABEL}' label: it bypasses only the run that adding it starts,\n"
+        "    so every later push is measured again\n",
+        file=sys.stderr,
+    )
+    return 1
 
+
+def _report(verdicts: dict[str, list[str]], incomparable: int, threshold: float) -> int:
+    """Print the verdicts and return the exit code."""
+    if verdicts.get(REMOVED):
+        print(f"[WARN] Benchmarks present in master but missing from branch: {verdicts[REMOVED]}", file=sys.stderr)
+    if verdicts.get(NEW):
+        print(f"[INFO] New benchmarks added by branch: {verdicts[NEW]}")
+    compared = sum(len(verdicts.get(verdict, [])) for verdict in (REGRESSED, IMPROVED, UNCHANGED))
+    print(f"\nBenchmarks compared: {compared} ({incomparable} explicitly incomparable)")
+    print(f"Threshold: {threshold * 100:.0f}% beyond the spread of the master runs\n")
+    if verdicts.get(IMPROVED):
+        print("Improvements (lower latency or memory, no action needed):")
+        for line in verdicts[IMPROVED]:
+            print(f"  [IMPROVED] {line}")
+        print()
+    if verdicts.get(REGRESSED):
+        return _report_regressions(verdicts[REGRESSED])
     if not compared:
         print("[ERROR] No comparable measurements; cannot establish a regression verdict.", file=sys.stderr)
         return 2
     print("[OK] No comparable benchmarks regressed beyond threshold.")
     return 0
+
+
+def main() -> int:
+    """Return 0 when nothing regressed (or the bypass applies), 1 on a regression, 2 without a verdict."""
+    args = _parse_args()
+    master, branch = _collect(args.master), _collect(args.branch)
+    verdicts: dict[str, list[str]] = {}
+    incomparable = 0
+    for name in sorted(master.keys() | branch.keys()):
+        master_rows, branch_rows = master.get(name, []), branch.get(name, [])
+        reason = _incomparable(master_rows, branch_rows)
+        if reason:
+            print(f"[INCOMPARABLE] {name}: {reason}")
+            incomparable += 1
+            continue
+        verdict, change = judge(_medians(master_rows), _medians(branch_rows), args.threshold)
+        verdicts.setdefault(verdict, []).append(_describe(name, master_rows, branch_rows, change))
+    return _report(verdicts, incomparable, args.threshold)
 
 
 if __name__ == "__main__":

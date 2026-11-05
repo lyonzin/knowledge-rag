@@ -49,10 +49,10 @@ def _pct_or_none(numerator: float, denominator: float) -> float | None:
 
 
 def _memory_fields(bench: dict[str, Any]) -> dict[str, Any]:
-    """Keep RSS byte samples separate from pytest's wall-clock statistics."""
+    """Keep traced byte measurements separate from pytest's wall-clock statistics."""
     extra = bench.get("extra_info") or {}
     name = bench.get("fullname", bench.get("name", "")).replace("\\", "/")
-    is_memory = extra.get("measurement") == "rss_peak_delta_bytes" or (
+    is_memory = extra.get("measurement") == "tracemalloc_peak_bytes" or (
         "test_bench_memory.py" in name
         or bench.get("name") in {"test_bench_orchestrator_idle_rss", "test_bench_query_cache_5000_entries"}
     )
@@ -60,11 +60,10 @@ def _memory_fields(bench: dict[str, Any]) -> dict[str, Any]:
         return {}
     return {
         "measurement_unit": "bytes",
-        "measurement_value": extra.get("rss_peak_delta_bytes"),
-        "rss_retained_delta_bytes": extra.get("rss_retained_delta_bytes"),
-        "rss_budget_bytes": extra.get("rss_budget_bytes"),
-        "rss_sampling_interval_ms": extra.get("rss_sampling_interval_ms"),
-        "measurement_note": "Sampled peak RSS growth; legacy runs without byte samples are unavailable.",
+        "measurement_value": extra.get("tracemalloc_peak_bytes"),
+        "retained_bytes": extra.get("tracemalloc_retained_bytes"),
+        "budget_bytes": extra.get("memory_budget_bytes"),
+        "measurement_note": "Peak Python allocation traced by tracemalloc; legacy runs without it are unavailable.",
         "median_ns": None,
         "stddev_ns": None,
         "ops": None,

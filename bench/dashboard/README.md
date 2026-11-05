@@ -51,13 +51,13 @@ python -m http.server 8000 --directory /tmp/dashboard-preview
 | **FTS5** | `fts5 / lexical / fast[_-]?path` | 10 ms / 30 ms |
 | **Reindex** | `reindex / rebuild / swap` | 10 s / 60 s |
 | **Indexing** | `index / ingest / parse / chunk` | 100 ms / 500 ms |
-| **Memory** | Explicit `measurement_unit: bytes` overrides name matching | Per-workload RSS budget in bytes |
+| **Memory** | Explicit `measurement_unit: bytes` overrides name matching | Per-workload allocation budget in bytes |
 | **Concurrent** | `concurrent / thread / parallel` | 100 ms / 500 ms |
 | **Other** | — | 100 ms / 1 s |
 
 New benchmark files under `bench/` are automatically categorized as long as the test name contains one of these keywords. The first matching pattern wins. Explicit byte measurements always use the memory category. A cache-hit latency benchmark remains a timing measurement rather than a RAM measurement. Timing thresholds are display heuristics, not service-level guarantees.
 
-Memory rows read `rss_peak_delta_bytes`, `rss_retained_delta_bytes`, `rss_budget_bytes` and `rss_sampling_interval_ms` from the benchmark's `extra_info`. Each workload runs five times, sampling process RSS every 5 ms and applying an absolute budget to every run. Older artifacts without byte samples display `not measured` / `unavailable`; elapsed garbage-collection time is never relabeled as memory. Shorter allocation peaks can fall between samples, and RSS includes native allocations and allocator retention.
+Memory rows read `tracemalloc_peak_bytes`, `tracemalloc_retained_bytes` and `memory_budget_bytes` from the benchmark's `extra_info`. Each workload runs five times under `tracemalloc` and applies an absolute budget to every run. The peak counts every Python allocation the workload makes, so it does not depend on pages the allocator already holds; native allocations outside Python's allocator are not counted. Older artifacts without traced bytes display `not measured` / `unavailable`; elapsed garbage-collection time is never relabeled as memory.
 
 ## Data schema (`data.json`)
 
@@ -82,6 +82,6 @@ Memory rows read `rss_peak_delta_bytes`, `rss_retained_delta_bytes`, `rss_budget
 }
 ```
 
-For memory rows, `measurement_unit` is `bytes`; `median_ns`, `stddev_ns`, `ops` and `iqr_ratio` are null. `measurement_value` contains sampled peak RSS growth or null when the legacy artifact has no byte sample. The RSS budget and sampling interval are also retained. Sorting groups measurements by unit instead of treating bytes as nanoseconds.
+For memory rows, `measurement_unit` is `bytes`; `median_ns`, `stddev_ns`, `ops` and `iqr_ratio` are null. `measurement_value` contains the traced allocation peak or null when the legacy artifact has no traced bytes. `retained_bytes` and `budget_bytes` are also kept. Sorting groups measurements by unit instead of treating bytes as nanoseconds.
 
 `dashboard.js` enriches each row with `category`, `category_label`, `category_color`, `status`, and `stddev_pct` at render time. `workload_version` identifies changes to the benchmark scenario; the CI gate reports different versions as incomparable and keeps enforcing its 10% threshold for unchanged, comparable scenarios.

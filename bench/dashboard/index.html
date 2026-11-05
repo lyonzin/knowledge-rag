@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="knowledge-rag performance dashboard — median latency, throughput, and sampled RSS memory growth by benchmark category.">
+  <meta name="description" content="knowledge-rag performance dashboard — median latency, throughput, and peak traced memory allocation by benchmark category.">
   <meta name="theme-color" content="#0f172a">
 
   <title>knowledge-rag — Live Performance Dashboard</title>
@@ -34,7 +34,7 @@
     </div>
 
     <p class="hero-lede">
-      Updated on every push to <code>master</code>. Median latency and sampled RSS growth, grouped by category. The CI runs
+      Updated on every push to <code>master</code>. Median latency and peak traced allocation, grouped by category. The CI runs
       <code>pytest bench/ --benchmark-only</code> on a clean Ubuntu runner and publishes the raw JSON alongside this page.
     </p>
 
@@ -95,7 +95,7 @@
           <tr>
             <th data-sort="category">Category</th>
             <th data-sort="name">Benchmark</th>
-            <th data-sort="measurement_value" class="numeric">Median latency / RSS growth</th>
+            <th data-sort="measurement_value" class="numeric">Median latency / peak allocation</th>
             <th data-sort="ops" class="numeric">Ops/sec</th>
             <th data-sort="stddev_pct" class="numeric">σ (%)</th>
           </tr>
@@ -117,7 +117,7 @@
           <li>Runner: GitHub-hosted <code>ubuntu-latest</code>. Shared-runner load and allocator reuse can affect individual measurements.</li>
           <li>Command: <code>pytest bench/ --benchmark-only --benchmark-min-rounds=5</code> against a clean checkout.</li>
           <li>Latency: median wall-time, ops/sec, standard deviation. The chart includes latency measurements only.</li>
-          <li>Memory: median sampled peak RSS growth in bytes, sampled every 5 ms, with a fixed per-workload budget. Legacy runs without RSS byte samples show “not measured”.</li>
+          <li>Memory: median peak of the Python allocations a workload makes, traced by <code>tracemalloc</code>, in bytes, with a fixed per-workload budget. Legacy runs without traced bytes show “not measured”.</li>
           <li>Cadence: every push to <code>master</code>. The <code>bench-pages.yml</code> workflow rebuilds this page automatically.</li>
         </ul>
       </div>
