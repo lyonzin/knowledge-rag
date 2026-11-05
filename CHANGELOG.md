@@ -13,7 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-### Unreleased
+### v4.12.0 (2026-11-05) — Index safety, accurate snippets and merge-blocking CI gates
+
+Minor release. An unavailable or empty `documents_dir` no longer wipes the index, empty and Office owner files no longer break a full rebuild, search snippets start at the match, `search_similar` works with long documents, `add_from_url` no longer overwrites another page, numbers in `keyword_routes` and `category_mappings` no longer break indexing, and startup auto-repair keeps only the 3 most recent backups. **Upgrade note:** `list_documents` now returns at most 100 documents per call; call it again with `offset` until it reaches `total` to list everything. For contributors, failing tests, cancelled jobs, MCP tool contract breaks and consistent performance regressions now block merges.
 
 **Added:**
 
