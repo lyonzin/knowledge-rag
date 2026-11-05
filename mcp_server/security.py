@@ -272,6 +272,10 @@ def neutralize_injection_sentinels(text: str) -> str:
     return text
 
 
+#: Longest source identifier the provenance marker keeps; longer ones are cut.
+_MAX_SOURCE_CHARS: Final[int] = 512
+
+
 def _escape_attribute(value: str) -> str:
     """Make a source identifier safe to embed in an XML-ish attribute.
 
@@ -284,11 +288,11 @@ def _escape_attribute(value: str) -> str:
 
     Returns:
         str: Value with quotes, angle brackets and control characters removed,
-        truncated to 512 characters.
+        truncated to ``_MAX_SOURCE_CHARS`` (512) characters.
     """
     cleaned = "".join(ch for ch in value if ch.isprintable())
     cleaned = cleaned.replace('"', "").replace("'", "").replace("<", "").replace(">", "")
-    return cleaned[:512]
+    return cleaned[:_MAX_SOURCE_CHARS]
 
 
 def wrap_external_content(content: str, source: str, digest: str | None = None) -> str:

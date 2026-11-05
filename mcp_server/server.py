@@ -85,8 +85,12 @@ from .ratelimit import rate_limited
 from .search_candidates import select_rerank_candidates
 from .search_scope import FolderScope, ScopeKey
 from .security import (
+    _MAX_SOURCE_CHARS,
     BearerAuthMiddleware,
     PathEscapeError,
+    _escape_attribute,
+    content_sha256,
+    detect_external_marker,
     is_path_within,
     sanitize_external_content,
     validate_path_within,
@@ -1540,6 +1544,30 @@ class DocumentWatcher(FileSystemEventHandler):
 # Sentinel returned by _resolve_existing_or_skip to signal "skip this doc" —
 # distinguishes from ``None`` (no existing doc yet, index as fresh).
 _SKIP_DOC = object()
+
+# Characters read to find a saved page's provenance marker. It is the first line,
+# and its tag, source (at most 512 characters) and SHA-256 take at most 614.
+_MARKER_HEAD_CHARS = 1024
+
+
+def _is_saved_from(path: Path, url: str) -> bool:
+    """Whether the provenance marker at the top of ``path`` proves it holds ``url``'s page.
+
+    A file without the marker, or one that cannot be read, proves nothing. The
+    marker keeps the URL as ``_escape_attribute`` leaves it (quotes, angle brackets
+    and non-printable characters removed), so two URLs that differ only in those
+    characters count as the same page. A marker URL cut at ``_MAX_SOURCE_CHARS``
+    proves nothing either, so each re-add of a URL that long takes the next free
+    name, until the full-digest name is reached and then refreshed.
+    """
+    try:
+        with path.open(encoding="utf-8", errors="replace") as page:
+            marker = detect_external_marker(page.read(_MARKER_HEAD_CHARS))
+    except OSError as exc:
+        # Held by another program or an offline cloud placeholder: owner unproven.
+        print(f"[WARN] add_from_url: cannot read {path}, saving under a hashed name: {exc}", file=sys.stderr)
+        return False
+    return marker is not None and len(marker[0]) < _MAX_SOURCE_CHARS and marker[0] == _escape_attribute(url)
 
 
 class KnowledgeOrchestrator:
@@ -4122,14 +4150,36 @@ class KnowledgeOrchestrator:
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         clean_text = f"# {title}\n\nSource: {url}\n\n" + "\n\n".join(lines)
 
-        safe_title = re.sub(r"[^\w\s-]", "", title).strip().replace(" ", "-").lower()[:60]
-        filename = f"{safe_title}.md"
-        filepath = f"{category}/{filename}"
+        safe_title = re.sub(r"[^\w\s-]", "", title).strip().replace(" ", "-").lower()[:60] or "page"
 
         # The body was fetched from an untrusted URL; the sanitizer inserts a
         # provenance fence and defuses model control tokens before the text
         # ever reaches the parser or the LLM that will consume the RAG output.
-        return self.add_document_from_content(clean_text, filepath, category, external_source=url)
+        # The lock spans name check and write, so parallel adds cannot both claim a free name.
+        with self._index_lock:
+            filepath = self._url_document_path(url, category, safe_title)
+            return self.add_document_from_content(clean_text, filepath, category, external_source=url)
+
+    @staticmethod
+    def _url_document_path(url: str, category: str, safe_title: str) -> str:
+        """Pick the first name that no other source owns for ``url``'s page (GH #262).
+
+        Titles are cut to 60 characters, so different pages can map to one name.
+        Tried in order: the title-based name, then that name plus the first 8 and
+        16 hex characters of the URL's SHA-256. The first that is free, or that
+        ``_is_saved_from`` shows already holds this URL's page, wins. The name with
+        the full digest is the last resort and is used without a check.
+        """
+        digest = content_sha256(url)
+        for stem in (safe_title, f"{safe_title}-{digest[:8]}", f"{safe_title}-{digest[:16]}"):
+            filepath = f"{category}/{stem}.md"
+            try:
+                existing = validate_path_within(config.documents_dir, filepath)
+            except PathEscapeError:
+                return filepath  # add_document_from_content rejects it and reports why
+            if not existing.is_file() or _is_saved_from(existing, url):
+                return filepath
+        return f"{category}/{safe_title}-{digest}.md"
 
     @collection_reader
     def search_similar(self, filepath: str, max_results: int = 5) -> List[Dict[str, Any]]:

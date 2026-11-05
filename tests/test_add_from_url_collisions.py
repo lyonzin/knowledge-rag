@@ -1,0 +1,284 @@
+"""``add_from_url`` gives every page its own file (GH #262).
+
+The file name comes from the first 60 characters of the page title, so two
+pages of one series ("... - Part 1", "... - Part 2") used to share a file and
+the second silently replaced the first on disk and in the index. A page with
+no ``<title>`` at a URL ending in "/" got the hidden name ".md", shared by every such page.
+
+``requests`` is replaced by a stub, so no test touches the network.
+"""
+
+import hashlib
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import pytest
+
+from mcp_server import server
+from mcp_server.security import detect_external_marker, wrap_external_content
+
+SERIES = "Kubernetes Security Best Practices for Production Clusters"
+SHARED_NAME = "kubernetes-security-best-practices-for-production-clusters--.md"
+# The provenance marker drops quotes from the URL, so the same-URL check must compare that escaped form.
+PART_1 = "https://blog.example.test/o'brien/k8s-security-part-1"
+PART_2 = "https://blog.example.test/o'brien/k8s-security-part-2"
+TITLES = {PART_1: f"{SERIES} - Part 1", PART_2: f"{SERIES} - Part 2"}
+# How much of a URL the provenance marker keeps, read back rather than hardcoded.
+MARKER_URL_LIMIT = len(detect_external_marker(wrap_external_content("", "u" * 4096))[0])
+SIGNED = "https://cdn.example.test/k8s-security?signature="
+LONG_1 = SIGNED.ljust(MARKER_URL_LIMIT + 100, "f") + "&part=1"
+LONG_2 = SIGNED.ljust(MARKER_URL_LIMIT + 100, "f") + "&part=2"
+NEAR_LIMIT = SIGNED.ljust(MARKER_URL_LIMIT - 1, "f")
+
+
+def _page(title, body):
+    """Return a minimal HTML page; a falsy title leaves out the <title> tag."""
+    head = f"<head><title>{title}</title></head>" if title else ""
+    return f"<html>{head}<body><p>{body}</p></body></html>"
+
+
+def _serve(monkeypatch, pages):
+    """Make ``requests.get(url)`` return ``pages[url]``, read at call time so a test can revise a page."""
+    monkeypatch.setitem(sys.modules, "requests", MagicMock(get=lambda url, **_: MagicMock(text=pages[url])))
+    return pages
+
+
+def _serve_series(monkeypatch):
+    """Serve two pages whose titles only differ after the 60th character."""
+    return _serve(
+        monkeypatch,
+        {
+            PART_1: _page(TITLES[PART_1], "Rotate the etcd encryption keys every quarter."),
+            PART_2: _page(TITLES[PART_2], "Pin admission webhooks to a dedicated namespace."),
+        },
+    )
+
+
+def _hashed_name(url, hex_chars):
+    """Name of ``url``'s page when shorter names are taken: ``<title>-<first hex_chars of its SHA-256>.md``."""
+    return f"{Path(SHARED_NAME).stem}-{hashlib.sha256(url.encode()).hexdigest()[:hex_chars]}.md"
+
+
+def _crowd_part_1_names(orch, monkeypatch, *notes):
+    """Let Part 2 own the title-based name and put a note without a marker under each name in ``notes``."""
+    pages = _serve_series(monkeypatch)
+    owner = Path(orch.add_from_url(PART_2, "general")["filepath"])
+    for name in notes:
+        (owner.parent / name).write_text("# My own notes\n", encoding="utf-8")
+    return pages, owner
+
+
+class _AnnouncingLock:
+    """Index lock that counts the threads arriving at it, before they wait."""
+
+    def __init__(self, lock):
+        self.lock, self.arrivals = lock, threading.Semaphore(0)
+
+    def __enter__(self):
+        self.arrivals.release()
+        return self.lock.__enter__()
+
+    def __exit__(self, *exc_info):
+        return self.lock.__exit__(*exc_info)
+
+
+def test_pages_whose_titles_share_60_chars_keep_separate_files(isolated_orchestrator, monkeypatch):
+    orch = isolated_orchestrator
+    _serve_series(monkeypatch)
+
+    first = orch.add_from_url(PART_1, "general")
+    second = orch.add_from_url(PART_2, "general")
+
+    assert Path(first["filepath"]).name == SHARED_NAME
+    assert first["filepath"] != second["filepath"]
+    assert {doc["source"] for doc in orch.list_documents()} == {first["filepath"], second["filepath"]}
+    assert "Rotate the etcd" in Path(first["filepath"]).read_text(encoding="utf-8")
+    assert any("Rotate the etcd" in text for text in orch.collection.get(include=["documents"])["documents"])
+
+
+@pytest.mark.parametrize("url", [PART_1, PART_2], ids=["plain-name", "suffixed-name"])
+def test_re_adding_a_url_refreshes_its_own_file(isolated_orchestrator, monkeypatch, url):
+    orch = isolated_orchestrator
+    pages = _serve_series(monkeypatch)
+    paths = {page: orch.add_from_url(page, "general")["filepath"] for page in (PART_1, PART_2)}
+    pages[url] = _page(TITLES[url], "Revised guidance.")
+
+    refreshed = orch.add_from_url(url, "general")
+
+    assert refreshed["filepath"] == paths[url]
+    assert len(list(server.config.documents_dir.rglob("*.md"))) == 2
+    assert len(orch.list_documents()) == 2
+    assert "Revised guidance." in Path(paths[url]).read_text(encoding="utf-8")
+
+
+def test_a_file_without_provenance_is_never_overwritten(isolated_orchestrator, monkeypatch):
+    orch = isolated_orchestrator
+    _serve_series(monkeypatch)
+    note = server.config.documents_dir / "general" / SHARED_NAME
+    note.parent.mkdir()
+    note.write_text("# My own notes\n", encoding="utf-8")
+
+    result = orch.add_from_url(PART_1, "general")
+
+    assert Path(result["filepath"]).name != SHARED_NAME
+    assert note.read_text(encoding="utf-8") == "# My own notes\n"
+
+
+def test_a_file_that_cannot_be_read_is_never_overwritten(isolated_orchestrator, monkeypatch, capsys):
+    """A sharing violation or an offline cloud placeholder leaves the file's owner unproven."""
+    orch = isolated_orchestrator
+    _serve_series(monkeypatch)
+    held = server.config.documents_dir / "general" / SHARED_NAME
+    held.parent.mkdir()
+    held.write_text("# Locked by another program\n", encoding="utf-8")
+    open_path = Path.open
+
+    def deny_held(path, *args, **kwargs):
+        if path.name == SHARED_NAME:
+            raise PermissionError(13, "The process cannot access the file", str(path))
+        return open_path(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "open", deny_held)
+        result = orch.add_from_url(PART_1, "general")
+
+    assert Path(result["filepath"]).name == _hashed_name(PART_1, 8)
+    assert held.read_text(encoding="utf-8") == "# Locked by another program\n"
+    warning = capsys.readouterr().err
+    assert "[WARN] add_from_url: cannot read" in warning and SHARED_NAME in warning
+
+
+def test_a_taken_8_hex_name_moves_the_page_to_the_16_hex_name(isolated_orchestrator, monkeypatch):
+    orch = isolated_orchestrator
+    note = _hashed_name(PART_1, 8)
+    _, owner = _crowd_part_1_names(orch, monkeypatch, note)
+
+    result = orch.add_from_url(PART_1, "general")
+
+    assert Path(result["filepath"]).name == _hashed_name(PART_1, 16)
+    assert "Pin admission webhooks" in owner.read_text(encoding="utf-8")
+    assert (owner.parent / note).read_text(encoding="utf-8") == "# My own notes\n"
+
+
+def test_re_adding_after_a_16_hex_save_refreshes_that_file(isolated_orchestrator, monkeypatch):
+    orch = isolated_orchestrator
+    pages, _ = _crowd_part_1_names(orch, monkeypatch, _hashed_name(PART_1, 8))
+    first = orch.add_from_url(PART_1, "general")
+    pages[PART_1] = _page(TITLES[PART_1], "Revised guidance.")
+
+    second = orch.add_from_url(PART_1, "general")
+
+    assert Path(second["filepath"]).name == _hashed_name(PART_1, 16)
+    assert second["filepath"] == first["filepath"]
+    assert "Revised guidance." in Path(second["filepath"]).read_text(encoding="utf-8")
+
+
+def test_when_every_shorter_name_is_taken_the_full_digest_name_is_used(isolated_orchestrator, monkeypatch):
+    orch = isolated_orchestrator
+    notes = (_hashed_name(PART_1, 8), _hashed_name(PART_1, 16))
+    _, owner = _crowd_part_1_names(orch, monkeypatch, *notes)
+
+    result = orch.add_from_url(PART_1, "general")
+
+    assert Path(result["filepath"]).name == _hashed_name(PART_1, 64)
+    assert all((owner.parent / note).read_text(encoding="utf-8") == "# My own notes\n" for note in notes)
+
+
+def test_long_urls_sharing_the_marker_prefix_keep_separate_files(isolated_orchestrator, monkeypatch):
+    """Signed or tracking URLs can share far more than the part of a URL the marker keeps."""
+    orch = isolated_orchestrator
+    _serve(monkeypatch, {LONG_1: _page(SERIES, "Signed part one."), LONG_2: _page(SERIES, "Signed part two.")})
+
+    first = orch.add_from_url(LONG_1, "general")
+    second = orch.add_from_url(LONG_2, "general")
+
+    assert first["filepath"] != second["filepath"]
+    assert "Signed part one." in Path(first["filepath"]).read_text(encoding="utf-8")
+
+
+def test_re_adding_a_long_url_never_overwrites_another_page(isolated_orchestrator, monkeypatch):
+    orch = isolated_orchestrator
+    pages = _serve(monkeypatch, {LONG_1: _page(SERIES, "Signed part one."), LONG_2: _page(SERIES, "Signed part two.")})
+    first = orch.add_from_url(LONG_1, "general")["filepath"]
+    second = orch.add_from_url(LONG_2, "general")["filepath"]
+    pages[LONG_1] = _page(SERIES, "Signed part one, revised.")
+
+    orch.add_from_url(LONG_1, "general")
+
+    assert "Signed part one." in Path(first).read_text(encoding="utf-8")
+    assert "Signed part two." in Path(second).read_text(encoding="utf-8")
+
+
+def test_a_url_just_under_the_marker_limit_refreshes_in_place(isolated_orchestrator, monkeypatch):
+    """The marker of the longest URL kept whole must still fit in the part of the file that is read."""
+    orch = isolated_orchestrator
+    pages = _serve(monkeypatch, {NEAR_LIMIT: _page(SERIES, "First edition.")})
+    first = orch.add_from_url(NEAR_LIMIT, "general")
+    pages[NEAR_LIMIT] = _page(SERIES, "Second edition.")
+
+    second = orch.add_from_url(NEAR_LIMIT, "general")
+
+    assert second["filepath"] == first["filepath"]
+    assert "Second edition." in Path(first["filepath"]).read_text(encoding="utf-8")
+
+
+def test_a_category_outside_documents_dir_is_rejected_untouched(isolated_orchestrator, monkeypatch):
+    orch = isolated_orchestrator
+    _serve_series(monkeypatch)
+    outside = server.config.documents_dir.parent / "evil" / SHARED_NAME
+    outside.parent.mkdir()
+    outside.write_text("# Outside the corpus\n", encoding="utf-8")
+    opened = []
+    open_path = Path.open
+
+    def record(path, *args, **kwargs):
+        opened.append(path)
+        return open_path(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "open", record)
+        result = orch.add_from_url(PART_1, "../evil")
+
+    assert result["error"].startswith("Filepath rejected")
+    assert opened == []
+    assert list(outside.parent.iterdir()) == [outside]
+    assert outside.read_text(encoding="utf-8") == "# Outside the corpus\n"
+
+
+def test_untitled_pages_at_trailing_slash_urls_get_valid_distinct_files(isolated_orchestrator, monkeypatch):
+    orch = isolated_orchestrator
+    guide, faq = "https://docs.example.test/guide/", "https://docs.example.test/faq/"
+    _serve(
+        monkeypatch,
+        {
+            guide: _page(None, "Install the agent before the collector."),
+            faq: _page(None, "Restart the collector after every upgrade."),
+        },
+    )
+
+    first = orch.add_from_url(guide, "general")
+    second = orch.add_from_url(faq, "general")
+
+    assert Path(first["filepath"]).name == "page.md"
+    assert first["filepath"] != second["filepath"]
+    assert {doc["source"] for doc in orch.list_documents()} == {first["filepath"], second["filepath"]}
+
+
+def test_parallel_adds_cannot_both_claim_the_free_name(isolated_orchestrator, monkeypatch):
+    """Both name checks must not run before either write, e.g. while a reindex holds the index lock."""
+    orch = isolated_orchestrator
+    _serve_series(monkeypatch)
+    held = orch._index_lock
+    orch._index_lock = gate = _AnnouncingLock(held)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        with held:
+            futures = [pool.submit(orch.add_from_url, url, "general") for url in (PART_1, PART_2)]
+            assert gate.arrivals.acquire(timeout=5) and gate.arrivals.acquire(timeout=5)
+        paths = {future.result(timeout=30)["filepath"] for future in futures}
+
+    assert len(paths) == 2
+    assert {doc["source"] for doc in orch.list_documents()} == paths
