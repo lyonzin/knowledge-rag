@@ -88,7 +88,8 @@ MCP_TOOL_SIGNATURES = {
     "remove_document": ["filepath", "delete_file"],
     "reindex_documents": ["force", "full_rebuild", "resume"],
     "list_categories": [],
-    "list_documents": ["category"],
+    # #260: appended optional ``limit``/``offset`` paging; ``category`` stays first.
+    "list_documents": ["category", "limit", "offset"],
     "get_index_stats": [],
     "get_reindex_status": [],
     "evaluate_retrieval": ["test_cases"],

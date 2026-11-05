@@ -13,6 +13,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+### Unreleased
+
+**Added:**
+
+- `list_documents` takes optional `limit` (default 100, at most 200) and `offset` arguments and reports `total`, `offset` and `limit` next to `count`, so a large index is listed page by page instead of in one huge response (#260).
+
+**Changed:**
+
+- `list_documents` returns at most 100 documents by default, ordered by source path so pages stay stable while files are re-indexed. `count` is now the number of documents in the page; `total` is the number that match the filter. To check whether one file is indexed, use `get_document` (#260).
+
+**Fixed:**
+
+- The default `search_knowledge` snippet starts at the matching chunk. It used to start at the neighboring chunk added before it for context, so the ~500-character snippet often held only text from before the match. `content_length` is still the full size, and a new `match_offset` field tells where the match starts in the full content (#260).
+- `search_similar` finds similar documents for long reference documents. The reference's own chunks are now excluded in the query; filtered out afterwards, 25 or more of them could take every candidate slot and the tool answered `no_results` (#260).
+
+---
+
 ### v4.11.1 (2026-10-25) — Fresh-install startup fix and Windows-safe state writes
 
 Patch release. On v4.10.0 and v4.11.0, every fresh install and every new data directory, new Docker volumes included, failed to start with `Embedding function conflict … persisted: default`. Installs that already hit the error start normally after upgrading. No breaking changes and no migration steps. Thanks to @mmathoosh and @rshun for the reports, @franzgranlund for tracing it to the preflight probe, @cauger-dev for the detailed Windows analysis in #249, and @vishalhabib99 and @viniciussantos45 for #236 and #242.

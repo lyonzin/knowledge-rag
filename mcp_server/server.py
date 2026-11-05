@@ -3739,7 +3739,8 @@ class KnowledgeOrchestrator:
             window: Number of adjacent chunks to fetch on each side (default: 1)
 
         Returns:
-            Results with expanded content field
+            Results with expanded content field; ``match_offset`` marks where the
+            matched chunk starts inside it, so snippets can skip the context before it.
         """
         if not results:
             return results
@@ -3792,6 +3793,7 @@ class KnowledgeOrchestrator:
                 expanded = "\n\n".join(parts_before + [results[result_idx]["content"]] + parts_after)
                 results[result_idx]["content"] = expanded
                 results[result_idx]["context_expanded"] = True
+                results[result_idx]["match_offset"] = sum(len(part) + len("\n\n") for part in parts_before)
 
         return results
 
@@ -4136,9 +4138,12 @@ class KnowledgeOrchestrator:
             return []
 
         try:
+            # Exclude the reference in the query: filtering afterwards let a long
+            # document's own chunks take every candidate slot.
             similar = self.collection.query(
                 query_embeddings=[query_embedding],
                 n_results=max_results + 20,
+                where={"doc_id": {"$ne": doc_id}},
                 include=["documents", "metadatas", "distances"],
             )
         except Exception:
@@ -4153,8 +4158,6 @@ class KnowledgeOrchestrator:
             meta = (similar["metadatas"][0][i] or {}) if similar["metadatas"] else {}
             source = meta.get("source", "")
 
-            if meta.get("doc_id") == doc_id:
-                continue
             if source in seen_sources:
                 continue
             seen_sources.add(source)
@@ -4747,9 +4750,10 @@ def search_knowledge(
         min_score: Minimum normalized relevance score (0.0–1.0) to include a result. Results scoring
             below this threshold are discarded. Default 0.0 returns all results. Use 0.2–0.4 to cut
             low-relevance noise.
-        snippet_mode: When true (default), truncates content to ~500 characters at a natural break
-            point and adds a content_length field with the original size. Use get_document() to
-            fetch full content when needed. Set to false to return full chunk content.
+        snippet_mode: When true (default), truncates content to ~500 characters from the start of the
+            matching chunk, at a natural break point, and adds a content_length field with the full
+            size. Use get_document() to fetch full content when needed. Set to false to return the full
+            content, which can include adjacent chunks; match_offset, when present, is where the match starts.
         search_method: Dispatch selector (v4.8.2+). One of ``"auto"`` (router picks FTS5 fast-path
             for lexical queries when enabled, hybrid otherwise), ``"hybrid"`` (force hybrid path —
             kill switch for suspected router misclassification), or ``"fts5"`` (force FTS5 fast-path
@@ -4824,7 +4828,11 @@ def search_knowledge(
 
     if snippet_mode:
         results = [
-            {**row, "content": _make_snippet(row["content"]), "content_length": len(row.get("content", ""))}
+            {
+                **row,
+                "content": _make_snippet(row["content"][row.get("match_offset", 0) :]),
+                "content_length": len(row.get("content", "")),
+            }
             for row in results
         ]
 
@@ -5018,12 +5026,15 @@ def list_categories() -> str:
     )
 
 
+_LIST_DOCUMENTS_MAX_LIMIT = 200  # ~75 KB of JSON: stays under common MCP client output limits
+
+
 @mcp.tool()
 @rate_limited
 @instrument("list_documents")
-def list_documents(category: Optional[str] = None) -> str:
+def list_documents(category: Optional[str] = None, limit: int = 100, offset: int = 0) -> str:
     """
-    List all indexed documents, optionally filtered by category.
+    List indexed documents one page at a time, optionally filtered by category.
 
     Read-only. No side effects.
 
@@ -5031,19 +5042,35 @@ def list_documents(category: Optional[str] = None) -> str:
         category: Optional category filter. Must be a valid category name — call
             list_categories() to see available options (e.g., security, ctf, logscale,
             development, general, redteam, blueteam).
+        limit: Maximum number of documents to return (default: 100, max: 200).
+        offset: Number of matching documents to skip (default: 0). For the next page, call
+            again with offset + count until offset reaches total.
 
     Returns:
-        JSON string with list of document filepaths, categories, and metadata for each indexed file.
+        JSON string with total (documents matching the filter), offset, limit, count (documents
+        in this page) and the filepaths, categories, and metadata of this page, ordered by filepath.
 
-    Usage: Use to browse what's in the index or verify a specific file is indexed. Use
-    list_categories() first to see valid category names. Use search_knowledge() when you
-    want to find documents by topic rather than browsing the full list. Use get_document()
-    to read a specific file once you have its filepath.
+    Usage: Use to browse what's in the index. To check one known file, call get_document()
+    instead of scanning pages. Use list_categories() first to see valid category names. Use
+    search_knowledge() when you want to find documents by topic rather than browsing the full
+    list. Use get_document() to read a specific file once you have its filepath.
     """
+    offset = max(0, offset)
+    limit = max(1, min(limit, _LIST_DOCUMENTS_MAX_LIMIT))
     orchestrator = get_orchestrator()
-    docs = orchestrator.list_documents(category=category)
+    # Source order keeps pages stable: re-indexing an edited file moves it to the end of the index.
+    docs = sorted(orchestrator.list_documents(category=category), key=lambda doc: doc["source"])
+    page = docs[offset : offset + limit]
     return json.dumps(
-        {"status": "success", "filter": category or "all", "count": len(docs), "documents": docs},
+        {
+            "status": "success",
+            "filter": category or "all",
+            "total": len(docs),
+            "offset": offset,
+            "limit": limit,
+            "count": len(page),
+            "documents": page,
+        },
         indent=2,
         ensure_ascii=False,
     )

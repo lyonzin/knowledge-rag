@@ -286,6 +286,28 @@ class TestSearchSimilar:
         assert r["status"] == "error"
 
 
+class TestListDocuments:
+    def test_pages_category_matches_in_source_order_and_reports_their_total(self, monkeypatch):
+        from mcp_server import server
+
+        orchestrator = object.__new__(server.KnowledgeOrchestrator)
+        orchestrator._indexed_docs = {  # index order differs from source order, as after re-indexing
+            f"doc{index}": {"source": f"doc{index}.md", "category": "security" if index % 2 else "general"}
+            for index in reversed(range(7))
+        }
+        monkeypatch.setattr(server, "get_orchestrator", lambda: orchestrator)
+        r = json.loads(server.list_documents("security", limit=2, offset=1))
+        assert [doc["id"] for doc in r["documents"]] == ["doc3", "doc5"]
+        assert (r["total"], r["offset"], r["limit"], r["count"]) == (3, 1, 2, 2)
+
+    @pytest.mark.parametrize(("limit", "offset", "expected"), [(0, -3, (1, 0)), (5000, 0, (200, 0))])
+    def test_out_of_range_paging_is_clamped(self, mock_orch, limit, offset, expected):
+        from mcp_server.server import list_documents
+
+        r = json.loads(list_documents(limit=limit, offset=offset))
+        assert (r["limit"], r["offset"]) == expected
+
+
 class TestEvaluateRetrieval:
     def test_invalid_json_error(self, mock_orch):
         from mcp_server.server import evaluate_retrieval
