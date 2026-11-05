@@ -2,17 +2,19 @@
 
 import json
 import sys
+import tracemalloc
 
 import pytest
 
 from bench.dashboard.build import build_payload
-from bench.test_bench_memory import _trace_allocations
+from bench.test_bench_memory import _benchmark_memory, _trace_peak
 from scripts import check_perf_regression
 from scripts.audit_requirements import dependency_pins
-from scripts.check_perf_regression import IMPROVED, NEW, REGRESSED, REMOVED, UNCHANGED, judge
+from scripts.check_perf_regression import BYTES_FLOOR, IMPROVED, NEW, REGRESSED, REMOVED, UNCHANGED, judge
 
 MIB = 1024 * 1024
 THRESHOLD = check_perf_regression.REGRESSION_THRESHOLD
+MISSING_VALUE = {"measurement": "tracemalloc_peak_bytes", "workload_version": 3}
 
 
 def _row(name, seconds, traced=None, version=1):
@@ -21,7 +23,6 @@ def _row(name, seconds, traced=None, version=1):
         row["extra_info"] = {
             "measurement": "tracemalloc_peak_bytes",
             "tracemalloc_peak_bytes": traced,
-            "tracemalloc_retained_bytes": 1024,
             "memory_budget_bytes": 80 * MIB,
             "workload_version": version,
         }
@@ -41,10 +42,21 @@ def _gate(tmp_path, monkeypatch, master_runs, branch_runs):
     return check_perf_regression.main()
 
 
+class _RecordingBenchmark:
+    """Just enough of pytest-benchmark's fixture to run the memory benchmark helper."""
+
+    def __init__(self):
+        self.extra_info = {}
+
+    def pedantic(self, target, iterations, rounds):
+        for _ in range(iterations * rounds):
+            target()
+
+
 @pytest.fixture(autouse=True)
 def _outside_a_labeled_run(monkeypatch):
     """Gate tests start as an ordinary push unless they set the triggering event themselves."""
-    for name in ("PR_EVENT_ACTION", "PR_EVENT_LABEL", "PR_LABELS"):
+    for name in ("PR_EVENT_ACTION", "PR_EVENT_LABEL"):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -67,19 +79,82 @@ def test_given_a_benchmark_missing_on_one_side_when_judged_then_it_is_not_compar
     assert judge(master, branch, THRESHOLD) == (verdict, None)
 
 
+@pytest.mark.parametrize(
+    ("master", "branch", "verdict"),
+    [
+        (23_752, 28_502, UNCHANGED),  # +20%, but only 4.6 KiB more
+        (838_808, 1_006_570, REGRESSED),  # +20% and 164 KiB more
+    ],
+)
+def test_given_traced_bytes_when_judged_then_a_regression_must_also_exceed_the_floor(master, branch, verdict):
+    assert judge([master, master], [branch, branch], THRESHOLD, BYTES_FLOOR)[0] == verdict
+
+
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    [
+        ((_row("memory", 1, traced=23_752, version=3), _row("memory", 1, traced=28_502, version=3)), 0),
+        ((_row("memory", 1, traced=838_808, version=3), _row("memory", 1, traced=1_006_570, version=3)), 1),
+        ((_row("search", 1e-6), _row("search", 1.2e-6)), 1),
+    ],
+)
+def test_given_a_twenty_percent_growth_when_gated_then_only_bytes_need_the_floor(tmp_path, monkeypatch, case, expected):
+    assert _gate(tmp_path, monkeypatch, [[case[0]]], [[case[1]]]) == expected
+
+
 def test_given_noise_one_run_pair_would_fail_when_gated_interleaved_then_it_passes(tmp_path, monkeypatch):
     master = [[_row("search", 1.0)], [_row("search", 1.2)]]
     branch = [[_row("search", 1.15)], [_row("search", 1.25)]]
     assert _gate(tmp_path, monkeypatch, master, branch) == 0
 
 
-def test_given_a_benchmark_missing_on_one_side_when_gated_then_the_rest_still_decides(tmp_path, monkeypatch, capsys):
-    master = [[_row("search", 1), _row("removed", 1)]]
-    branch = [[_row("search", 1.2), _row("added", 1)]]
+def test_given_master_runs_spread_beyond_the_threshold_when_gated_then_it_warns_of_the_floor(
+    tmp_path, monkeypatch, capsys
+):
+    master = [[_row("search", 1.0)], [_row("search", 1.5)]]
+    branch = [[_row("search", 1.2)], [_row("search", 1.3)]]
+    assert _gate(tmp_path, monkeypatch, master, branch) == 0
+    assert "only a branch above 1.65 seconds (+65.0% over the fastest master run) fails" in capsys.readouterr().out
+
+
+def test_given_a_benchmark_missing_from_the_branch_when_gated_then_it_fails(tmp_path, monkeypatch, capsys):
+    master = [[_row("search", 1), _row("renamed", 1)]]
+    branch = [[_row("search", 1), _row("renamed_v2", 1)]]
     assert _gate(tmp_path, monkeypatch, master, branch) == 1
-    output = capsys.readouterr()
-    assert "['added']" in output.out
-    assert "['removed']" in output.err
+    assert "[REMOVED] renamed: measured on master, missing from every branch run" in capsys.readouterr().err
+
+
+def test_given_a_new_benchmark_when_gated_then_it_is_only_reported(tmp_path, monkeypatch, capsys):
+    assert _gate(tmp_path, monkeypatch, [[_row("search", 1)]], [[_row("search", 1), _row("added", 1)]]) == 0
+    assert "['added']" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        (
+            _row("test_bench_query_cache_5000_entries", 1),
+            _row("test_bench_query_cache_5000_entries", 1, traced=9000, version=3),
+            "legacy artifact has no tracemalloc byte measurement",
+        ),
+        (_row("memory", 1, traced=1000, version=2), _row("memory", 1, traced=9000, version=3), "workload definition"),
+        (_row("memory", 1, traced=0, version=3), _row("memory", 1, traced=0, version=3), "zero baseline"),
+        ({"name": "memory", "stats": {"median": 1}, "extra_info": MISSING_VALUE}, _row("memory", 1), "no bytes value"),
+        (_row("memory", 1), _row("memory", 1, traced=9000, version=1), "different units: bytes / seconds"),
+    ],
+)
+def test_given_runs_that_cannot_be_compared_when_gated_then_it_fails_with_the_reason(
+    tmp_path, monkeypatch, capsys, case
+):
+    master, branch, reason = case
+    assert _gate(tmp_path, monkeypatch, [[master]], [[branch]]) == 1
+    assert f"[INCOMPARABLE] {master['name']}: {reason}" in capsys.readouterr().err
+
+
+def test_given_a_duplicate_benchmark_name_in_one_run_when_gated_then_the_input_is_rejected(tmp_path, monkeypatch):
+    with pytest.raises(SystemExit) as raised:
+        _gate(tmp_path, monkeypatch, [[_row("search", 1), _row("search", 2)]], [[_row("search", 1)]])
+    assert raised.value.code == 2
 
 
 def test_given_a_missing_master_file_when_gated_then_it_fails(tmp_path, monkeypatch):
@@ -102,38 +177,61 @@ def test_given_a_missing_master_file_when_gated_then_it_fails(tmp_path, monkeypa
         (("labeled", "skip-changelog"), 1),
     ],
 )
-def test_given_the_bypass_label_on_the_pr_then_only_the_run_adding_it_bypasses(tmp_path, monkeypatch, event, expected):
+def test_given_gate_failures_then_only_the_run_adding_the_bypass_label_passes(tmp_path, monkeypatch, event, expected):
+    # The label stays on the PR in every case; only the event that started the run differs.
     monkeypatch.setenv("PR_LABELS", "skip-perf-gate")
     monkeypatch.setenv("PR_EVENT_ACTION", event[0])
     monkeypatch.setenv("PR_EVENT_LABEL", event[1])
-    assert _gate(tmp_path, monkeypatch, [[_row("search", 1)]], [[_row("search", 2)]]) == expected
+    master = [[_row("search", 1), _row("removed", 1), _row("memory", 1, traced=1000, version=2)]]
+    branch = [[_row("search", 2), _row("memory", 1, traced=1000, version=3)]]
+    assert _gate(tmp_path, monkeypatch, master, branch) == expected
+
+
+def test_given_a_failure_when_reported_then_it_says_the_bypass_label_must_be_added_last(tmp_path, monkeypatch, capsys):
+    _gate(tmp_path, monkeypatch, [[_row("search", 1)]], [[_row("search", 2)]])
+    assert "the last label added" in capsys.readouterr().err
 
 
 def test_given_four_times_the_objects_when_traced_then_the_peak_grows_fourfold():
     # Workload version 2 sampled RSS, which read one 4 KiB page whatever the workload allocated:
     # small objects reuse pages the allocator already holds.
-    small, large = (
-        _trace_allocations(lambda count=count: [bytearray(100) for _ in range(count)])["peak_bytes"]
-        for count in (10_000, 40_000)
-    )
-    assert large / small == pytest.approx(4, rel=0.05)
+    def peak(count):
+        # The least of three runs, so another thread allocating during one of them cannot inflate it.
+        return min(_trace_peak(lambda: [bytearray(100) for _ in range(count)]) for _ in range(3))
+
+    assert peak(40_000) / peak(10_000) == pytest.approx(4, rel=0.05)
 
 
-def test_legacy_memory_row_is_incomparable_but_latency_still_blocks(tmp_path, monkeypatch, capsys):
-    old = [_row("test_bench_query_cache_5000_entries", 1), _row("search", 1)]
-    new = [_row("test_bench_query_cache_5000_entries", 1, traced=9000, version=3), _row("search", 1.2)]
-    assert _gate(tmp_path, monkeypatch, [old], [new]) == 1
-    output = capsys.readouterr()
-    assert "legacy artifact has no tracemalloc byte measurement" in output.out
-    assert "search" in output.err
-    assert "+20.0%" in output.err
+def test_given_tracemalloc_already_tracing_when_traced_then_it_refuses_and_keeps_the_outer_trace():
+    tracemalloc.start()
+    try:
+        with pytest.raises(RuntimeError, match="already tracing"):
+            _trace_peak(list)
+        assert tracemalloc.is_tracing()
+    finally:
+        tracemalloc.stop()
+
+
+def test_given_the_memory_helper_output_then_gate_and_dashboard_read_the_same_bytes():
+    benchmark = _RecordingBenchmark()
+    _benchmark_memory(benchmark, lambda: bytearray(MIB), 2 * MIB)
+    row = {
+        "name": "test_bench_contract",
+        "fullname": "bench/test_bench_memory.py::test_bench_contract",
+        "stats": {"median": 0.001},
+        "extra_info": benchmark.extra_info,
+    }
+    gate = check_perf_regression._measurement(row)
+    dashboard = build_payload({"benchmarks": [row]}, "abc123", "9.9.9")["results"][0]
+    read = (gate["unit"], gate["median"], dashboard["measurement_value"], dashboard["budget_bytes"])
+    assert read == ("bytes", pytest.approx(MIB, rel=0.01), pytest.approx(MIB, rel=0.01), 2 * MIB)
 
 
 def test_traced_growth_blocks_using_bytes_even_if_workload_time_improves(tmp_path, monkeypatch, capsys):
-    old = [_row("memory", 9, traced=10_000, version=3)]
-    new = [_row("memory", 1, traced=12_000, version=3)]
+    old = [_row("memory", 9, traced=1_000_000, version=3)]
+    new = [_row("memory", 1, traced=1_200_000, version=3)]
     assert _gate(tmp_path, monkeypatch, [old], [new]) == 1
-    assert "10000 -> 12000 bytes" in capsys.readouterr().err
+    assert "1000000 -> 1200000 bytes (+20.0%)" in capsys.readouterr().err
 
 
 def test_memory_timer_is_not_a_byte_metric(tmp_path, monkeypatch):
@@ -146,20 +244,6 @@ def test_exactly_ten_percent_latency_growth_is_not_above_threshold(tmp_path, mon
     assert _gate(tmp_path, monkeypatch, [[_row("search", 1)]], [[_row("search", 1.1)]]) == 0
 
 
-def test_new_workload_skips_only_its_row(tmp_path, monkeypatch, capsys):
-    old = [_row("memory", 1, traced=1000, version=2), _row("search", 1)]
-    new = [_row("memory", 1, traced=9000, version=3), _row("search", 1.2)]
-    assert _gate(tmp_path, monkeypatch, [old], [new]) == 1
-    assert "workload definition changed" in capsys.readouterr().out
-
-
-def test_no_comparable_measurements_cannot_claim_success(tmp_path, monkeypatch, capsys):
-    old = [_row("memory", 1, traced=0, version=3)]
-    new = [_row("memory", 1, traced=0, version=3)]
-    assert _gate(tmp_path, monkeypatch, [old], [new]) == 2
-    assert "zero baseline" in capsys.readouterr().out
-
-
 @pytest.mark.parametrize("value", [float("nan"), -1, "50 MB"])
 def test_invalid_byte_measurements_fail_validation(value):
     with pytest.raises(ValueError, match="Invalid bytes"):
@@ -170,7 +254,7 @@ def test_dashboard_keeps_byte_units_and_marks_legacy_unavailable():
     rows = [
         _row("search", 0.001),
         _row("memory", 9, traced=10_000, version=3),
-        _row("test_bench_orchestrator_idle_rss", 9),
+        _row("test_bench_orchestrator_idle_memory", 9),
     ]
     result = build_payload({"benchmarks": rows}, "abc123", "3.9.0")
     by_name = {row["name"]: row for row in result["results"]}
@@ -181,7 +265,7 @@ def test_dashboard_keeps_byte_units_and_marks_legacy_unavailable():
     assert by_name["memory"]["ops"] is None
     assert by_name["search"]["measurement_value"] == 1_000_000
     assert by_name["search"]["measurement_unit"] == "nanoseconds"
-    assert by_name["test_bench_orchestrator_idle_rss"]["measurement_value"] is None
+    assert by_name["test_bench_orchestrator_idle_memory"]["measurement_value"] is None
 
 
 def test_audit_exports_requested_and_transitive_dependencies_only():

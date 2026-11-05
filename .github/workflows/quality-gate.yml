@@ -548,6 +548,10 @@ jobs:
     steps:
       - name: Checkout PR branch
         uses: actions/checkout@v7
+        with:
+          # HEAD is the PR merge commit; HEAD^1 is the master commit it is
+          # tested against, the same baseline as test-count and api-surface.
+          fetch-depth: 2
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -556,11 +560,13 @@ jobs:
         run: |
           pip install -e .
           pip install pytest pytest-benchmark psutil numpy
-      - name: Check out master in a separate worktree
+      - name: Check out master (HEAD^1) in a separate worktree
         shell: bash
         run: |
-          git fetch origin master:master-base
-          git worktree add --detach "$RUNNER_TEMP/knowledge-rag-baseline" master-base
+          git worktree add --detach "$RUNNER_TEMP/knowledge-rag-baseline" HEAD^1
+          if ! git diff --quiet HEAD^1 -- bench/; then
+            echo "::warning title=perf-bench::This PR changes bench/, so a changed benchmark runs different code on each side and its comparison is not like-for-like."
+          fi
       - name: Benchmark branch and master interleaved
         shell: bash
         # Sub-100 µs medians move ±15–19% between runs of identical code and

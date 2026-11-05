@@ -15,34 +15,49 @@ import statistics
 import tracemalloc
 from collections.abc import Callable
 
-MIB = 1024 * 1024
+KIB = 1024
+MIB = 1024 * KIB
 ROUNDS = 5
 WORKLOAD_VERSION = 3
+IDLE_EMBEDDERS = 50
+CACHE_PUTS = 5000
+CACHE_MAX_SIZE = 1000
+CACHE_TTL_SECONDS = 300
+CACHE_PAYLOAD_CHARS = 100
+CACHE_MAX_RESULTS = 5
+CACHE_HYBRID_ALPHA = 0.3
+# About 10x the peaks measured on Python 3.14 (23,752 and 838,808 bytes), leaving room for
+# CI's Python 3.12. The gate compares against master; these absolute guards hold even when
+# the skip-perf-gate label bypasses it.
+IDLE_EMBEDDERS_BUDGET_BYTES = 256 * KIB
+CACHE_BUDGET_BYTES = 8 * MIB
 
 
-def _trace_allocations(operation: Callable[[], object]) -> dict[str, int]:
-    """Return the bytes the operation held at its peak and still holds after cleanup.
-
-    The peak is a running maximum, so it covers the returned object before it is dropped.
-    """
+def _trace_peak(operation: Callable[[], object]) -> int:
+    """Return the most bytes of Python allocations the operation held at once, its result included."""
+    if tracemalloc.is_tracing():
+        raise RuntimeError(
+            "tracemalloc is already tracing (PYTHONTRACEMALLOC or -X tracemalloc): start() would keep the "
+            "outer peak and stop() would end the outer trace. Run the memory benchmarks without it."
+        )
+    # A full collection first makes automatic collections fall at the same points in every round.
     gc.collect()
     tracemalloc.start()
     try:
         operation()
-        gc.collect()
-        retained, peak = tracemalloc.get_traced_memory()
+        _, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
-    return {"peak_bytes": peak, "retained_bytes": retained}
+    return peak
 
 
 def _benchmark_memory(benchmark, operation: Callable[[], object], budget_bytes: int) -> None:
-    """Export the median traced peak for the perf gate and fail above the fixed budget."""
-    samples: list[dict[str, int]] = []
+    """Export the median traced peak for the perf gate and fail any round above the absolute budget."""
+    peaks: list[int] = []
 
     def measure() -> int:
-        samples.append(_trace_allocations(operation))
-        return samples[-1]["peak_bytes"]
+        peaks.append(_trace_peak(operation))
+        return peaks[-1]
 
     benchmark.pedantic(measure, iterations=1, rounds=ROUNDS)
     benchmark.extra_info.update(
@@ -50,20 +65,22 @@ def _benchmark_memory(benchmark, operation: Callable[[], object], budget_bytes: 
             "measurement": "tracemalloc_peak_bytes",
             "unit": "bytes",
             "workload_version": WORKLOAD_VERSION,
-            "tracemalloc_peak_bytes": statistics.median(sample["peak_bytes"] for sample in samples),
-            "tracemalloc_retained_bytes": statistics.median(sample["retained_bytes"] for sample in samples),
+            "tracemalloc_peak_bytes": statistics.median(peaks),
             "memory_budget_bytes": budget_bytes,
-            "tracemalloc_samples": samples,
+            "tracemalloc_samples": peaks,
         }
     )
-    assert max(sample["peak_bytes"] for sample in samples) < budget_bytes, samples
+    assert max(peaks) < budget_bytes, peaks
 
 
-def test_bench_orchestrator_idle_rss(benchmark, fake_embed_fn):
-    """Fifty lazy embedders must fit a fixed allocation budget."""
+def test_bench_orchestrator_idle_memory(benchmark, fake_embed_fn):
+    """Lazy embedders must stay within a fixed allocation budget until first use."""
     from mcp_server.server import FastEmbedEmbeddings
 
-    _benchmark_memory(benchmark, lambda: [FastEmbedEmbeddings() for _ in range(50)], 50 * MIB)
+    def create_embedders():
+        return [FastEmbedEmbeddings() for _ in range(IDLE_EMBEDDERS)]
+
+    _benchmark_memory(benchmark, create_embedders, IDLE_EMBEDDERS_BUDGET_BYTES)
 
 
 def test_bench_query_cache_5000_entries(benchmark):
@@ -71,9 +88,10 @@ def test_bench_query_cache_5000_entries(benchmark):
     from mcp_server.server import QueryCache
 
     def fill_cache():
-        cache = QueryCache(max_size=1000, ttl_seconds=300)
-        for index in range(5000):
-            cache.put(f"q-{index}", 5, None, 0.3, [{"content": f"{index}:" + "x" * 100}])
+        cache = QueryCache(max_size=CACHE_MAX_SIZE, ttl_seconds=CACHE_TTL_SECONDS)
+        for index in range(CACHE_PUTS):
+            content = f"{index}:" + "x" * CACHE_PAYLOAD_CHARS
+            cache.put(f"q-{index}", CACHE_MAX_RESULTS, None, CACHE_HYBRID_ALPHA, [{"content": content}])
         return cache
 
-    _benchmark_memory(benchmark, fill_cache, 80 * MIB)
+    _benchmark_memory(benchmark, fill_cache, CACHE_BUDGET_BYTES)
