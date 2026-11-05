@@ -1,0 +1,247 @@
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║                                                                              ║
+# ║                    KNOWLEDGE RAG — Configuration File                        ║
+# ║                                                                              ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+#
+# This file controls how Knowledge RAG indexes, searches, and organizes
+# your documents. Every field is optional — sensible defaults are used
+# when omitted.
+#
+# Quick start:
+#   1. Copy this file → config.yaml
+#   2. Set documents_dir to your folder
+#   3. Run the server — everything else works out of the box
+#
+# Want a head start? Check the presets/ folder for domain-specific configs:
+#   presets/cybersecurity.yaml  — Offensive/defensive security, CTFs, threat hunting
+#   presets/developer.yaml      — Software engineering, APIs, DevOps
+#   presets/research.yaml       — Academic research, papers, studies
+#   presets/general.yaml        — Blank slate, zero domain logic
+#
+# Usage:  cp presets/developer.yaml config.yaml
+#
+# Need help? https://github.com/lyonzin/knowledge-rag
+
+
+# ============================================================================
+# PATHS
+# ============================================================================
+# Where your data lives. Relative paths resolve from this file's location.
+# Absolute paths work too (e.g., /home/user/my-docs or C:\Users\you\docs).
+
+paths:
+  # Folder containing your documents (scanned recursively).
+  # This is the only path most users need to change.
+  documents_dir: "./documents"
+
+  # Internal storage for indexes and embeddings.
+  # You generally don't need to touch this.
+  data_dir: "./data"
+
+  # Persistent cache for embedding models (~250MB).
+  # Prevents re-downloading after reboots (especially on Linux where /tmp is cleared).
+  # Default: ./models_cache (relative to project root)
+  models_cache_dir: "./models_cache"
+
+
+# ============================================================================
+# DOCUMENTS
+# ============================================================================
+# Control which files get indexed and how they're processed.
+
+documents:
+  # File types to index. Only files with these extensions are processed.
+  # Remove or comment out formats you don't need.
+  supported_formats:
+    - .md        # Markdown
+    - .txt       # Plain text
+    - .pdf       # PDF documents
+    - .docx      # Word documents
+    - .py        # Python source code
+    - .c         # C source code
+    - .h         # C/C++ header files
+    - .cpp       # C++ source code
+    - .js        # JavaScript
+    - .jsx       # React JSX
+    - .ts        # TypeScript
+    - .tsx       # React TypeScript TSX
+    - .json      # JSON files
+    - .xml       # XML files
+    # - .xlsx    # Excel spreadsheets
+    # - .pptx    # PowerPoint presentations
+    # - .csv     # CSV data files
+    # - .ipynb   # Jupyter Notebooks (extracts markdown + code cells)
+    # - .mq4     # MetaTrader MQL4 source (opt-in, add to enable)
+    # - .mqh     # MetaTrader MQL4/5 headers (opt-in, add to enable)
+
+  # Exclude patterns — skip files/directories matching these patterns.
+  # Uses fnmatch glob syntax. Patterns match against relative paths AND
+  # individual path components (so "node_modules" matches at any depth).
+  #
+  # Examples:
+  #   exclude_patterns:
+  #     - "node_modules"     # Skip node_modules at any depth
+  #     - ".git"             # Skip .git directories
+  #     - "__pycache__"      # Skip Python cache
+  #     - ".venv"            # Skip virtual environments
+  #     - "*.tmp"            # Skip .tmp files anywhere
+  #     - "drafts/*"         # Skip everything in top-level drafts/
+  #
+  # Default: [] (nothing excluded — all supported files are indexed)
+  exclude_patterns: []
+
+  # How documents are split into searchable chunks.
+  #
+  #   chunk_size    → Max characters per chunk. Larger = more context per
+  #                   result, but less precise. Smaller = more precise,
+  #                   but may lose context.
+  #
+  #   chunk_overlap → Characters shared between consecutive chunks.
+  #                   Prevents information from being cut at chunk boundaries.
+  #
+  # Recommended presets:
+  #   Short notes/snippets:  chunk_size: 500,  chunk_overlap: 100
+  #   General use (default): chunk_size: 1000, chunk_overlap: 200
+  #   Long technical docs:   chunk_size: 1500, chunk_overlap: 300
+  chunking:
+    chunk_size: 1000
+    chunk_overlap: 200
+
+
+# ============================================================================
+# MODELS
+# ============================================================================
+# AI models used for understanding and ranking your documents.
+# Defaults work well for most cases — only change if you know what you're doing.
+
+models:
+  # Embedding model — converts text into vectors for semantic search.
+  # Runs locally via ONNX (no API key needed, no data leaves your machine).
+  #
+  # Options (from fastest to most accurate):
+  #   "BAAI/bge-small-en-v1.5"    → 384 dims, ~33MB, fast    (default)
+  #   "BAAI/bge-base-en-v1.5"     → 768 dims, ~130MB, balanced
+  #   "BAAI/bge-large-en-v1.5"    → 1024 dims, ~335MB, most accurate
+  #
+  # Multilingual alternatives:
+  #   "BAAI/bge-small-zh-v1.5"         → Chinese
+  #   "intfloat/multilingual-e5-small"  → 100+ languages
+  #
+  # WARNING: Changing this after indexing requires a full reindex.
+  embedding:
+    model: "BAAI/bge-small-en-v1.5"
+    dimensions: 384
+    # GPU acceleration for ONNX embeddings (5-10x faster indexing).
+    # Requires: pip install knowledge-rag[gpu]  (installs onnxruntime-gpu)
+    # Falls back to CPU automatically if CUDA is unavailable.
+    gpu: false
+
+  # Reranker — re-scores search results for better accuracy.
+  # Adds ~50-100ms per query but significantly improves result quality.
+  # Set enabled: false on low-resource machines if search feels slow.
+  reranker:
+    enabled: true
+    model: "Xenova/ms-marco-MiniLM-L-6-v2"
+    # How many extra candidates to fetch before reranking.
+    # Higher = better accuracy but slower. 3 is a good balance.
+    top_k_multiplier: 3
+
+
+# ============================================================================
+# SEARCH
+# ============================================================================
+# Control search behavior and result limits.
+
+search:
+  # Number of results returned by default when no limit is specified.
+  default_results: 5
+
+  # Hard maximum — even if a client requests more, cap at this number.
+  max_results: 20
+
+  # ChromaDB collection name. Change this to maintain separate
+  # knowledge bases in the same data directory.
+  # Example: "work_kb", "research_kb", "personal_kb"
+  collection_name: "knowledge_base"
+
+
+# ============================================================================
+# CATEGORIES
+# ============================================================================
+# Organize documents into categories based on their folder path.
+# When a document's path contains a key below, it gets tagged with
+# that category — enabling filtered searches.
+#
+# How it works:
+#   A file at documents/recipes/italian/pasta.md
+#   matches the pattern "recipes/italian" → category "italian"
+#   and also matches "recipes" → category "cooking"
+#   (most specific match wins)
+#
+# Set to empty {} to disable auto-categorization entirely.
+# Documents will still be searchable — just without category filters.
+#
+# ┌─────────────────────────────────────────────────────────────────────┐
+# │  path pattern (in documents_dir)    │    category name              │
+# ├─────────────────────────────────────┼───────────────────────────────┤
+# │  "recipes/italian"                  │    "italian"                  │
+# │  "recipes"                          │    "cooking"                  │
+# │  "work/projects"                    │    "projects"                 │
+# │  "journal"                          │    "personal"                 │
+# └─────────────────────────────────────┴───────────────────────────────┘
+
+category_mappings: {}
+
+
+# ============================================================================
+# KEYWORD ROUTING
+# ============================================================================
+# Route search queries to specific categories based on keywords.
+# When a query contains any of these keywords, results from that
+# category are prioritized.
+#
+# This is a PERFORMANCE optimization, not a filter — results from
+# other categories still appear, just ranked lower.
+#
+# Set to empty {} for pure semantic search with no keyword bias.
+
+keyword_routes: {}
+
+
+# ============================================================================
+# QUERY EXPANSION
+# ============================================================================
+# Expand search terms with synonyms and abbreviations.
+# When someone searches for "JS", also search for "JavaScript".
+# This improves BM25 (keyword) recall without affecting semantic search.
+#
+# Format:
+#   term:
+#     - synonym1
+#     - synonym2
+#
+# Set to empty {} for no expansion (search terms used as-is).
+
+query_expansions: {}
+
+
+# ============================================================================
+# ADVANCED
+# ============================================================================
+# Settings for power users. Most people never need to touch these.
+
+# advanced:
+#   # File watcher — auto-reindex when documents change.
+#   # Disable if you prefer manual reindexing only.
+#   watch_for_changes: true
+#   watch_debounce_seconds: 5
+#
+#   # BM25 parameters (keyword search tuning).
+#   # k1: term frequency saturation (1.2-2.0). Higher = more weight on repeated terms.
+#   # b:  length normalization (0.0-1.0). Higher = penalizes long documents more.
+#   # bm25_k1: 1.5
+#   # bm25_b: 0.75
+#
+#   # Logging verbosity: DEBUG, INFO, WARNING, ERROR
+#   # log_level: "INFO"

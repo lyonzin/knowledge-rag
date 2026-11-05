@@ -1,0 +1,15 @@
+# The exclude_patterns example from the config.example.yaml shipped with
+# v3.6.0 and v3.7.0 (79276b4, 25b69ce), uncommented. The shipped file itself
+# sets exclude_patterns: [], the default. The key lives under documents:, where
+# Config reads it since exclude patterns were added in v3.4.0 (24ca01c).
+#
+# Do not modify — this is a frozen snapshot for regression testing.
+
+documents:
+  exclude_patterns:
+    - "node_modules"     # Skip node_modules at any depth
+    - ".git"             # Skip .git directories
+    - "__pycache__"      # Skip Python cache
+    - ".venv"            # Skip virtual environments
+    - "*.tmp"            # Skip .tmp files anywhere
+    - "drafts/*"         # Skip everything in top-level drafts/
