@@ -2475,7 +2475,7 @@ class KnowledgeOrchestrator:
         resume_state: Optional[Dict[str, Any]] = None,
         force: bool = False,
     ) -> Dict[str, Any]:
-        """Smart reindex: incremental detection + BM25 rebuild + orphan cleanup.
+        """Smart reindex: index_all (unchanged files skipped unless ``force``) + BM25 rebuild + orphan cleanup.
 
         When ``resume_state`` is provided (v4.8.0 Fase 4), docs listed in
         it are skipped so the interrupted previous run picks up where it
@@ -4959,8 +4959,12 @@ def reindex_documents(
 ) -> str:
     """Index or reindex all documents in the knowledge base (runs in background).
 
-    ``force`` — smart reindex (detect changed files + rebuild BM25). Use after
-    filesystem edits outside add_document/update_document.
+    No flags — incremental pass: index new or changed files, skip unchanged
+    ones, prune deleted sources. Use after filesystem edits outside
+    add_document/update_document.
+    ``force`` — smart reindex: re-embed every file, unchanged ones included,
+    and rebuild BM25. Slow on a large corpus; use after changing the
+    query/passage prefixes or chunking settings.
     ``full_rebuild`` — nuclear rebuild (delete + re-embed). Use only after
     embedding-model change or index corruption. Mutually exclusive with resume.
     ``resume`` — pick up an interrupted smart reindex from

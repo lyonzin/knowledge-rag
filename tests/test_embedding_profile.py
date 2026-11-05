@@ -21,10 +21,12 @@ never leak state into other test modules.
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
+import yaml
 
 from mcp_server import config as cfg_module
 from mcp_server.server import FastEmbedEmbeddings
@@ -51,7 +53,7 @@ def _rebuild_config(monkeypatch: pytest.MonkeyPatch, yaml_dict: dict) -> cfg_mod
 
 
 class TestProfileResolution:
-    """Config.__post_init__ profile resolver — 5 cases."""
+    """Config.__post_init__ profile resolver — 7 cases."""
 
     def test_profile_custom_preserves_explicit_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Arrange: user opts out of profile shorthand and declares model + dim.
@@ -161,6 +163,34 @@ class TestProfileResolution:
         assert cfg.embedding_dim == 1024
         assert cfg.query_prefix == "search_query: "
         assert cfg.passage_prefix == "search_document: "
+
+    def test_given_example_config_when_option_a_uncommented_then_profile_prefixes_apply(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange: the shipped template with only the Option A line uncommented (GH #261).
+        text = (Path(cfg_module.__file__).parent / "data" / "config.example.yaml").read_text(encoding="utf-8")
+        assert '# profile: "multilingual"' in text
+        yaml_dict = yaml.safe_load(text.replace('# profile: "multilingual"', 'profile: "multilingual"', 1))
+
+        # Act
+        cfg = _rebuild_config(monkeypatch, yaml_dict)
+
+        # Assert: nothing left active in the template overrides the e5 prefixes
+        assert (cfg.query_prefix, cfg.passage_prefix) == ("query: ", "passage: ")
+
+    def test_given_profile_when_yaml_keeps_empty_prefix_then_override_is_warned(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Arrange: a config.yaml copied from the old template — profile plus an explicit "" (GH #261).
+        yaml_dict = {"models": {"embedding": {"profile": "multilingual", "query_prefix": ""}}}
+
+        # Act
+        cfg = _rebuild_config(monkeypatch, yaml_dict)
+        captured = capsys.readouterr()
+
+        # Assert: the explicit "" still wins (no behaviour change) and the user is told why
+        assert cfg.query_prefix == ""
+        assert "query_prefix='' overrides profile='multilingual'" in captured.err
 
 
 # ---------------------------------------------------------------------------

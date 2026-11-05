@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The default `search_knowledge` snippet starts at the matching chunk. It used to start at the neighboring chunk added before it for context, so the ~500-character snippet often held only text from before the match. `content_length` is still the full size, and a new `match_offset` field tells where the match starts in the full content (#260).
 - `search_similar` finds similar documents for long reference documents. The reference's own chunks are now excluded in the query; filtered out afterwards, 25 or more of them could take every candidate slot and the tool answered `no_results` (#260).
+- A number in `keyword_routes` or `category_mappings`, such as `blueteam: [sigma, 4624]`, no longer breaks indexing and every search. YAML reads a bare `4624` as an integer; numbers are now converted to text, and empty entries, lists or mappings are skipped with a warning. Quote values such as `0123` or `yes` to keep their exact spelling (#261).
+- A `category_mappings` key with capital letters, such as `Projetos/Clientes`, now matches its folder. Document paths were compared in lower case and the keys were not (#261).
+- The `reindex_documents` description no longer calls `force=True` a changed-files pass: it re-embeds every file. After editing files outside `add_document`/`update_document`, call it without flags (#261).
+- Following Option A in `config.example.yaml` (`profile: "multilingual"`) now keeps the e5 `"query: "`/`"passage: "` prefixes. The template's empty `query_prefix`/`passage_prefix` lines overrode them and are now commented out, and startup warns when an explicit prefix overrides a profile's. If you enabled the profile on a copy of the old template, delete those two lines and run `reindex_documents(force=True)` (#261).
 
 ---
 
