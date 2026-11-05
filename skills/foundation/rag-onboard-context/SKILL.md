@@ -57,7 +57,7 @@ That mental map informs every subsequent decision: whether to search first, whet
    ```
    list_documents(category="<top-category>")
    ```
-   This tool has no `limit` argument and returns the whole category. For a large category, prefer a targeted `search_knowledge` call with `max_results=3`.
+   It returns at most `limit` documents per call (default 100) and `total` gives the full count. For a large category, prefer a targeted `search_knowledge` call with `max_results=3`.
 
 5. **Store the summary internally** — do not necessarily surface it to the user unless they ask. The value is that YOU now know:
    - "The corpus has 15K chunks across 8 categories"
