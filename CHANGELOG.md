@@ -17,9 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Fixed:**
 
-- A number in `keyword_routes` or `category_mappings`, such as `blueteam: [sigma, 4624]`, no longer breaks indexing and every search. YAML reads a bare `4624` as an integer; numbers are now converted to text. Quote values such as `0123` or `yes` to keep their exact spelling (#261).
+- A number in `keyword_routes` or `category_mappings`, such as `blueteam: [sigma, 4624]`, no longer breaks indexing and every search. YAML reads a bare `4624` as an integer; numbers are now converted to text, and empty entries, lists or mappings are skipped with a warning. Quote values such as `0123` or `yes` to keep their exact spelling (#261).
 - The `reindex_documents` description no longer calls `force=True` a changed-files pass: it re-embeds every file. After editing files outside `add_document`/`update_document`, call it without flags (#261).
-- Following Option A in `config.example.yaml` (`profile: "multilingual"`) now keeps the e5 `"query: "`/`"passage: "` prefixes. The template's empty `query_prefix`/`passage_prefix` lines overrode them and are now commented out. If you enabled the profile on a copy of the old template, delete those two lines and run `reindex_documents(force=True)` (#261).
+- Following Option A in `config.example.yaml` (`profile: "multilingual"`) now keeps the e5 `"query: "`/`"passage: "` prefixes. The template's empty `query_prefix`/`passage_prefix` lines overrode them and are now commented out, and startup warns when an explicit prefix overrides a profile's. If you enabled the profile on a copy of the old template, delete those two lines and run `reindex_documents(force=True)` (#261).
 
 ---
 
