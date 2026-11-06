@@ -243,6 +243,7 @@ clients. See [the migration procedure](reindex-operations.md#changing-the-embedd
 | `search.default_results` | 5 | Results returned when no limit specified |
 | `search.max_results` | 100 | Hard cap even if client requests more |
 | `search.collection_name` | `knowledge_base` | ChromaDB collection name. For isolated knowledge bases or model migrations, also isolate the data directory and metadata |
+| `search.ef_search` | 100 | HNSW search-time exploration depth (GH #287). Applies only to collections created after the change — run `reindex_documents(full_rebuild=True)` to apply (see `docs/reindex-operations.md`) |
 
 #### Categories
 

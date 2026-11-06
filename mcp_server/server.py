@@ -28,6 +28,7 @@ import json
 import math
 import os
 import platform
+import random
 import re
 import subprocess
 import sys
@@ -1660,6 +1661,21 @@ def _is_saved_from(path: Path, url: str) -> bool:
     return marker is not None and len(marker[0]) < _MAX_SOURCE_CHARS and marker[0] == _escape_attribute(url)
 
 
+# GH #287: self-recall probe exposed by get_index_stats. Samples up to this
+# many chunks (fixed seed over sorted ids, so the sample survives rebuilds),
+# queries each by its own stored vector and reports the fraction that comes
+# back as top-1 — exact-distance ties count as hits, the complement is the
+# HNSW miss rate. The probe costs 4 Chroma calls (count, get ids, get
+# embeddings, one batched query_embeddings) — measured ~0.23s on a 70k-chunk
+# index. Results are cached for _SELF_RECALL_CACHE_TTL_SECONDS and dropped
+# alongside the query cache on every index mutation.
+_SELF_RECALL_SAMPLE_SIZE = 300
+_SELF_RECALL_CACHE_TTL_SECONDS = 300.0
+_SELF_RECALL_SEED = 42
+_SELF_RECALL_ROUND_DIGITS = 4
+_SELF_RECALL_TIE_EPSILON = 1e-6
+
+
 class KnowledgeOrchestrator:
     """Main orchestrator for knowledge retrieval with semantic search + keyword routing"""
 
@@ -1701,6 +1717,10 @@ class KnowledgeOrchestrator:
 
         # Query cache (LRU with TTL)
         self.query_cache = QueryCache(max_size=100, ttl_seconds=300)
+
+        # Self-recall probe cache (GH #287): (timestamp, payload) filled by
+        # get_stats() and dropped by _invalidate_caches() on every mutation.
+        self._self_recall_cache: Optional[Tuple[float, Dict[str, Any]]] = None
 
         # Index metadata cache
         self._metadata_file = config.data_dir / "index_metadata.json"
@@ -1771,11 +1791,19 @@ class KnowledgeOrchestrator:
         return self._open_collection()
 
     def _open_collection(self) -> Any:
-        """Get or create the production collection bound to the FastEmbed function."""
+        """Get or create the production collection bound to the FastEmbed function.
+
+        GH #287: ``configuration`` sets the HNSW ``ef_search`` on creation. On
+        an existing collection ChromaDB silently ignores it (verified: the
+        stored metadata changes but search behavior does not), so raising
+        ``search.ef_search`` only takes effect for collections created after
+        the change — i.e. on the next rebuild (see docs/reindex-operations.md).
+        """
         return self.chroma_client.get_or_create_collection(
             name=config.collection_name,
             embedding_function=self.embed_fn,
             metadata={"description": "Knowledge base for RAG"},
+            configuration={"hnsw": {"ef_search": config.ef_search}},
         )
 
     def _drop_empty_default_ef_collection(self) -> bool:
@@ -2378,7 +2406,7 @@ class KnowledgeOrchestrator:
                 self._clear_checkpoint()
 
         if stats["indexed"] > 0 or stats["updated"] > 0 or stats["deleted"] > 0:
-            self.query_cache.invalidate()
+            self._invalidate_caches()
 
         return stats
 
@@ -2683,7 +2711,7 @@ class KnowledgeOrchestrator:
                     except Exception:
                         pass
 
-        self.query_cache.invalidate()
+        self._invalidate_caches()
 
         elapsed = time.time() - start_time
         stats["orphan_folders_cleaned"] = orphans_cleaned
@@ -2796,6 +2824,7 @@ class KnowledgeOrchestrator:
             name=staging_name,
             embedding_function=self.embed_fn,
             metadata={"description": "knowledge-rag v4.8.0 staging rebuild"},
+            configuration={"hnsw": {"ef_search": config.ef_search}},
         )
 
     def _populate_staging(self, staging) -> Dict[str, Any]:
@@ -2982,7 +3011,7 @@ class KnowledgeOrchestrator:
         else:
             self.bm25_index.clear()
             self._bm25_initialized = False
-        self.query_cache.invalidate()
+        self._invalidate_caches()
         # Trigger a fresh build from the swapped-in ChromaDB contents.
         self._ensure_bm25_index()
         # ADR-008 ``on_reindex_complete`` hook — same rationale as the
@@ -3019,13 +3048,14 @@ class KnowledgeOrchestrator:
             name=config.collection_name,
             embedding_function=self.embed_fn,
             metadata={"description": "Knowledge base for RAG"},
+            configuration={"hnsw": {"ef_search": config.ef_search}},
         )
 
         self._indexed_docs = {}
         self._source_to_docid = {}
         self.bm25_index.clear()
         self._bm25_initialized = False
-        self.query_cache.invalidate()
+        self._invalidate_caches()
 
         stats = self.index_all(force=True)
 
@@ -4098,7 +4128,7 @@ class KnowledgeOrchestrator:
             try:
                 result = self._store_document_content(full_path, content, category)
             finally:
-                self.query_cache.invalidate()
+                self._invalidate_caches()
         if "error" not in result:
             result["chunks_added"] = result.pop("new_chunks_added")
             result["category"] = category
@@ -4133,7 +4163,7 @@ class KnowledgeOrchestrator:
                 self._rollback_content_document(doc, old_id, old_info, previous)
                 raise
             staged.committed = True
-        self.query_cache.invalidate()
+        self._invalidate_caches()
         return {
             "new_chunks_added": added,
             "old_chunks_removed": removed,
@@ -4150,7 +4180,7 @@ class KnowledgeOrchestrator:
             self._indexed_docs[old_id] = old_info
             self._source_to_docid[str(doc.source)] = old_id
         self._bm25_initialized = False
-        self.query_cache.invalidate()
+        self._invalidate_caches()
         try:
             ids, _, _, _ = self._dedup_chunks(doc)
             if ids:
@@ -4185,7 +4215,7 @@ class KnowledgeOrchestrator:
             try:
                 return self._store_document_content(filepath, content, None)
             finally:
-                self.query_cache.invalidate()
+                self._invalidate_caches()
 
     def remove_document_by_path(self, filepath: str, delete_file: bool = False) -> Dict[str, Any]:
         """Remove a document from the index. Optionally delete from disk.
@@ -4205,7 +4235,7 @@ class KnowledgeOrchestrator:
             finally:
                 # Reject both cached and still-running queries of intermediate state,
                 # even if restoring the previous chunks or metadata also raises.
-                self.query_cache.invalidate()
+                self._invalidate_caches()
 
     def _remove_document_by_path(self, path: Path, delete_file: bool) -> Dict[str, Any]:
         """Keep metadata consistent with failed backend deletion and honest file status."""
@@ -4237,7 +4267,7 @@ class KnowledgeOrchestrator:
                 result["file_deleted"] = True
             except OSError as exc:
                 result["file_delete_error"] = str(exc)
-        self.query_cache.invalidate()
+        self._invalidate_caches()
         return result
 
     def add_from_url(self, url: str, category: str, title: str = None) -> Dict[str, Any]:
@@ -4458,6 +4488,8 @@ class KnowledgeOrchestrator:
             "chunk_size": config.chunk_size,
             "chunk_overlap": config.chunk_overlap,
             "query_cache": self.query_cache.stats(),
+            "self_recall": self._get_self_recall_cached(),
+            "hnsw_ef_search": self._effective_ef_search(),
         }
 
         progress = self._reindex_progress
@@ -4477,6 +4509,100 @@ class KnowledgeOrchestrator:
             stats["reindex"] = {"active": False}
 
         return stats
+
+    def _compute_self_recall(self) -> Dict[str, Any]:
+        """Fraction of sampled chunks returned as top-1 by their own stored vector.
+
+        GH #287: HNSW with a low ``ef_search`` misses isolated vectors — the
+        user-facing symptom is a chunk that cannot find itself. Samples up to
+        ``_SELF_RECALL_SAMPLE_SIZE`` ids with a fixed seed over sorted ids (so
+        the sample is stable across rebuilds), queries each by its own
+        embedding in one batched ``query_embeddings`` call and returns
+        ``{"sampled": N, "top1": fraction}``. A top-1 candidate within
+        ``_SELF_RECALL_TIE_EPSILON`` of exact distance counts as a hit, so
+        identical chunks under different ids do not read as misses. Empty (or
+        concurrently-drained) collections report ``sampled: 0`` with
+        ``top1: null``. Never takes the index lock; callers hold the
+        publication read lease instead.
+        """
+        total = self.collection.count()
+        if total == 0:
+            return {"sampled": 0, "top1": None}
+        all_ids = self.collection.get(include=[])["ids"]
+        sample_size = min(_SELF_RECALL_SAMPLE_SIZE, total, len(all_ids))
+        if sample_size == 0:
+            return {"sampled": 0, "top1": None}
+        sampled = random.Random(_SELF_RECALL_SEED).sample(sorted(all_ids), sample_size)
+        fetched = self.collection.get(ids=sampled, include=["embeddings"])
+        emb_by_id = {cid: emb for cid, emb in zip(fetched["ids"], fetched["embeddings"])}
+        query_ids = [cid for cid in fetched["ids"] if emb_by_id[cid] is not None]
+        if not query_ids:
+            return {"sampled": 0, "top1": None}
+        result = self.collection.query(
+            query_embeddings=[emb_by_id[cid] for cid in query_ids],
+            n_results=1,
+            include=["distances"],
+        )
+        hits = 0
+        for cid, row, distances in zip(query_ids, result["ids"], result["distances"]):
+            if row and (row[0] == cid or (distances and distances[0] <= _SELF_RECALL_TIE_EPSILON)):
+                hits += 1
+        return {"sampled": len(query_ids), "top1": round(hits / len(query_ids), _SELF_RECALL_ROUND_DIGITS)}
+
+    def _get_self_recall_cached(self) -> Dict[str, Any]:
+        """Self-recall payload cached for ``_SELF_RECALL_CACHE_TTL_SECONDS``.
+
+        While a reindex is active the probe is skipped: the last cached value
+        is returned when available, otherwise ``{"sampled": 0, "top1": null}``
+        (``reindex.active`` in the same stats payload disambiguates this from
+        an empty index). Probe failures are non-fatal and return the marker
+        plus an ``error`` field — the third ``sampled: 0`` case. A concurrent
+        write during the probe (query cache generation changed) returns the
+        fresh value without caching it, so the next read re-probes the new
+        generation.
+        """
+        now = time.time()
+        cached = getattr(self, "_self_recall_cache", None)
+        if cached is not None and now - cached[0] < _SELF_RECALL_CACHE_TTL_SECONDS:
+            return cached[1]
+        progress = getattr(self, "_reindex_progress", {})
+        if progress.get("active"):
+            return cached[1] if cached is not None else {"sampled": 0, "top1": None}
+        generation = self.query_cache.generation
+        try:
+            payload = self._compute_self_recall()
+        except Exception as exc:
+            print(f"[STATS] self_recall probe failed (non-fatal): {exc}", file=sys.stderr)
+            return {"sampled": 0, "top1": None, "error": str(exc)[:200]}
+        if self.query_cache.generation == generation:
+            self._self_recall_cache = (now, payload)
+        return payload
+
+    def _effective_ef_search(self) -> Optional[int]:
+        """HNSW ef_search actually stored by the live collection (GH #287).
+
+        ChromaDB only applies ``search.ef_search`` to collections created
+        after the change, so the CONFIGURED value and the EFFECTIVE one can
+        diverge until the next full rebuild — this field removes that trap.
+        Reading ``configuration_json`` is local, no Chroma round-trip.
+        Returns None when unavailable.
+        """
+        try:
+            hnsw = (self.collection.configuration_json or {}).get("hnsw") or {}
+            value = hnsw.get("ef_search")
+        except Exception:
+            return None
+        return value if type(value) is int else None
+
+    def _invalidate_caches(self) -> None:
+        """Drop derived caches after any collection mutation.
+
+        Covers the query cache and the self-recall sample (GH #287), so the
+        next get_stats() re-probes the mutated index instead of reporting a
+        stale top1 fraction.
+        """
+        self.query_cache.invalidate()
+        self._self_recall_cache = None
 
     def get_reindex_status(self) -> Dict[str, Any]:
         """Get background reindex progress without computing full index stats.
@@ -4646,7 +4772,7 @@ class KnowledgeOrchestrator:
             self._fts5_sync_remove_ids(batch)
             removed += len(batch)
         self._bm25_initialized = False
-        self.query_cache.invalidate()
+        self._invalidate_caches()
         return removed
 
     def _repair_missing_sources(self, stats: Dict[str, Any], tracking: Dict[str, Any]) -> None:
@@ -5297,7 +5423,11 @@ def get_index_stats() -> str:
 
     Returns:
         JSON string with system metrics: total documents, total chunks, embedding model name,
-        BM25 status, query cache hit rate, and file watcher status.
+        BM25 status, query cache hit rate, file watcher status, a self_recall probe
+        (fraction of sampled chunks returned as top-1 by their own stored vector; a value
+        below 1.0 means the HNSW index misses some chunks — see search.ef_search in
+        config.example.yaml), and hnsw_ef_search (the value ChromaDB actually applies to
+        the live collection; it can lag behind search.ef_search until a full rebuild).
 
     Usage: Use for system health checks — inspecting embedding runtime status, checking
     index population, or monitoring cache efficiency. This does not load the embedding

@@ -569,6 +569,9 @@ _TEXT_SCALAR_TYPES = (str, int, float, bool, datetime.date)
 # CONFIG DATACLASS
 # ============================================================================
 
+# GH #287: ChromaDB HNSW default ef_search — the fallback for search.ef_search.
+DEFAULT_EF_SEARCH = 100
+
 
 def _resolve_path(raw, default: Path) -> Path:
     """Resolve a path from YAML (string) or use default (Path).
@@ -847,6 +850,16 @@ class Config:
         )
     )
 
+    # GH #287: last field on purpose — the api-surface gate treats dataclass
+    # fields as positional constructor args, so new fields go at the end.
+    # HNSW ef_search: search-time exploration depth for the ChromaDB HNSW
+    # index. Default 100 = ChromaDB's built-in default. Higher values raise
+    # self-recall of isolated vectors at a linear latency cost, but the value
+    # only takes effect on collections CREATED after the change — ChromaDB
+    # ignores configuration updates on existing indexes (verified empirically,
+    # see docs/reindex-operations.md), so apply it and reindex.
+    ef_search: int = field(default_factory=lambda: _get("search", "ef_search", DEFAULT_EF_SEARCH))
+
     def __post_init__(self):
         """Validate config values and ensure directories exist."""
         self._validate_chunking()
@@ -862,7 +875,7 @@ class Config:
         self._ensure_directories()
 
     def _validate_chunking(self) -> None:
-        """Bound-check chunk_size / chunk_overlap / default_results / max_results."""
+        """Bound-check chunk_size / chunk_overlap / default_results / max_results / ef_search."""
         if not isinstance(self.chunk_size, int) or self.chunk_size < 100:
             print(f"[WARN] chunk_size={self.chunk_size} invalid, using 1000", file=sys.stderr)
             self.chunk_size = 1000
@@ -880,6 +893,11 @@ class Config:
             self.default_results = 5
         if not isinstance(self.max_results, int) or self.max_results < 1:
             self.max_results = 100
+        # GH #287: ef_search must be a positive integer; ChromaDB itself accepts
+        # 0 without complaint, so the guard lives here (type() rejects bool).
+        if type(self.ef_search) is not int or self.ef_search < 1:
+            print(f"[WARN] ef_search={self.ef_search!r} invalid, using {DEFAULT_EF_SEARCH}", file=sys.stderr)
+            self.ef_search = DEFAULT_EF_SEARCH
 
     def _validate_indexing(self) -> None:
         """v4.8.0 Fase 3 — clamp batch_size [1,5000] and parallel_workers [1,16].

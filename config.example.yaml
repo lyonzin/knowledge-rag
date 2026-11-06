@@ -294,6 +294,24 @@ search:
   # Example: "work_kb", "research_kb", "personal_kb"
   collection_name: "knowledge_base"
 
+  # HNSW ef_search — search-time exploration depth of the ChromaDB HNSW
+  # index (GH #287). ChromaDB's built-in default is 100; higher values raise
+  # the chance that an isolated / recently-inserted chunk is found by its own
+  # vector (lower self-recall miss rate), at a roughly linear latency cost.
+  # Valid: integer >= 1 (invalid values fall back to 100 with a WARN).
+  #
+  # HONEST LIMITATION: the value only applies to collections CREATED after
+  # the change. ChromaDB's collection.modify() updates the stored metadata
+  # but does NOT change search behavior — not even after reopening the
+  # client (verified empirically on chromadb 1.5.9). To apply a new value:
+  # set it here, then run reindex_documents(full_rebuild=True) — the nuclear
+  # rebuild with staging swap creates a fresh collection with the new
+  # ef_search. A plain reindex_documents(force=True) re-embeds in place and
+  # is NOT enough. The self_recall field of get_index_stats() measures the
+  # effect (hnsw_ef_search reports the value actually in use). Default: 100
+  # (preserves prior behavior).
+  ef_search: 100
+
   # -----------------------------------------------------------------------
   # FTS5 Lexical Fast-Path (v4.8.2+, opt-in — default OFF pending v4.9.0)
   # -----------------------------------------------------------------------

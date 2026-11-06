@@ -187,6 +187,31 @@ Do not delete the data directory to resolve a generic opening error. Collection
 initialization now preserves stored data and reports the failure so permissions,
 model mismatches and storage errors can be investigated.
 
+## Changing `search.ef_search` requires a rebuild (GH #287)
+
+`search.ef_search` sets the HNSW search-time exploration depth when a collection
+is **created**. ChromaDB does not apply configuration changes to an existing
+index: `collection.modify(configuration=...)` updates the stored metadata but
+leaves search behavior unchanged — verified empirically on chromadb 1.5.9, even
+after reopening the `PersistentClient`. So changing the value in `config.yaml`
+alone has no effect on a live index.
+
+To apply a new value, rebuild:
+
+```python
+reindex_documents(full_rebuild=True)   # nuclear rebuild: staging collection is created with the new ef_search
+```
+
+The staging rebuild path creates a fresh collection that picks up the new
+`ef_search`. A plain `reindex_documents(force=True)` re-embeds in place and is
+**not** enough — it reuses the existing collection. After the rebuild, verify
+with `get_index_stats()`: `self_recall.top1` should increase (the probe samples
+300 chunks, so expect ~±0.7 percentage points of sampling error at the 95%
+level — compare before/after, not against a hard 1.0), and `hnsw_ef_search`
+should now equal the configured value. On the real 70k-chunk index the default
+100 showed a top-1 miss rate of ~1.4%; higher values reduce it at a roughly
+linear latency cost.
+
 ## Storage and legacy mode
 
 Budget space for the old and new vector collections during staging, plus

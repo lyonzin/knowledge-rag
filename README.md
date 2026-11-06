@@ -361,7 +361,7 @@ All install methods, GPU setup and troubleshooting for each client: [docs/INSTAL
 | `evaluate_retrieval` | Reports MRR@5 and Recall@5 for your own query → expected file pairs |
 | `list_documents` | Lists indexed documents, 100 per page by default (up to 200 with `limit`), paged with `offset` |
 | `list_categories` | Lists categories, derived from folder paths, with document counts |
-| `get_index_stats` | Document and chunk counts, embedding model, BM25 status, cache hit rate, watcher status |
+| `get_index_stats` | Document and chunk counts, embedding model, BM25 status, cache hit rate, watcher status, HNSW self-recall probe |
 | `add_document` | Saves text as a file under `documents/` and indexes it |
 | `update_document` | Replaces a document's content and re-indexes it |
 | `remove_document` | Removes a document's chunks from the index, and optionally the file |
