@@ -1914,19 +1914,7 @@ class KnowledgeOrchestrator:
         interrupted run left off.
         """
         if not self._index_lock.acquire(blocking=False):
-            return {
-                "total_files": 0,
-                "indexed": 0,
-                "updated": 0,
-                "skipped": 0,
-                "deleted": 0,
-                "errors": 0,
-                "chunks_added": 0,
-                "chunks_removed": 0,
-                "dedup_skipped": 0,
-                "categories": {},
-                "skipped_reason": "reindex_already_running",
-            }
+            return {**self._init_index_stats(), "skipped_reason": "reindex_already_running"}
         try:
             return self._index_all_impl(force, resume_state=resume_state)
         finally:
@@ -1958,6 +1946,15 @@ class KnowledgeOrchestrator:
 
         return self._finalize_reindex(stats, tracking)
 
+    # Cap on detailed per-file failures exposed by get_reindex_status (#288).
+    # Bounded so a corrupt corpus cannot bloat MCP responses; beyond the cap
+    # only the total is exposed and failed_files_truncated is set.
+    _MAX_REPORTED_FAILED_FILES = 100
+    # Bound on the stored failure reason: short messages only, no tracebacks
+    # or multi-KB payloads leaking into MCP responses.
+    _MAX_FAILURE_REASON_CHARS = 300
+    _DOCUMENTS_DIR_UNAVAILABLE_REASON = "documents_dir unavailable or empty; orphan pruning skipped"
+
     @staticmethod
     def _init_index_stats() -> Dict[str, Any]:
         """Fresh zeroed stats dict for a reindex run."""
@@ -1968,11 +1965,35 @@ class KnowledgeOrchestrator:
             "skipped": 0,
             "deleted": 0,
             "errors": 0,
+            "failed_files": [],
+            "failed_files_truncated": False,
             "chunks_added": 0,
             "chunks_removed": 0,
             "dedup_skipped": 0,
             "categories": {},
         }
+
+    @classmethod
+    def _failure_reason(cls, exc: Exception) -> str:
+        """Short type-prefixed message, bounded to _MAX_FAILURE_REASON_CHARS."""
+        return f"{type(exc).__name__}: {exc}"[: cls._MAX_FAILURE_REASON_CHARS]
+
+    @classmethod
+    def _record_failed_file(cls, stats: Dict[str, Any], path: str, reason: str) -> None:
+        """Count one failed file and keep its {path, reason} entry, deduped by path.
+
+        The single path for both the errors counter and the bounded
+        failed_files list keeps errors == len(failed_files) below the cap.
+        Duplicate paths (several doc_ids sharing one source during prune)
+        are counted once.
+        """
+        if any(entry["path"] == path for entry in stats["failed_files"]):
+            return
+        stats["errors"] += 1
+        if len(stats["failed_files"]) < cls._MAX_REPORTED_FAILED_FILES:
+            stats["failed_files"].append({"path": path, "reason": reason})
+        else:
+            stats["failed_files_truncated"] = True
 
     def _scan_and_count_documents(self, stats: Dict[str, Any]) -> list:
         """Discover paths only; parse changed files individually in the worker."""
@@ -2004,7 +2025,7 @@ class KnowledgeOrchestrator:
                 f"[WARN] documents_dir unavailable or empty, skipping orphan pruning: {config.documents_dir}",
                 file=sys.stderr,
             )
-            stats["errors"] += 1
+            self._record_failed_file(stats, str(config.documents_dir), self._DOCUMENTS_DIR_UNAVAILABLE_REASON)
             return
         current_paths = {str(Path(getattr(doc, "source", doc)).resolve()) for doc in documents}
         for doc_id, info in list(self._indexed_docs.items()):
@@ -2024,7 +2045,7 @@ class KnowledgeOrchestrator:
                 try:
                     removed = self._remove_document_chunks(doc_id)
                 except Exception as exc:
-                    stats["errors"] += 1
+                    self._record_failed_file(stats, str(source), self._failure_reason(exc))
                     print(f"[ERROR] Failed to prune {source}: {exc}", file=sys.stderr)
                     continue
                 stats["chunks_removed"] += removed
@@ -2128,8 +2149,9 @@ class KnowledgeOrchestrator:
             if repair_ids is not None:
                 tracking["repaired_sources"].add(str(source.resolve()))
         except Exception as e:
-            stats["errors"] += 1
-            print(f"[ERROR] Failed to index {source}: {e}", file=sys.stderr)
+            failed_path = str(getattr(doc, "source", doc))
+            self._record_failed_file(stats, failed_path, self._failure_reason(e))
+            print(f"[ERROR] Failed to index {failed_path}: {e}", file=sys.stderr)
 
     def _resolve_existing_or_skip(
         self,
@@ -2794,7 +2816,12 @@ class KnowledgeOrchestrator:
         staged._persist_metadata = False
         stats = staged.index_all(force=True)
         if stats.get("errors", 0):
-            raise RuntimeError(f"Staging contains {stats['errors']} failed documents")
+            details = "; ".join(f"{f['path']} ({f['reason']})" for f in stats["failed_files"][:5])
+            # copy(self) is shallow, so staged shares self._reindex_progress:
+            # stashing stats here lets get_reindex_status expose failed_files
+            # in last_result alongside the failure message in last_error.
+            self._reindex_progress["result"] = stats
+            raise RuntimeError(f"Staging contains {stats['errors']} failed documents: {details}")
         staged.bm25_index.build_index()
         staged._bm25_initialized = True
         self._staged_state = staged._snapshot_pre_staging()
@@ -4638,7 +4665,7 @@ class KnowledgeOrchestrator:
                     tracking["repaired_sources"].add(source)
                     stats["deleted"] += 1
                 except Exception as exc:
-                    stats["errors"] += 1
+                    self._record_failed_file(stats, source, self._failure_reason(exc))
                     print(f"[ERROR] Failed to repair absent source {source}: {exc}", file=sys.stderr)
             except OSError:
                 # Inaccessibility is not proof that deletion is safe.
@@ -5168,7 +5195,11 @@ def get_reindex_status() -> str:
     Returns:
         JSON string with reindex status. When active: operation name, progress (processed/total),
         percent complete, indexed/skipped/errors counts, and start time. When inactive: active=false,
-        plus last_result or last_error from the most recent completed reindex.
+        plus last_result or last_error from the most recent completed reindex. When the last run had
+        errors, last_result includes failed_files (deduped [{"path", "reason"}, ...], capped at 100)
+        and failed_files_truncated, so you can see exactly which files failed and why. A failed
+        full_rebuild surfaces in last_error, whose message lists the first failing paths, and the
+        partial last_result still carries the failed_files list.
 
     Usage: Call repeatedly after reindex_documents() to monitor progress. When reindex.active
     becomes false, the operation is complete. Use get_index_stats() for full index health metrics.

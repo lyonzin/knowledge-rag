@@ -127,7 +127,24 @@ Get the current status of a background reindex operation. Lightweight — does n
 }
 ```
 
-**Returns (idle):** `{"status": "success", "reindex": {"active": false, ...}}`, with the last operation's result or error when available.
+**Returns (idle):** `{"status": "success", "reindex": {"active": false, ...}}`, with the last operation's result or error when available. When the last run had errors, `last_result` includes `failed_files` (`[{"path", "reason"}, ...]`, deduped by path, at most 100 entries) and `failed_files_truncated` (`true` when more than 100 distinct files failed); below the cap, `errors` matches the list length. A failed `full_rebuild` appears in `last_error`, whose message lists the first failing paths, and the partial `last_result` still carries `failed_files`:
+
+```json
+{
+  "status": "success",
+  "reindex": {
+    "active": false,
+    "last_result": {
+      "errors": 2,
+      "failed_files": [
+        {"path": "C:/docs/corrupt.pdf", "reason": "PdfReadError: EOF marker not found"},
+        {"path": "C:/docs/locked.docx", "reason": "PermissionError: access denied"}
+      ],
+      "failed_files_truncated": false
+    }
+  }
+}
+```
 
 ---
 
