@@ -1,6 +1,5 @@
 """Knowledge RAG MCP Server - Local Retrieval-Augmented Generation System"""
 
-from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
 __version__ = "5.0.0"
@@ -15,13 +14,19 @@ if TYPE_CHECKING:
 # Re-exports load on first use (PEP 562). Importing .config creates the data and
 # documents folders under the base directory, which can be the current folder,
 # so `import mcp_server.skills_cli` and other light submodules must not trigger it.
-_REEXPORTS = {"Config": ".config", "Document": ".ingestion", "DocumentParser": ".ingestion"}
 
 
 def __getattr__(name: str) -> Any:
     """Import a re-exported name on first access and keep it as a module attribute."""
-    if name not in _REEXPORTS:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    value = getattr(import_module(_REEXPORTS[name], __name__), name)
-    globals()[name] = value
-    return value
+    if name == "Config":
+        from .config import Config
+
+        globals()[name] = Config
+        return Config
+    if name in ("Document", "DocumentParser"):
+        from .ingestion import Document, DocumentParser
+
+        globals()["Document"] = Document
+        globals()["DocumentParser"] = DocumentParser
+        return {"Document": Document, "DocumentParser": DocumentParser}[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
