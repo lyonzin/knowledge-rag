@@ -4815,14 +4815,21 @@ def search_knowledge(
     Args:
         query: Search query text (1–3 keywords recommended; phrase queries also work)
         max_results: Maximum number of results (default: 5, capped by search.max_results).
-        category: Optional category filter — one of: security, ctf, logscale, development, general,
-            redteam, blueteam. Call list_categories() first to see available categories and counts.
+        category: Optional category filter. Accepts the categories the server is configured with
+            (category_mappings values and keyword_routes keys) plus general; an empty string, like
+            omitting it, searches every category, and any other value returns an error that lists
+            the valid ones. Call list_categories() first to see which categories hold documents and
+            how many.
         hybrid_alpha: Balance between semantic and keyword search. 0.0 = keyword-only (best for exact
             technical terms like CVE IDs or tool names), 0.3 = balanced default, 1.0 = semantic-only
             (best for conceptual or natural-language queries).
-        min_score: Minimum normalized relevance score (0.0–1.0) to include a result. Results scoring
-            below this threshold are discarded. Default 0.0 returns all results. Use 0.2–0.4 to cut
-            low-relevance noise.
+        min_score: Minimum score (0.0–1.0) a result needs to be returned; default 0.0 returns all
+            results. Scores are min-max normalized per query over its candidates: the best scores 1.0
+            and the weakest 0.0, while a single candidate or candidates that all tie score 1.0. On the
+            hybrid path (results labeled hybrid, semantic or keyword) the candidates are the returned
+            results, so any min_score above 0 drops at least the weakest one unless all tie; fts5
+            results are BM25 scores normalized over up to max(3 * max_results, 20) hits, so even the
+            weakest returned one can score well above 0.0. It is not an absolute relevance bar.
         snippet_mode: When true (default), truncates content to ~500 characters from the start of the
             matching chunk, at a natural break point, and adds a content_length field with the full
             size. Use get_document() to fetch full content when needed. Set to false to return the full
@@ -4862,7 +4869,8 @@ def search_knowledge(
     hybrid_alpha = max(0.0, min(hybrid_alpha if hybrid_alpha is not None else 0.3, 1.0))
     min_score = max(0.0, min(min_score if min_score is not None else 0.0, 1.0))
 
-    valid_categories = list(config.keyword_routes.keys()) + list(set(config.category_mappings.values())) + ["general"]
+    # Routes and mappings usually name the same categories: list each once, in config order.
+    valid_categories = list(dict.fromkeys([*config.keyword_routes, *config.category_mappings.values(), "general"]))
     if category and category not in valid_categories:
         return json.dumps(
             {"status": "error", "message": f"Invalid category '{category}'. Valid: {', '.join(valid_categories)}"}
@@ -5093,8 +5101,10 @@ def list_categories() -> str:
         JSON string with category names, document counts per category, and total document count.
 
     Usage: Use before filtering search_knowledge() or list_documents() by category to see
-    which categories exist and how many documents each contains. Use get_index_stats() instead
-    for broader system health metrics (model name, cache hit rate, BM25 status).
+    which categories exist and how many documents each contains; search_knowledge() still
+    rejects a listed name that is not configured, such as one stored by add_document().
+    Use get_index_stats() instead for broader system health metrics (model name, cache hit
+    rate, BM25 status).
     """
     orchestrator = get_orchestrator()
     categories = orchestrator.list_categories()
@@ -5116,9 +5126,10 @@ def list_documents(category: Optional[str] = None, limit: int = 100, offset: int
     Read-only. No side effects.
 
     Args:
-        category: Optional category filter. Must be a valid category name — call
-            list_categories() to see available options (e.g., security, ctf, logscale,
-            development, general, redteam, blueteam).
+        category: Optional category filter, matched exactly against each document's category; an
+            empty string, like omitting it, lists every document, and a category without documents
+            returns an empty page (total 0). Call list_categories() to see the categories that hold
+            documents.
         limit: Maximum number of documents to return (default: 100, max: 200).
         offset: Number of matching documents to skip (default: 0). For the next page, call
             again with offset + count until offset reaches total.
@@ -5128,9 +5139,10 @@ def list_documents(category: Optional[str] = None, limit: int = 100, offset: int
         in this page) and the filepaths, categories, and metadata of this page, ordered by filepath.
 
     Usage: Use to browse what's in the index, one page at a time; to see every document, call
-    again with offset + count until offset reaches total. Use list_categories() first to see valid category names. Use
-    search_knowledge() when you want to find documents by topic rather than browsing the full
-    list. Use get_document() to read a specific file once you have its filepath.
+    again with offset + count until offset reaches total. Use list_categories() first to see
+    which categories hold documents. Use search_knowledge() when you want to find documents by
+    topic rather than browsing the full list. Use get_document() to read a specific file once
+    you have its filepath.
     """
     offset = max(0, offset)
     limit = max(1, min(limit, _LIST_DOCUMENTS_MAX_LIMIT))
@@ -5195,8 +5207,10 @@ def add_document(content: str, filepath: str, category: str = "general") -> str:
         content: Full text content of the document (markdown supported)
         filepath: Relative path within documents directory (e.g., "security/new-technique.md").
             The subdirectory should match the category.
-        category: Document category — one of: security, ctf, logscale, development, general,
-            redteam, blueteam (default: general)
+        category: Category stored with the document (default: general). Any name is accepted, but
+            search_knowledge() filters only by configured categories (category_mappings values,
+            keyword_routes keys, general), and update_document() or re-indexing the file detects it
+            again from the path through category_mappings. list_categories() shows the categories in use.
 
     Returns:
         JSON string with indexing results (filepath, chunks created, status).
@@ -5227,7 +5241,9 @@ def update_document(filepath: str, content: str) -> str:
     Update the content of an existing document in the knowledge base.
 
     Mutating — overwrites the file on disk and re-indexes immediately. Old chunks are
-    removed and replaced with new ones. Full content replacement, not a patch.
+    removed and replaced with new ones. Full content replacement, not a patch. The category
+    is detected again from the path through category_mappings (general when none matches), so
+    a category stored by add_document() or add_from_url() is not kept.
 
     Args:
         filepath: Full or relative path to the document file. Must be an already-indexed
@@ -5303,12 +5319,20 @@ def add_from_url(url: str, category: str = "general", title: Optional[str] = Non
 
     Args:
         url: Full URL to fetch (https:// required). The page must be publicly accessible.
-        category: Document category — one of: security, ctf, logscale, development, general,
-            redteam, blueteam (default: general)
+        category: Category stored with the document and the folder it is saved in; default:
+            general. Being part of the path, it must stay inside documents_dir: a value such as
+            ../outside returns a "Filepath rejected" error. Any other name is accepted, but
+            search_knowledge() filters only by configured categories (category_mappings values,
+            keyword_routes keys, general), and update_document() or re-indexing the file detects it
+            again from the path through category_mappings. list_categories() shows the categories
+            in use.
         title: Optional document title. Auto-detected from the page's <title> tag if omitted.
 
     Returns:
-        JSON string with indexing results (detected title, filepath, chunks created, status).
+        JSON string with indexing results (filepath, category, chunks added, status). The page is
+        saved as <category>/<title slug>.md, or as <title slug>-<first 8 hex characters of the
+        URL's SHA-256>.md (then 16, then the full digest) when a file not saved from this URL
+        already has the shorter name. Use the returned filepath instead of building the path.
 
     Usage: Use to ingest web content (writeups, blog posts, documentation pages) directly
     by URL. Use add_document() instead when you already have the text content. The document
