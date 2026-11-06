@@ -209,10 +209,34 @@ Get statistics about the knowledge base index.
       "hits": 45,
       "misses": 23,
       "hit_rate": "66.2%"
-    }
+    },
+    "self_recall": {
+      "sampled": 300,
+      "top1": 0.9867
+    },
+    "hnsw_ef_search": 100
   }
 }
 ```
+
+`self_recall` probes the HNSW index (GH #287): up to 300 chunks are sampled with a
+fixed seed over sorted ids (deterministic across rebuilds), each is queried by its own
+stored vector, and `top1` reports the fraction that comes back as the top-1 result.
+Exact-distance ties count as hits, so identical chunks under different ids do not read
+as misses. With 300 samples the metric has a sampling error of about ±0.7 percentage
+points (95% CI) — compare before/after values, not against a hard 1.0. A value well
+below 1.0 means some chunks cannot find themselves: raise `search.ef_search` in
+`config.yaml` and run `reindex_documents(full_rebuild=True)` (see
+`docs/reindex-operations.md`). `sampled: 0` with `top1: null` has three causes: an
+empty index, a reindex in progress (the `reindex.active` field in the same payload
+disambiguates; the probe is skipped while a reindex runs), or a probe failure, which
+adds an `error` field. The probe is cached for 300 seconds and recomputed after every
+index mutation.
+
+`hnsw_ef_search` is the value ChromaDB actually applies to the live collection. It only
+changes when a collection is created, so it can lag behind `search.ef_search` in
+`config.yaml` until the next `full_rebuild` — when the two differ, the configured value
+is not in effect yet.
 
 ---
 
