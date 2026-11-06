@@ -163,14 +163,16 @@ def test_load_failure_raises_loud():
         assert isinstance(ei.value.__cause__, FileNotFoundError)
 
 
-def test_load_failure_is_sticky():
+def test_load_failure_is_sticky(monkeypatch):
     """After a load failure, subsequent calls re-raise WITHOUT retrying the load.
 
     Avoids the user-visible "frozen" behavior where each query triggers a
     fresh HuggingFace download attempt that hits rate limits.
     """
-    from mcp_server.server import EmbeddingModelLoadError
+    from mcp_server.server import EmbeddingModelLoadError, config
 
+    # CPU only: where the CUDA probe passes, "auto" also tries CPU after the GPU load fails.
+    monkeypatch.setattr(config, "gpu_mode", "false")
     with patch("mcp_server.server.TextEmbedding", side_effect=FileNotFoundError("model_optimized.onnx")) as mock_te:
         emb = _make_embedder()
         with pytest.raises(EmbeddingModelLoadError):
