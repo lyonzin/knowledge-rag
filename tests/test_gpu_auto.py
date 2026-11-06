@@ -12,6 +12,9 @@ from unittest.mock import MagicMock, patch
 from mcp_server.config import Config
 from mcp_server.server import FastEmbedEmbeddings, GPUStatus
 
+# GH #257: CUDA is requested with exact-size arena growth so its free memory can be returned.
+CUDA_SAME_AS_REQUESTED = ("CUDAExecutionProvider", {"arena_extend_strategy": "kSameAsRequested"})
+
 # ============================================================================
 # Config normalization — gpu_mode accepts legacy bool AND new string values
 # ============================================================================
@@ -111,7 +114,7 @@ class TestLoadModelRouting:
         # Assert — probe called, CUDA providers used with CPU fallback in the list
         mock_verify.assert_called_once()
         _, kwargs = mock_te.call_args
-        assert kwargs["providers"] == ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        assert kwargs["providers"] == [CUDA_SAME_AS_REQUESTED, "CPUExecutionProvider"]
 
     @patch("mcp_server.server.FastEmbedEmbeddings.verify_gpu_readiness")
     @patch("mcp_server.server.TextEmbedding")
@@ -182,10 +185,7 @@ class TestLoadModelRouting:
         assert mock_te.call_count == 2
         first_call_kwargs = mock_te.call_args_list[0].kwargs
         second_call_kwargs = mock_te.call_args_list[1].kwargs
-        assert first_call_kwargs["providers"] == [
-            "CUDAExecutionProvider",
-            "CPUExecutionProvider",
-        ]
+        assert first_call_kwargs["providers"] == [CUDA_SAME_AS_REQUESTED, "CPUExecutionProvider"]
         assert second_call_kwargs["providers"] == ["CPUExecutionProvider"]
         captured = capsys.readouterr()
         assert "CUDA load failed" in captured.err

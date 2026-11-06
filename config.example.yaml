@@ -231,6 +231,8 @@ models:
     #   "auto"  → probe CUDA at first embedding; use if ready, fall back to CPU (default)
     #   "true"  → force CUDA; if not ready, log WARN and fall back to CPU
     #   "false" → never probe; runs on CPU with zero startup overhead
+    # The reranker follows it: CUDA under "auto"/"true" when ONNX Runtime has
+    # it, CPU under "false"/"directml".
     #
     # Legacy bool `gpu: true/false` continues to work — it is normalized to the
     # string form internally, so old configs keep behaving exactly the same.

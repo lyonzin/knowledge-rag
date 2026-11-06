@@ -292,6 +292,78 @@ class EmbeddingModelLoadError(RuntimeError):
     """
 
 
+# GH #257: ORT's default CUDA arena grows by powers of two and keeps every region
+# until the session dies, so one indexing batch or wide rerank pinned its peak VRAM
+# for the life of the process. kSameAsRequested extends by the request size, and
+# lets the per-run shrink below release every free region, the first included.
+_CUDA_PROVIDER = ("CUDAExecutionProvider", {"arena_extend_strategy": "kSameAsRequested"})
+_ARENA_SHRINKAGE_KEY = "memory.enable_memory_arena_shrinkage"
+# ORT names the arena to shrink "<device type>:<device id>"; the CUDA EP defaults to device 0.
+_ARENA_SHRINKAGE_DEVICE = "gpu:{device_id}"
+_DEFAULT_CUDA_DEVICE_ID = "0"
+# Every INVALID_ARGUMENT ORT raises for a shrink request it cannot honor, such as a
+# CUDA EP without an arena-based allocator, ends "... in the memory arena shrink list: ".
+_ARENA_SHRINK_REJECTED = "memory arena shrink list"
+# Each rerank run is padded to its longest candidate; 16 bounds that activation
+# peak while the default 15 candidates (5 results x 3) still take a single run.
+_RERANK_BATCH_SIZE = 16
+
+
+def _onnx_session(model: Any) -> Any:
+    """FastEmbed text models keep their ONNX Runtime session at ``model.model.model``."""
+    return getattr(getattr(model, "model", None), "model", None)
+
+
+def _shrink_cuda_arena_after_each_run(session: Any, requested: Sequence[Any]) -> None:
+    """Return a CUDA session's free arena regions to the driver after every run.
+
+    Acts only when ``requested`` holds ``_CUDA_PROVIDER`` and the session really
+    runs on CUDA. The cost is re-allocating activations on the next run, about
+    10 ms per run (20-30 ms per reranked search on a Windows RTX 3080 Ti).
+    Never raises: when the session cannot be found or ONNX Runtime's API
+    differs, it warns and leaves the session as FastEmbed built it.
+    """
+    if _CUDA_PROVIDER not in requested:
+        return
+    try:
+        if session is None:
+            raise LookupError("ONNX session not found at FastEmbed's model.model")
+        if "CUDAExecutionProvider" in session.get_providers():
+            _pass_shrink_options_to_every_run(session)
+    except Exception as exc:  # an upstream API change must never cost the model load
+        print(f"[WARN] CUDA arena shrink not installed: {type(exc).__name__}: {exc}", file=sys.stderr)
+
+
+def _pass_shrink_options_to_every_run(session: Any) -> None:
+    """Wrap ``session.run``: FastEmbed calls ``run(names, feed)`` without RunOptions.
+
+    Options a caller passes still win, so only FastEmbed's own runs shrink. If ORT
+    rejects the shrink request, the session gets its own ``run`` back after one
+    warning; ORT checks the request before executing, so that call is retried.
+    """
+    import onnxruntime as ort
+
+    device_id = session.get_provider_options()["CUDAExecutionProvider"].get("device_id", _DEFAULT_CUDA_DEVICE_ID)
+    shrink = ort.RunOptions()
+    shrink.add_run_config_entry(_ARENA_SHRINKAGE_KEY, _ARENA_SHRINKAGE_DEVICE.format(device_id=device_id))
+    run = session.run
+
+    def run_and_shrink(output_names: Any, input_feed: Any, run_options: Any = None) -> Any:
+        if run_options is not None:
+            return run(output_names, input_feed, run_options)
+        try:
+            return run(output_names, input_feed, shrink)
+        except Exception as exc:
+            if _ARENA_SHRINK_REJECTED not in str(exc):
+                raise
+            if session.run is run_and_shrink:  # skip if a concurrent first run already restored it
+                session.run = run
+                print(f"[WARN] CUDA arena shrink disabled: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return run(output_names, input_feed)
+
+    session.run = run_and_shrink
+
+
 # =============================================================================
 # GPU READINESS VERIFICATION
 # =============================================================================
@@ -669,7 +741,7 @@ class FastEmbedEmbeddings:
         gpu_status = self.verify_gpu_readiness()
         if gpu_status.available:
             try:
-                self._load_with_providers(["CUDAExecutionProvider", "CPUExecutionProvider"], label="GPU auto")
+                self._load_with_providers([_CUDA_PROVIDER, "CPUExecutionProvider"], label="GPU auto")
                 self._report_cuda_load(gpu_status, "auto-cuda")
                 return
             except Exception as e:
@@ -685,7 +757,7 @@ class FastEmbedEmbeddings:
         gpu_status = self.verify_gpu_readiness()
         if gpu_status.available:
             try:
-                self._load_with_providers(["CUDAExecutionProvider", "CPUExecutionProvider"], label="GPU forced")
+                self._load_with_providers([_CUDA_PROVIDER, "CPUExecutionProvider"], label="GPU forced")
                 self._report_cuda_load(gpu_status, "forced-cuda")
                 return
             except Exception as e:
@@ -751,13 +823,14 @@ class FastEmbedEmbeddings:
         kwargs["providers"] = providers
         print(f"[INFO] Loading embedding model: {self.model_name} ({self._dim}D) [{label}]...", file=sys.stderr)
         model = TextEmbedding(**kwargs)
-        session = getattr(getattr(model, "model", None), "model", None)
+        session = _onnx_session(model)
         active = session.get_providers() if callable(getattr(session, "get_providers", None)) else []
         # Missing introspection is conservatively treated as CPU for batching.
         provider = "CUDA" if "CUDAExecutionProvider" in active else "CPU"
         if "DmlExecutionProvider" in active:
             self._validate_directml_session(session)
             provider = "DirectML"
+        _shrink_cuda_arena_after_each_run(session, providers)
         self._active_provider = provider
         self._model = model
         print(f"[INFO] Embedding model loaded successfully [{self._active_provider}]", file=sys.stderr)
@@ -919,6 +992,18 @@ class CrossEncoderReranker:
         self._load_failed = False
         self._load_lock = threading.Lock()
 
+    @staticmethod
+    def _providers() -> List[Any]:
+        """Follow ``models.embedding.gpu``: FastEmbed alone picks CUDA whenever ORT offers it.
+
+        DirectML builds ship no CUDA provider, so that mode keeps the CPU reranker it had.
+        """
+        import onnxruntime as ort
+
+        if config.gpu_mode in ("auto", "true") and "CUDAExecutionProvider" in ort.get_available_providers():
+            return [_CUDA_PROVIDER, "CPUExecutionProvider"]
+        return ["CPUExecutionProvider"]
+
     def _ensure_model(self) -> bool:
         """Lazy initialization of cross-encoder model"""
         with self._load_lock:
@@ -928,7 +1013,12 @@ class CrossEncoderReranker:
                 return True
             print(f"[INFO] Loading reranker model: {self.model_name}...", file=sys.stderr)
             try:
-                self._model = TextCrossEncoder(model_name=self.model_name, cache_dir=str(config.models_cache_dir))
+                providers = self._providers()
+                model = TextCrossEncoder(
+                    model_name=self.model_name, cache_dir=str(config.models_cache_dir), providers=providers
+                )
+                _shrink_cuda_arena_after_each_run(_onnx_session(model), providers)
+                self._model = model
                 print("[INFO] Reranker model loaded successfully", file=sys.stderr)
             except Exception as e:
                 self._load_failed = True
@@ -957,7 +1047,7 @@ class CrossEncoderReranker:
         texts = [doc.get("document", "") for doc in documents]
 
         try:
-            scores = list(self._model.rerank(query, texts))
+            scores = list(self._model.rerank(query, texts, batch_size=_RERANK_BATCH_SIZE))
             for doc, score in zip(documents, scores):
                 doc["reranker_score"] = float(score)
             documents.sort(key=lambda x: x.get("reranker_score", 0), reverse=True)
