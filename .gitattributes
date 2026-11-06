@@ -1,0 +1,4 @@
+# core.autocrlf=true (Git for Windows' default) checks text out with CRLF.
+# Git Bash tolerates that, but the sh and bash of WSL, a container or a VM
+# reading the same checkout do not, so this script keeps LF everywhere.
+skills/install.sh text eol=lf

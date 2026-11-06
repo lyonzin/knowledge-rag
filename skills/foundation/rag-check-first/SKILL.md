@@ -45,20 +45,20 @@ Trigger this skill **before answering** whenever the user asks:
 
 2. **Call `search_knowledge`:**
    ```
-   search_knowledge(query="<extracted keywords>", max_results=5, snippet_mode=true, min_score=0.15)
+   search_knowledge(query="<extracted keywords>", max_results=5, snippet_mode=true)
    ```
    - `snippet_mode=true` keeps token consumption sane
-   - `min_score=0.15` cuts obvious noise (adjust higher for terse corpora)
+   - Leave `min_score` unset. `score` is min-max normalized within each query (the best candidate scores 1.0, the weakest 0.0), so `min_score` cuts the weakest results of every query, relevant or not
 
-3. **Read the top 3 results.** Pay attention to `search_method` (`hybrid` > `semantic` / `keyword` alone), `score`, and `reranker_score`.
+3. **Read the top 3 results and judge relevance from their content.** The top result scores 1.0 even when nothing in the corpus is on topic, so `score` only ranks the results of this one query. Check that the snippets talk about the component, error, or decision the user asked about. When `reranker_score` is present (not null), it is the raw cross-encoder score: higher means more relevant, and unlike `score` it can be compared across queries. `search_method: hybrid` means both the semantic and the keyword search found the chunk.
 
 4. **Decide the answer strategy** based on what came back:
 
    | RAG result | What to do |
    |---|---|
-   | ≥1 result with `score > 0.5` matching the intent | Answer **primarily from the RAG content**, quote relevant snippets, cite the source (`path:line`) |
-   | 1–3 results with lower scores (0.2–0.5) | Use as **partial context**, be explicit that the corpus does not cover this in depth, mix with training-data knowledge |
-   | 0 results after 2 attempts with varied phrasing | State it: "Local corpus does not have this. Answering from general knowledge — verify before acting." Optionally chain to `rag-web-fallback` |
+   | Snippets that answer the question | Answer **primarily from the RAG content**, quote the relevant parts, cite each `source` (see `rag-cite-sources`) |
+   | Snippets on the topic but not on the exact question | Use them as **partial context**, say what the corpus does not cover, and mark which parts come from training-data knowledge |
+   | `no_results`, or off-topic snippets after 2 attempts with varied phrasing | State it: "Local corpus does not have this. Answering from general knowledge — verify before acting." Optionally chain to `rag-web-fallback` |
 
 5. **If unsure between 2 corpus interpretations**, call `get_document` on the most promising `source` to fetch full context before answering.
 
@@ -72,10 +72,11 @@ User: *"How do we handle authentication in the payment service?"*
 
 Agent (internal):
 ```
-search_knowledge(query="authentication payment service", max_results=5, min_score=0.15)
-→ 3 hits: ADR-0018-auth.md (0.82), payment-service-design.md (0.71), auth-runbook.md (0.55)
+search_knowledge(query="authentication payment service", max_results=5)
+→ 3 hits: ADR-0018-auth.md, payment-service-design.md, auth-runbook.md;
+  the ADR snippet says how the payment service authenticates callers
 
-Answer: "Per ADR-0018 (path: docs/adr/0018-auth.md), the payment service
+Answer: "Per ADR-0018 [docs/adr/0018-auth.md], the payment service
 uses mTLS between services and OAuth2 for user-facing endpoints..."
 ```
 
@@ -86,7 +87,7 @@ User: *"Add a new endpoint for refund cancellation."*
 Agent (internal):
 ```
 search_knowledge(query="refund cancellation endpoint", max_results=5)
-→ 2 hits: refund-service.md (0.68), refunds-api-v2.md (0.61)
+→ 2 hits: refund-service.md, refunds-api-v2.md, both describing the refund endpoints
 
 Then: read the top result, model the new endpoint on the existing pattern,
 cite the reference file in the reply.
@@ -119,7 +120,7 @@ before running: [general k8s deployment steps]"
 
 ## Related skills
 
-- **[`rag-cite-sources`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/foundation/rag-cite-sources/SKILL.md)** — the natural follow-up: every claim carries a `path:line` citation.
+- **[`rag-cite-sources`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/foundation/rag-cite-sources/SKILL.md)** — the natural follow-up: every claim carries a citation of its source file.
 - **[`rag-deep-dive`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/workflow/rag-deep-dive/SKILL.md)** — if the top result needs full context, chain into `get_document` + `search_similar`.
 - **[`rag-web-fallback`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/workflow/rag-web-fallback/SKILL.md)** — the escape hatch when the corpus is empty.
 - **[`rag-onboard-context`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/foundation/rag-onboard-context/SKILL.md)** — call once at session start, then `rag-check-first` handles every subsequent request.

@@ -186,10 +186,12 @@ function ensureInstalled(python) {
 // Run the MCP server
 // ---------------------------------------------------------------------------
 
-function runServer() {
+function runServer(args) {
   const venvPython = getVenvPython();
 
-  const child = spawn(venvPython, ["-m", "mcp_server.server"], {
+  // Forward the arguments, so `npx knowledge-rag skills install`, `init` and
+  // `--transport sse` reach the Python CLI.
+  const child = spawn(venvPython, ["-m", "mcp_server.server", ...args], {
     stdio: "inherit",
     windowsHide: true,
   });
@@ -248,7 +250,7 @@ function main() {
     process.exit(0);
   }
 
-  runServer();
+  runServer(args);
 }
 
 main();

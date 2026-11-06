@@ -44,21 +44,21 @@ Then synthesizes an answer that pulls from all three, cites each source, and fla
 
 1. **Search — cast a wide net:**
    ```
-   search_knowledge(query="<user's topic>", max_results=8, snippet_mode=true, min_score=0.15)
+   search_knowledge(query="<user's topic>", max_results=8, snippet_mode=true)
    ```
-   Wider than usual (8 not 5) because we want candidate diversity for the similar-search step.
+   Wider than usual (8 not 5) because we want candidate diversity for the similar-search step. Pick the winner by reading the snippets: `score` is normalized within the query, so the first result always scores 1.0.
 
 2. **Fetch — read the winner in full:**
    ```
    get_document(filepath="<top_hit.source>")
    ```
-   The full document, not just the chunk. This gives you sections that adjacent chunks did not surface.
+   The full document, not just the chunk. This gives you sections that adjacent chunks did not surface. For a long document where only the match matters, `search_knowledge(..., snippet_mode=false)` is cheaper: each result's `content` then holds the matching chunk plus the chunks before and after it, when they exist (`context_expanded: true`), and `match_offset` says where the match starts.
 
 3. **Find similar — discover the surrounding graph:**
    ```
    search_similar(filepath="<top_hit.source>", max_results=5)
    ```
-   These are documents ChromaDB considers semantically close to the top hit. Often surfaces the "obvious next document" that keyword search missed.
+   These are other documents whose embeddings are close to one chunk of the top hit; the reference document itself is never in the list. Often surfaces the "obvious next document" that keyword search missed.
 
 4. **Cross-reference the 3 result sets.** Look for:
    - **Consensus** — do multiple docs describe the same thing? Cite them together.
@@ -80,8 +80,8 @@ Then synthesizes an answer that pulls from all three, cites each source, and fla
 Agent (internal):
 ```
 1. search_knowledge(query="document ingestion pipeline chunks embedding", max_results=8)
-   → 6 hits: ingestion.md (0.88), parsers.md (0.72), chunker.md (0.69), embeddings.md (0.65),
-             fastembed.md (0.61), watchdog.md (0.55)
+   → 6 hits: ingestion.md, parsers.md, chunker.md, embeddings.md, fastembed.md, watchdog.md;
+     the ingestion.md snippet is the only one describing the whole pipeline
 
 2. get_document(filepath="docs/ingestion.md")
    → 4200-char full doc: 5 sections (parsing / chunking / embedding / storage / watcher)
@@ -92,7 +92,7 @@ Agent (internal):
 
 4. Synthesized reply:
    "The ingestion pipeline has 5 stages [docs/ingestion.md]:
-    1. Parsing — dispatcher maps extension to parser [ingestion.py:174]
+    1. Parsing — dispatcher maps extension to parser [docs/ingestion.md#parsing]
     2. Chunking — markdown-aware or code-aware per format [chunker.md]
     3. Embedding — FastEmbed ONNX lazy-loaded [embeddings.md]
     4. Deduplication — SHA256 [ingestion.md#dedup]
@@ -130,7 +130,7 @@ Agent (internal):
 ## Edge cases
 
 - **Top hit is very short** (<500 chars) — the full document may not be much larger than the chunk. Still call `get_document` for completeness; then either lean on similar-search or run a 2nd search with different keywords.
-- **`search_similar` returns the same file** — expected for near-unique docs; move on.
+- **`search_similar` returns `no_results`** — the reference is not indexed (the path must be one `list_documents` shows) or no other document is close; fall back to a second `search_knowledge` with different keywords.
 - **Time budget matters** — this is 3 tool calls and reasoning between them. For quick chat, skip to `rag-check-first`.
 - **Overlapping content across many docs** — dedupe by summarizing the common thread once and citing all the sources at the end of that summary paragraph.
 

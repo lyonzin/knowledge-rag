@@ -51,7 +51,7 @@ Review comments then read as *"per ADR-XXXX we do Y here"* rather than *"general
    ```
    search_similar(filepath="<the file being changed>", max_results=5)
    ```
-   If the file is new, use `search_knowledge` with the file's purpose instead.
+   This works only when that file is itself indexed: its path must be inside the knowledge-rag documents folder, as `list_documents` shows it. A file from the repository under review usually is not, and a new file never is; then use `search_knowledge` with the file's purpose instead.
 
 4. **Look for prior incidents / postmortems** on adjacent code:
    ```
@@ -93,16 +93,17 @@ User: *"Review this. `for attempt in range(5): try: ... except: sleep(2)` — ne
 Agent:
 ```
 search_knowledge(query="retry policy exponential backoff") → 2 hits
-  → docs/adr/0031-retries.md (0.83), services/common/retry.py (0.71)
+  → docs/adr/0031-retries.md, services/common/retry.py
 
 search_similar(filepath="services/payment/refund_service.py") → 5 hits
+  (this corpus indexes the service code too)
   → All use `services/common/retry.retry_with_backoff` decorator
 
 Reply: "3 findings:
 
 1. **[required]** ADR-0031 [docs/adr/0031-retries.md] says '3 attempts, exponential
    backoff, max 30s'. This code has 5 attempts + fixed 2s sleep — violates both.
-   Fix: use `@retry_with_backoff` decorator from `services/common/retry.py:12`.
+   Fix: use the `@retry_with_backoff` decorator from `services/common/retry.py`.
 
 2. **[required]** Bare `except:` catches BaseException including SystemExit and
    KeyboardInterrupt. Team standard is to catch specific exceptions [PEP 8].
@@ -122,7 +123,7 @@ Agent:
 search_knowledge(query="bearer auth middleware ADR") → 3 hits
   → docs/adr/0018-auth.md, mcp_server/security.py (existing BearerAuthMiddleware), CHANGELOG.md#v451
 
-Reply: "The project already has `BearerAuthMiddleware` in `mcp_server/security.py:434`
+Reply: "The project already has `BearerAuthMiddleware` in `mcp_server/security.py`
 with constant-time comparison, RFC 6750 challenge, exempt paths, etc. This new
 middleware duplicates that logic — worse, uses `==` (timing side-channel).
 
@@ -138,10 +139,11 @@ User: *"Review this small helper for parsing dates."*
 Agent:
 ```
 search_knowledge(query="date parsing helper standard") → 0 hits
-search_similar(filepath="<the new file>") → 2 weak hits (unrelated helpers)
+search_knowledge(query="date parsing timezone utility") → 2 hits about unrelated helpers
+(search_similar cannot help: the new file is not indexed)
 
 Reply: "Nothing in the corpus about date-parsing conventions here (searched
-'date parsing helper standard' and adjacent files, 0 strong hits). Reviewing
+'date parsing helper standard' and 'date parsing timezone utility', 0 relevant hits). Reviewing
 against general Python practice:
 
 1. **[opinion]** `datetime.strptime` is slow — if this is a hot path, consider
@@ -158,7 +160,7 @@ becomes a repeated topic, worth opening an ADR."
 
 - **Very small diff** (1-2 lines) — still search once for the governing ADR of the area, then a light review. Skip similar-search.
 - **Very large diff** (whole feature) — do the ADR search for the top 2-3 concerns; do not try to search every file. Focus review energy on the ADR-governed parts.
-- **Newly-created file** — `search_similar` needs an existing file. Use `search_knowledge` with the file's purpose instead.
+- **File not indexed (new, or outside the documents folder)** — `search_similar` returns `no_results` for it. Use `search_knowledge` with the file's purpose instead.
 - **User pasted code without file context** — ask "what area/service is this from?" so search queries can be targeted.
 
 ---

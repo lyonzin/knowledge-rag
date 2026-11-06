@@ -1,6 +1,6 @@
 ---
 name: rag-onboard-context
-description: At the start of every new session or when the topic shifts significantly, probe the knowledge base to learn what is indexed. Calls get_index_stats + list_categories + a couple of exploratory search_knowledge queries. Prevents the agent from operating blind or making wrong assumptions about what the corpus contains.
+description: At the start of every new session or when the topic shifts significantly, probe the knowledge base to learn what is indexed. Calls get_index_stats (counts, categories, model) plus a couple of exploratory search_knowledge queries. Prevents the agent from operating blind or making wrong assumptions about what the corpus contains.
 metadata:
   type: rag-workflow
   kind: foundation
@@ -42,11 +42,7 @@ That mental map informs every subsequent decision: whether to search first, whet
    ```
    Read the nested `stats` object: `total_documents`, `total_chunks`, `query_cache.hit_rate`, `embedding_model`, and `embedding_dim`.
 
-2. **Enumerate categories:**
-   ```
-   list_categories()
-   ```
-   Note: which categories exist and how many docs each has. This tells you the corpus's shape.
+2. **Read the categories from the same response.** `stats.categories` maps each category to its document count, which tells you the corpus's shape. `list_categories()` returns the same map, so there is no need to call it too.
 
 3. **Probe 1–2 topics the user is likely to touch.** If the user's first message mentions a domain, probe it. Otherwise, probe the top 2 largest categories:
    ```
@@ -61,7 +57,7 @@ That mental map informs every subsequent decision: whether to search first, whet
 
 5. **Store the summary internally** — do not necessarily surface it to the user unless they ask. The value is that YOU now know:
    - "The corpus has 15K chunks across 8 categories"
-   - "Biggest categories are security (5K), development (3K), research (2K)"
+   - "Biggest categories are security (5K), development (3K), general (2K)"
    - "Search for `mitre attack` returned 3 solid hits — MITRE content is well indexed"
    - "Search for `kubernetes` returned nothing — try synonyms or inspect relevant categories before concluding the topic is absent"
 
@@ -77,9 +73,9 @@ User: *"Hi. I want to add a new REST endpoint."*
 
 Agent (internal, before answering):
 ```
-get_index_stats() → 12,043 chunks / 3,214 docs, cache hit 0%, model bge-small-en-v1.5
-list_categories() → categories {development: 1200, security: 800, general: 1169, adrs: 45}
-search_knowledge(query="REST endpoint", max_results=3) → 3 hits, top score 0.71
+get_index_stats() → 12,043 chunks / 3,214 docs, hit_rate "0%", model bge-small-en-v1.5,
+                    categories {development: 1200, security: 800, general: 1214}
+search_knowledge(query="REST endpoint", max_results=3) → 3 hits, one from docs/adr/
 
 Now I know: this project has ADRs indexed. I should look at those before designing the endpoint.
 
@@ -93,8 +89,8 @@ User: *"We have a suspected LSASS dump alert. Can you help triage?"*
 
 Agent (internal):
 ```
-get_index_stats() → 45,000 chunks / 5,800 docs
-list_categories() → categories {redteam: 2400, blueteam: 1800, ctf: 1000, mitre: 600}
+get_index_stats() → 45,000 chunks / 5,800 docs,
+                    categories {redteam: 2400, blueteam: 1800, ctf: 1000, security: 600}
 search_knowledge(query="LSASS credential dump", max_results=5) → 5 hits
 
 Now I know: this is a security-focused RAG. LSASS is well-covered. Full triage is
@@ -107,8 +103,7 @@ Reply: "Pulling triage steps from the runbooks and MITRE mapping..."
 
 Agent (internal):
 ```
-get_index_stats() → 12 chunks / 3 docs, cache hit 0%
-list_categories() → {general: 3}
+get_index_stats() → 12 chunks / 3 docs, hit_rate "0%", categories {general: 3}
 
 Signal: this is a fresh install. The corpus is nearly empty. Do NOT
 "rag-check-first" aggressively — most queries will miss. Behave more
@@ -124,9 +119,9 @@ would you like to point me at your docs folder so we can index them first?"
 ## Edge cases
 
 - **Very large corpus (>100K chunks)** — keep probes bounded and measure response time. First-use embedding/BM25 initialization and available RAM can affect latency.
-- **Cache already used** — `stats.query_cache.hit_rate > 0` describes hits during this process lifetime. It does not prove an entry for the next query remains valid; the cache is in memory and has a TTL.
+- **Cache already used** — `stats.query_cache.hit_rate` is a percentage string such as `"12.5%"` (`"0%"` before any lookup), so read it as text, not a number. It describes hits during this process lifetime and does not prove an entry for the next query remains valid; the cache is in memory and has a TTL.
 - **User immediately asks a task-specific question** — do onboarding silently in the background and continue answering. Do not stall the user with a "let me look around first" message unless the corpus is empty.
-- **Categories are empty (`{}`)** — inspect index counts and indexing errors. An empty category map alone does not identify the cause. Search without a category filter while keeping `max_results` bounded.
+- **Categories are empty (`stats.categories` is `{}`)** — inspect index counts and indexing errors. An empty category map alone does not identify the cause. Search without a category filter while keeping `max_results` bounded.
 
 ---
 

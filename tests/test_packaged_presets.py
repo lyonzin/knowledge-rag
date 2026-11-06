@@ -35,6 +35,9 @@ def test_built_wheel_contains_each_canonical_resource_once(tmp_path, from_sdist)
 
     expected = {"config.example.yaml": (ROOT / "config.example.yaml").read_bytes()}
     expected.update({preset.name: preset.read_bytes() for preset in (ROOT / "presets").glob("*.yaml")})
+    # `knowledge-rag skills install` reads these from the installed package.
+    skills = (ROOT / "skills").glob("*/*/SKILL.md")
+    expected.update({f"skills/{skill.relative_to(ROOT / 'skills').as_posix()}": skill.read_bytes() for skill in skills})
     source = ROOT
     if from_sdist:
         sdist = next(SdistBuilder(str(ROOT)).build(directory=str(tmp_path / "sdist")))

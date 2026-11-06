@@ -47,8 +47,9 @@ Only after those three come back empty does the agent apply general debugging te
 
 2. **First search — exact error signature:**
    ```
-   search_knowledge(query="<exception name> <error keyword>", max_results=5, min_score=0.15)
+   search_knowledge(query="<exception name> <error keyword>", max_results=5)
    ```
+   Judge the hits by their snippets: `score` is normalized within each query, so the first result is 1.0 even when it is about another error.
    Example: `search_knowledge(query="ConnectionError refused chromadb")`
 
 3. **Second search — affected component + symptom:**
@@ -61,10 +62,11 @@ Only after those three come back empty does the agent apply general debugging te
    ```
    search_knowledge(query="incident postmortem <component>", max_results=5)
    ```
-   Or with a category filter if your corpus categorizes by document type:
+   Or limited to the folder where incidents live:
    ```
-   search_knowledge(query="<component> failure", category="incidents")
+   search_knowledge(query="<component> failure", include_folders=["incidents"])
    ```
+   `include_folders` takes paths relative to the documents folder. A `category` filter works only with a name the server is configured with (a `category_mappings` value, a `keyword_routes` key, or `general`); any other name returns an error that lists the valid ones.
 
 5. **Evaluate:**
 
@@ -87,12 +89,13 @@ User: *"Getting `EmbeddingModelLoadError: sticky failure` when starting knowledg
 
 Agent:
 ```
-search_knowledge(query="EmbeddingModelLoadError sticky failure") → 3 hits, top 0.91
+search_knowledge(query="EmbeddingModelLoadError sticky failure") → 3 hits; the top
+snippet is the v3.8.1 changelog entry about this exact error
 
 Reply: "This is documented in [CHANGELOG.md#v381]. The `sticky _load_failed` flag was
 added in v3.8.1 as a hotfix — when the ONNX model fails to load, subsequent calls
 re-raise immediately instead of looping through HF Hub download attempts. The fix is
-in [providers/embeddings/fastembed.py:145]. Root cause is usually one of:
+in `FastEmbedEmbeddings._load_model` [mcp_server/server.py]. Root cause is usually one of:
   1. HF Hub unreachable at first startup (offline / DNS)
   2. Corrupt cached model in models_cache/
   3. Disk full during model download
@@ -115,12 +118,13 @@ get_document(filepath="docs/reindex-operations.md")
 
 Reply: "Per [docs/reindex-operations.md#post-rebuild-sanity-check], after a nuclear
 rebuild you should:
-1. Confirm `get_index_stats().chunks_count` > 0
+1. Confirm `get_index_stats()` reports `stats.total_chunks` > 0
 2. Run one `search_knowledge('any indexed keyword')` — should return hits
-3. If empty, check for stale FTS5 marker (v4.8.2+ specific) — delete
-   `data/fts5_migration.state` and restart.
-The most common cause is exactly the FTS5 stale marker case, added in v4.8.3
-[CHANGELOG.md#v483]."
+3. If the FTS5 fast path is enabled and searches still come back empty, restart
+   the server. Since v4.8.3 it compares the FTS5 row count with Chroma's at
+   startup and rebuilds the fast-path index when it holds less than 10% of the
+   chunks, so there is no need to delete `data/fts5_migration.state`
+   [CHANGELOG.md#v483]."
 ```
 
 **Example 3 — Nothing found, general debug**
@@ -138,7 +142,8 @@ segfault MCP' + 2 paraphrases, 0 hits). This appears to be a new failure mode.
 General-purpose debugging directions:
   1. Rebuild with `RUST_BACKTRACE=full` to get the panic location
   2. Check FFI lifetime — is a Python object dropped while Rust still holds a ref?
-  3. Try with `--single-instance` mode to rule out concurrency
+  3. Start the server with `KNOWLEDGE_RAG_SINGLE_INSTANCE=1` set, so a second
+     server process exits instead of running, to rule out concurrency
   4. Reduce to a minimal repro: 1 call, 2 calls, does it always fail on N=2?
 
 Once you find the root cause, worth indexing back — see rag-index-decisions."

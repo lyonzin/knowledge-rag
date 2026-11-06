@@ -34,6 +34,8 @@ Add to your MCP settings (`~/.claude.json` or project `.mcp.json`):
 | `--version` | Print version and exit |
 | `--install-only` | Install the Python package into the venv without starting the server |
 
+Every other argument goes to the Python CLI, for example `npx -y knowledge-rag skills install` (installs the usage skills for your AI coding assistants) or `npx -y knowledge-rag --transport sse`.
+
 ## Requirements
 
 - **Node.js** >= 16
