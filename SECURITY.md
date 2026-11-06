@@ -43,10 +43,10 @@ Anything requiring the attacker to already own the local filesystem is **out of 
 |---|---|
 | Latest published 5.0.x release | Current maintenance line; check release notes for the fixes actually included |
 | Unreleased branches / pull requests | Under review; not a released security guarantee |
-| Previous minor release | Security patch window of 30 days after the next minor release, under the policy below |
+| Previous release line (4.11.x since 5.0.0) | Security patch window of 30 days after the next minor or major release, under the policy below |
 | Older releases | Unsupported; upgrade to the maintained release |
 
-When a new minor version ships, the previous minor gets a final 30-day security patch window and is then unsupported. The version embedded in a development branch does not prove that its fixes have been published. Consult [releases](https://github.com/lyonzin/knowledge-rag/releases) and the associated changelog.
+When a new minor or major version ships, the previous release line gets a final 30-day security patch window and is then unsupported; with 5.0.0, that is 4.11.x. The version embedded in a development branch does not prove that its fixes have been published. Consult [releases](https://github.com/lyonzin/knowledge-rag/releases) and the associated changelog.
 
 ---
 
