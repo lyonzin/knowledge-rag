@@ -41,27 +41,27 @@ The agent will:
 
 1. **First-pass RAG:**
    ```
-   search_knowledge(query="<extracted keywords>", max_results=5, min_score=0.15)
+   search_knowledge(query="<extracted keywords>", max_results=5)
    ```
 
-2. **If 0 hits (or top score < 0.3), try a paraphrase.** Common variants:
+2. **If it returns `no_results` or the snippets do not address the question, try a paraphrase.** Judge this from the snippets, not from `score`: it is min-max normalized within each query, so the top result scores 1.0 even when it is off-topic. When `reranker_score` is present (not null), it is the raw cross-encoder score and can be compared across queries. Common variants:
    - Swap synonyms ("auth" ↔ "authentication", "reindex" ↔ "rebuild", "ttl" ↔ "expiration")
    - Broaden ("payment refund cancellation" → "refund process")
    - Narrow ("architecture" → "authentication architecture")
 
 3. **Second-pass RAG:**
    ```
-   search_knowledge(query="<paraphrased keywords>", max_results=5, min_score=0.10)
+   search_knowledge(query="<paraphrased keywords>", max_results=5)
    ```
-   Note: lower `min_score` (0.10) to catch weaker matches.
+   Do not lower or raise `min_score` to catch weaker matches: it filters on the per-query normalized score, so it only drops the weakest results of each query, whatever their relevance.
 
 4. **Decide:**
 
-   | Local result quality | Action |
+   | Local result | Action |
    |---|---|
-   | Solid hit (score > 0.5) | Answer from RAG, do NOT hit web |
-   | Weak hit (score 0.15–0.5) | Answer from RAG **and** add a web-search suggestion "for more context" |
-   | No hit | **Explicitly** tell the user "corpus does not have this" then optionally invoke web search |
+   | Snippets that answer the question | Answer from RAG, do NOT hit web |
+   | Snippets on the topic that leave gaps | Answer from RAG **and** add a web-search suggestion "for more context" |
+   | No relevant snippet after both passes | **Explicitly** tell the user "corpus does not have this" then optionally invoke web search |
 
 5. **If escalating to web,** prefix the answer with:
    > "The local knowledge base does not cover this (searched `<query1>`, `<query2>`, 0 relevant hits). Falling back to external web search."
@@ -78,7 +78,7 @@ User: *"What is our retry policy for external HTTP calls?"*
 
 Agent:
 ```
-search_knowledge(query="retry policy external http") → 2 hits, top score 0.79
+search_knowledge(query="retry policy external http") → 2 hits; the top snippet states the policy
 
 Reply: "Per [docs/adr/0031-retries.md], the policy is 3 attempts with exponential
 backoff starting at 1s, max 30s. See services/common/retry.py:12–28 for the impl."
@@ -92,11 +92,12 @@ User: *"What are the top CVEs in Python cryptography package in Q3 2026?"*
 
 Agent:
 ```
-search_knowledge(query="cve python cryptography 2026", min_score=0.10) → 0 hits
-search_knowledge(query="python cryptography vulnerabilities", min_score=0.10) → 0 hits
+search_knowledge(query="cve python cryptography 2026") → no_results
+search_knowledge(query="python cryptography vulnerabilities") → 2 hits, both about TLS
+  configuration, none about CVEs
 
 Reply: "The local corpus does not track CVE data (searched 'cve python cryptography 2026'
-and 'python cryptography vulnerabilities', 0 hits). Falling back to external web search..."
+and 'python cryptography vulnerabilities', 0 relevant hits). Falling back to external web search..."
 
 [Then calls WebSearch or mcp__cti__vuln_cve]
 ```
@@ -107,8 +108,8 @@ User: *"Explain the LangChain LCEL syntax."*
 
 Agent:
 ```
-search_knowledge(query="langchain lcel syntax") → 1 hit, score 0.22
-(a passing mention in one of your ADRs comparing frameworks)
+search_knowledge(query="langchain lcel syntax") → 1 hit: a passing mention
+in one of your ADRs comparing frameworks (score 1.0 only because it is the sole result)
 
 Reply: "The corpus has one passing mention of LangChain LCEL in
 [docs/adr/0044-framework-choice.md]. That does not fully explain the syntax

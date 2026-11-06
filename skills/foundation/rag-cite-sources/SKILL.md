@@ -1,6 +1,6 @@
 ---
 name: rag-cite-sources
-description: Every technical claim drawn from the local corpus must ship with a source citation formatted as path:line or path:section. Trigger whenever the response quotes, paraphrases, or acts on knowledge that came from a search_knowledge or get_document call. Makes answers auditable and lets the user jump to source in one click.
+description: Every technical claim drawn from the local corpus must ship with a source citation — the file path from the result's source field, plus a section, or a line once it was checked in get_document. Trigger whenever the response quotes, paraphrases, or acts on knowledge that came from a search_knowledge or get_document call. Makes answers auditable and lets the user jump to the source.
 metadata:
   type: rag-workflow
   kind: foundation
@@ -27,9 +27,11 @@ Basically: **if a curious reader would want to double-check where you got that**
 
 Every technical claim in the response carries a citation of the form:
 
-- `[path/to/file.md:42]` — line-anchored (from `search_knowledge` result's `source` field)
-- `[path/to/file.md#section-heading]` — section-anchored for Markdown
-- `[path/to/file.md]` — file-only, when line/section is not available
+- `[path/to/file.md]` — the default: the result's `source` path, shortened to the part inside the documents folder
+- `[path/to/file.md#section-heading]` — section-anchored, for Markdown, when the heading above the quoted text shows in the chunk or in `get_document`
+- `[path/to/file.md:42]` — line-anchored, only after you found the quoted text in `get_document`'s content and counted the lines
+
+No tool returns line numbers. A `search_knowledge` result carries `source`, `chunk_index` (which chunk of the file matched) and, with `snippet_mode=false`, `match_offset` (a character offset into the returned `content`). `get_document` returns the parsed text: Markdown loses its YAML front matter, JSON comes back re-indented, and PDF, Office, notebook and CSV files come back as extracted text. A line counted there matches the file only for Markdown without front matter and for code, YAML, XML and plain text; otherwise cite the section.
 
 Citations are **inline** at the point of the claim, not batched at the end. One claim = one citation.
 
@@ -38,9 +40,9 @@ Citations are **inline** at the point of the claim, not batched at the end. One 
 ## Steps
 
 1. **When you call `search_knowledge` or `get_document`**, capture:
-   - The `source` field (usually the file path)
+   - The `source` field (the file path)
    - The `filename` (short name for display)
-   - Any `chunk_id` or line hint in the metadata
+   - `chunk_index` and, when present, `match_offset` — they locate the match, but they are not line numbers
    - The actual `content` you are about to quote or paraphrase
 
 2. **When you draft the response**, mark every fact-carrying sentence with its source. Preferred inline syntax:
@@ -61,7 +63,7 @@ Citations are **inline** at the point of the claim, not batched at the end. One 
 
    ```markdown
    The service uses OAuth2 [docs/adr/0018-auth.md] with a 15-minute access token TTL
-   [config/auth.yaml:12] and refresh-token rotation on every use [docs/security/oauth-flow.md].
+   [config/auth.yaml] and refresh-token rotation on every use [docs/security/oauth-flow.md].
    ```
 
 5. **When a claim is NOT from the corpus** (general knowledge, external doc, your own reasoning), mark it explicitly:
@@ -82,10 +84,11 @@ User: *"What is our default request timeout?"*
 Agent:
 ```
 search_knowledge(query="default request timeout") →
-1 hit: config/http.yaml (line 8, score 0.87)
+1 hit: config/http.yaml, whose snippet shows `timeout: 30s`
+get_document(filepath="config/http.yaml") → the setting is on line 8
 
 Reply: "The default request timeout is 30 seconds [config/http.yaml:8].
-This is enforced globally by the HTTP client middleware [services/common/http_client.py:45]."
+This is enforced globally by the HTTP client middleware [services/common/http_client.py]."
 ```
 
 **Example 2 — Code review**
@@ -95,13 +98,13 @@ User: *"Is this retry logic correct?"*
 Agent:
 ```
 search_knowledge(query="retry policy exponential backoff") →
-2 hits: docs/adr/0031-retries.md (0.79), services/common/retry.py (0.65)
+2 hits: docs/adr/0031-retries.md, services/common/retry.py
 
 Reply: "Per our retry ADR [docs/adr/0031-retries.md], the policy is
 '3 attempts, exponential backoff starting at 1s, max 30s'. Your code
 retries 5 times which exceeds the standard. Adjust to match
-services/common/retry.py:12–28 or open a new ADR to document
-the exception."
+`retry_with_backoff` in [services/common/retry.py] or open a new ADR
+to document the exception."
 ```
 
 **Example 3 — Explicit no-source note**
@@ -136,7 +139,7 @@ committing."
 - **The corpus contradicts itself** — cite both sources and flag the conflict explicitly:
   ```markdown
   Conflicting sources: [docs/adr/0018-auth.md] says 15-min TTL, but
-  [config/auth.yaml:12] shows 30-min. Recommend resolving the ADR vs config
+  [config/auth.yaml] shows 30-min. Recommend resolving the ADR vs config
   drift before answering with certainty.
   ```
 

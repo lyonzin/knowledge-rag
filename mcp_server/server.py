@@ -5690,6 +5690,11 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] == "init":
         _handle_init()
         return
+    if len(sys.argv) > 1 and sys.argv[1] == "skills":
+        from .skills_cli import main as skills_main
+
+        # SystemExit, not a return value: `python -m mcp_server.server` (the npx path) ignores main()'s result.
+        raise SystemExit(skills_main(sys.argv[2:]))
 
     from .instance_lock import (
         ALREADY_RUNNING_EXIT_CODE,

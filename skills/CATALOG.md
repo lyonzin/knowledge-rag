@@ -2,11 +2,13 @@
 
 10 skills covering the full workflow of an AI agent backed by [knowledge-rag](../README.md).
 
-**Repo layout is compatible with [skills.sh](https://www.skills.sh/) so you can install everything with:**
+**Install all of them for every AI coding assistant on your machine with:**
 
 ```bash
-npx skills add lyonzin/knowledge-rag
+knowledge-rag skills install
 ```
+
+The repo layout also works with [skills.sh](https://www.skills.sh/): `npx skills add lyonzin/knowledge-rag`.
 
 **Legend:**
 - 🎯 **Foundation** — the 3 skills you should install first
@@ -19,15 +21,15 @@ npx skills add lyonzin/knowledge-rag
 | # | Skill | Kind | One-liner | Depends on MCP tools |
 |---|---|:---:|---|---|
 | 1 | [`rag-check-first`](foundation/rag-check-first/SKILL.md) | 🎯 | Search the corpus **before** answering any technical claim | `search_knowledge` |
-| 2 | [`rag-cite-sources`](foundation/rag-cite-sources/SKILL.md) | 🎯 | Every technical claim ships with `path:line` citations | `search_knowledge`, `get_document` |
-| 3 | [`rag-onboard-context`](foundation/rag-onboard-context/SKILL.md) | 🎯 | First interaction of a session probes what is indexed | `get_index_stats`, `list_categories`, `list_documents` |
+| 2 | [`rag-cite-sources`](foundation/rag-cite-sources/SKILL.md) | 🎯 | Every technical claim ships with its source file; a line only once checked in `get_document` | `search_knowledge`, `get_document` |
+| 3 | [`rag-onboard-context`](foundation/rag-onboard-context/SKILL.md) | 🎯 | First interaction of a session probes what is indexed | `get_index_stats`, `search_knowledge`, `list_documents` |
 | 4 | [`rag-deep-dive`](workflow/rag-deep-dive/SKILL.md) | 🧠 | 3-step drill: search → fetch → find-similar | `search_knowledge`, `get_document`, `search_similar` |
 | 5 | [`rag-web-fallback`](workflow/rag-web-fallback/SKILL.md) | 🧠 | Only hit the web when local RAG comes back empty | `search_knowledge`, then external `WebSearch` |
 | 6 | [`rag-troubleshoot`](workflow/rag-troubleshoot/SKILL.md) | 🧠 | Bug / error / stack trace → RAG first for prior fixes | `search_knowledge` (with error signature) |
 | 7 | [`rag-code-review`](workflow/rag-code-review/SKILL.md) | 🧠 | Code review consults ADRs / patterns before commenting | `search_knowledge`, `search_similar` |
 | 8 | [`rag-index-decisions`](maintenance/rag-index-decisions/SKILL.md) | 🔁 | After making an architectural decision, index it back | `add_document`, `add_from_url` |
 | 9 | [`rag-security-first`](domain/rag-security-first/SKILL.md) | 🏢 | Security tasks: MITRE / CVE / threat context first | `search_knowledge` (cybersecurity preset) |
-| 10 | [`rag-evaluate-quality`](maintenance/rag-evaluate-quality/SKILL.md) | 🔁 | Periodically measure retrieval quality (MRR / Recall / Precision) | `evaluate_retrieval`, `get_index_stats` |
+| 10 | [`rag-evaluate-quality`](maintenance/rag-evaluate-quality/SKILL.md) | 🔁 | Periodically measure retrieval quality (MRR@5 / Recall@5) | `evaluate_retrieval`, `get_index_stats` |
 
 ---
 
@@ -56,33 +58,48 @@ Understand what the project cares about, review against those standards, cite th
 Load session context, prioritize the security preset, drill down, cite the MITRE technique / runbook.
 
 ### Chain: "Weekly maintenance"
-`rag-evaluate-quality` → (if quality drops) `rag-index-decisions` on new material → `reindex_documents(force=True)`
+`rag-evaluate-quality` → (if quality drops) `rag-index-decisions` on new material → `reindex_documents()` if files changed outside the tools
+
+`add_document`, `update_document` and `add_from_url` index as they write, and `reindex_documents()` picks up new, changed and deleted files. `reindex_documents(force=True)` re-embeds every file, so keep it for a change of query/passage prefixes or chunking settings.
 
 ---
 
 ## Installation
 
-Three ways to install, pick the one you like:
+Pick the one you like; [README.md#installation](README.md#installation) has the details:
 
-### 1. Via `skills.sh` — the shortest path
-
-```bash
-npx skills add lyonzin/knowledge-rag
-```
-
-The [Vercel Labs skills CLI](https://github.com/vercel-labs/skills) discovers this repo's `skills/**/SKILL.md` layout automatically and installs into `.claude/skills/`.
-
-### 2. Via our `install.sh` — no Node required
+### 1. `knowledge-rag skills install` — every OS
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/lyonzin/knowledge-rag/master/skills/install.sh | bash
+knowledge-rag skills install          # after pip install knowledge-rag (a release newer than 5.0.0)
+npx -y knowledge-rag skills install   # the same through npm
 ```
 
-Pure bash. Works on Linux, macOS, WSL, Git Bash on Windows. Supports `--project`, `--only <a,b,c>`, `--dry-run`, `--help`.
+It finds the AI coding assistants of the current user and asks once per skills folder before copying `<name>/SKILL.md` folders into it.
 
-### 3. Manual clone + copy
+### 2. One-line wrappers
 
-See [README.md#manual-install-claude-code](README.md#manual-install-claude-code).
+```bash
+curl -fsSL https://raw.githubusercontent.com/lyonzin/knowledge-rag/master/skills/install.sh | sh
+```
+
+```powershell
+irm https://raw.githubusercontent.com/lyonzin/knowledge-rag/master/skills/install.ps1 | iex
+```
+
+Both run `knowledge-rag skills install` and say what to install when knowledge-rag is missing or too old.
+
+### 3. Via `skills.sh` (Node)
+
+```bash
+npx skills add lyonzin/knowledge-rag       # this project; add -g for all of yours
+```
+
+The [Vercel Labs skills CLI](https://github.com/vercel-labs/skills) discovers this repo's `skills/**/SKILL.md` layout automatically and asks which assistants to install for.
+
+### 4. Manual copy
+
+See [README.md#manual-install](README.md#manual-install).
 
 ---
 
@@ -102,11 +119,11 @@ See [README.md#manual-install-claude-code](README.md#manual-install-claude-code)
 Install a subset with either tool:
 
 ```bash
-# skills.sh
-npx skills add lyonzin/knowledge-rag --only rag-check-first,rag-cite-sources,rag-onboard-context
+# knowledge-rag (the wrappers take the same option)
+knowledge-rag skills install --skill rag-check-first,rag-cite-sources,rag-onboard-context
 
-# our install.sh
-curl -fsSL https://raw.githubusercontent.com/lyonzin/knowledge-rag/master/skills/install.sh | bash -s -- --only rag-check-first,rag-cite-sources,rag-onboard-context
+# skills.sh: repeat --skill (or -s) once per skill
+npx skills add lyonzin/knowledge-rag --skill rag-check-first --skill rag-cite-sources --skill rag-onboard-context
 ```
 
 ---

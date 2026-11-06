@@ -1,6 +1,6 @@
 # knowledge-rag Skills for AI Agents
 
-> Drop-in skills that teach any MCP-aware AI agent — Claude Code, Cursor, Windsurf, Cline, Zed, VS Code Copilot — to use your local knowledge base as its primary source of truth. Copy the ones you want, customize, ship.
+> Drop-in skills that teach any MCP-aware AI agent — Claude Code, Codex, Cursor, Gemini CLI, GitHub Copilot, Windsurf, Cline, Zed — to use your local knowledge base as its primary source of truth. Install the ones you want, customize, ship.
 
 **What these skills do:** they instruct the AI to reach for the [13 knowledge-rag MCP tools](../docs/API.md) at the right moments — before writing code, before answering claims, before searching the web — so the agent leans on YOUR indexed corpus (your docs, your ADRs, your runbooks, your MITRE mapping, your team's context) instead of guessing from training data.
 
@@ -26,89 +26,107 @@ Installing knowledge-rag gives your AI 13 tools. It does not tell the AI **when*
 
 ## Installation
 
-### Option 1 — Via `skills.sh` (the shortest path)
+### Option 1 — `knowledge-rag skills install` (every OS)
+
+```bash
+knowledge-rag skills install
+```
+
+This needs knowledge-rag itself, in a release newer than 5.0.0: `pip install knowledge-rag`, `pipx install knowledge-rag` or `uv tool install knowledge-rag`. With Node.js instead, `npx -y knowledge-rag skills install` runs the same command.
+
+It looks for the AI coding assistants of the current user — a config folder in your profile or an executable on PATH, without changing anything — prints what it would do in each skills folder, and asks once per folder:
+
+```text
+Claude Code: C:\Users\you\.claude\skills
+  10 not installed
+Install the knowledge-rag skills for Claude Code? [Y/n]
+```
+
+Each skill goes in as a `<name>/SKILL.md` folder, the layout these assistants load:
+
+| Assistant | Detected by | Skills folder | Official docs |
+|---|---|---|---|
+| Claude Code | `~/.claude` or `$CLAUDE_CONFIG_DIR`; `claude` | `~/.claude/skills`, or `$CLAUDE_CONFIG_DIR/skills` when set | [Skills](https://code.claude.com/docs/en/skills) |
+| Codex CLI | `~/.codex` or `$CODEX_HOME`; `codex` | `~/.agents/skills` | [Skills](https://developers.openai.com/codex/skills) |
+| GitHub Copilot CLI | `~/.copilot`; `copilot` | `~/.agents/skills` | [Agent skills](https://docs.github.com/en/copilot/concepts/agents/about-agent-skills) |
+| Gemini CLI | `~/.gemini`; `gemini` | `~/.agents/skills` | [Skills](https://geminicli.com/docs/cli/skills/) |
+| Cursor | `~/.cursor`; `cursor` | `~/.agents/skills` | [Skills](https://cursor.com/docs/skills) |
+| OpenCode | `~/.config/opencode`; `opencode` | `~/.agents/skills` | [Skills](https://opencode.ai/docs/skills/) |
+| Windsurf | `~/.codeium/windsurf`; `windsurf` | `~/.agents/skills` | [Skills](https://docs.windsurf.com/windsurf/cascade/skills) |
+| Zed | `~/.config/zed` or `%APPDATA%\Zed`; `zed` | `~/.agents/skills` | [Skills](https://zed.dev/docs/ai/skills) |
+| Cline | `~/.cline`; `cline` | `~/.cline/skills` | [Skills](https://docs.cline.bot/customization/skills) |
+| Aider | `~/.aider.conf.yml`; `aider` | none, see [Other assistants](#other-assistants) | [Conventions](https://aider.chat/docs/usage/conventions.html) |
+
+`~` is your user profile: `%USERPROFILE%` on Windows (`C:\Users\you`, even when OneDrive redirects your Documents folder). The assistants that share `~/.agents/skills` get one question between them. Under WSL the installer also checks the Windows profile (`/mnt/c/Users/you`, for config folders only) and offers its folders marked "(Windows)".
+
+Re-running is safe. A `.knowledge-rag-skills.json` file in each skills folder records the copies it installed: a re-run updates the ones you have not touched, keeps the ones you edited, and leaves symlinked skill folders alone; `uninstall` removes only unedited skill folders that hold nothing else. Start a new session in each assistant afterwards.
+
+| Option | What it does |
+|---|---|
+| `install`, `uninstall`, `status` | The subcommand; `status` changes nothing |
+| `-y`, `--yes` | Do not ask. When stdin is not a terminal (CI, a pipe), the command prints its plan and changes nothing without it |
+| `--dry-run` | Print the plan and change nothing |
+| `--harness NAME` | Only this assistant, detected or not (repeatable): `claude-code`, `codex`, `copilot`, `gemini`, `cursor`, `opencode`, `windsurf`, `zed`, `cline`, `aider` |
+| `--target DIR` | Only this skills folder (repeatable) |
+| `--project` | Only `./.claude/skills` in the current folder, to commit the skills with a project |
+| `--skill NAME` | Only these skills, comma-separated or repeated; `--only` is the same option |
+
+```bash
+knowledge-rag skills status
+knowledge-rag skills install --dry-run
+knowledge-rag skills install --harness claude-code --yes
+knowledge-rag skills install --skill rag-check-first,rag-cite-sources,rag-onboard-context
+knowledge-rag skills uninstall
+```
+
+Cursor, OpenCode and VS Code's local Copilot sessions read `~/.claude/skills` as well as `~/.agents/skills`, so with both folders installed they can list each skill twice. Answer no to one of the two questions if that bothers you.
+
+### Option 2 — one-line wrappers
+
+Linux, macOS, WSL and Git Bash:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lyonzin/knowledge-rag/master/skills/install.sh | sh
+```
+
+Windows PowerShell 5.1 or PowerShell 7:
+
+```powershell
+irm https://raw.githubusercontent.com/lyonzin/knowledge-rag/master/skills/install.ps1 | iex
+```
+
+Both run `knowledge-rag skills install` and forward any option above: `sh skills/install.sh status` or `curl ... | sh -s -- --dry-run`; from a checkout on Windows, `powershell -ExecutionPolicy Bypass -File skills\install.ps1 --dry-run`. When knowledge-rag is missing they say how to install it (exit code 127). When it is 5.0.0 or older they ask you to upgrade (exit code 1) instead of running it, because those releases ignore `skills` and would start the MCP server. If Git Bash's default mintty window answers that stdin is not a terminal, add `--yes` or run from Windows Terminal.
+
+### Option 3 — `skills.sh` (Node)
 
 ```bash
 npx skills add lyonzin/knowledge-rag
 ```
 
-This uses the [Vercel Labs `skills` CLI](https://github.com/vercel-labs/skills) which auto-discovers this repo's `skills/**/SKILL.md` layout and installs into `.claude/skills/`. Zero clone, zero curl, one command.
+The [Vercel Labs `skills` CLI](https://github.com/vercel-labs/skills) discovers this repo's `skills/**/SKILL.md` layout and asks which assistants to install for. It installs into the current project by default; add `-g` for all of your projects, and `--skill NAME` (repeated) for a subset.
 
-### Option 2 — Via our `install.sh` (no Node required)
+### Manual install
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/lyonzin/knowledge-rag/master/skills/install.sh | bash
-```
-
-Works on **Linux, macOS, WSL, and Git Bash on Windows**. Downloads and installs all 10 skills to `~/.claude/skills/`, skips duplicates gracefully, and prints a summary. Restart Claude Code — skills auto-discover via their frontmatter.
-
-> **Windows users without WSL or Git Bash:** either use Option 1 (needs Node.js) or fall back to the [manual install](#manual-install-claude-code) below.
-
-### Installer options (`install.sh`)
-
-| Option | What it does |
-|---|---|
-| `--project` | Install to `./.claude/skills` (project-scoped, not global) |
-| `--target <path>` | Install to a custom directory |
-| `--only rag-check-first,rag-cite-sources` | Install a subset only |
-| `--dry-run` | Show what would happen, do not write files |
-| `--list` | List available skills |
-| `--help` | Show the full help |
-
-Examples:
-
-```bash
-# Install only the 3 foundation skills, project-scoped
-bash skills/install.sh --project --only rag-check-first,rag-cite-sources,rag-onboard-context
-
-# Dry-run to preview what would land where
-bash skills/install.sh --dry-run
-
-# Install to a custom folder
-bash skills/install.sh --target ~/my-agent-skills
-```
-
-### Manual install (Claude Code)
-
-If you prefer to see the files before installing:
+The repo groups the skills by category (`foundation/`, `workflow/`, `maintenance/`, `domain/`); an assistant wants the skill folders side by side in its skills folder from the table above:
 
 ```bash
 git clone https://github.com/lyonzin/knowledge-rag.git
-
-# Global — all projects benefit
 mkdir -p ~/.claude/skills
-# The repo organizes skills by category (foundation/workflow/maintenance/domain);
-# copy the SKILL.md files out and rename them per skill:
-for f in knowledge-rag/skills/*/*/SKILL.md; do
-  skill=$(basename "$(dirname "$f")")
-  cp "$f" ~/.claude/skills/"$skill".md
-done
+cp -R knowledge-rag/skills/*/rag-* ~/.claude/skills/
 ```
 
-Restart Claude Code. The skills are auto-discovered by their frontmatter `description` — trigger by typing keywords that match, or invoke explicitly with `/rag-check-first`, `/rag-cite-sources`, etc.
+That gives `~/.claude/skills/rag-check-first/SKILL.md` and so on. The skills are auto-discovered by their frontmatter `description` — trigger them by typing keywords that match, or invoke one explicitly, e.g. `/rag-check-first` in Claude Code.
 
-### Cursor
+The `install.sh` of earlier versions copied the skills as `~/.claude/skills/rag-*.md` files, which Claude Code never loaded because it needs `<name>/SKILL.md`. Delete those files.
 
-Cursor supports custom rules and `.cursor/rules/*.mdc` files. Adapt each skill:
+### Other assistants
 
-```bash
-mkdir -p .cursor/rules
-for f in knowledge-rag/skills/rag-*.md; do
-  name=$(basename "$f" .md)
-  cp "$f" ".cursor/rules/${name}.mdc"
-done
-```
+Aider and other clients without a skills folder still use the MCP tools; give them the skill text instead:
 
-Skills apply based on the rule's frontmatter `alwaysApply` / `globs` fields. Adjust per your project.
+1. **Read it into the session** — `aider --read path/to/rag-check-first/SKILL.md`, or list the files under `read:` in `.aider.conf.yml`. Aider takes the frontmatter as plain text.
+2. **System prompt or rules file** — paste the skill body into the client's global instructions, or into an `AGENT_RULES.md` that the system prompt tells it to follow.
 
-### Windsurf, Cline, Zed, VS Code Copilot
-
-These clients consume the MCP tools directly without a native "skill" concept. You have two options:
-
-1. **System prompt injection** — paste the skill body into your global system prompt / rules file (usually `.windsurf/rules.md`, `.clinerules`, `.zed/prompt.md`, `.github/copilot-instructions.md`).
-2. **Reference from a project doc** — add a `AGENT_RULES.md` to your repo and reference it in the client's system prompt: "Follow the rules in `AGENT_RULES.md` for every task."
-
-Every skill in this folder is written to work in either mode — the frontmatter is metadata only, the body is pure instructions.
+Every skill in this folder works in either mode — the frontmatter is metadata only, the body is pure instructions.
 
 ---
 
@@ -118,9 +136,9 @@ New to skills? Start with these three. They are the highest-ROI baseline for any
 
 | Skill | What it does | When it kicks in |
 |---|---|---|
-| [`rag-check-first`](rag-check-first.md) | Forces a `search_knowledge` call before answering any technical claim | Every code / architecture / security / research question |
-| [`rag-cite-sources`](rag-cite-sources.md) | Every claim carries a `path:line` citation from the corpus | Every response that references RAG data |
-| [`rag-onboard-context`](rag-onboard-context.md) | First interaction of a new session: probes `get_index_stats` + `list_categories` | Session start |
+| [`rag-check-first`](foundation/rag-check-first/SKILL.md) | Forces a `search_knowledge` call before answering any technical claim | Every code / architecture / security / research question |
+| [`rag-cite-sources`](foundation/rag-cite-sources/SKILL.md) | Every claim cites the file it came from; a line only once checked in `get_document` | Every response that references RAG data |
+| [`rag-onboard-context`](foundation/rag-onboard-context/SKILL.md) | First interaction of a new session: reads `get_index_stats` and probes a topic or two | Session start |
 
 Add more from the [full catalog](CATALOG.md) as your workflow grows.
 
@@ -128,7 +146,7 @@ Add more from the [full catalog](CATALOG.md) as your workflow grows.
 
 ## How the skills are organized
 
-Every file follows the same structure:
+Every skill is a `<category>/<name>/SKILL.md` file with the same structure:
 
 ```markdown
 ---
@@ -171,6 +189,8 @@ Skills are just markdown. **Edit them.** Real-world patterns:
 - **Chain to your own tools** — if your agent has more MCP servers, add "then call `your_tool()` with the results"
 - **Tighten the fallback rules** — enterprise deployments often want `rag-web-fallback` to hard-block web searches entirely
 
+`knowledge-rag skills install` keeps a skill you edited: it replaces only copies that still match what it installed.
+
 ---
 
 ## Why not just put this in the system prompt?
@@ -186,13 +206,14 @@ You can. But:
 
 ## Contributing new skills
 
-Have a workflow that plays well with knowledge-rag? Open a PR — one file per skill, follow the template above, add an entry to [CATALOG.md](CATALOG.md).
+Have a workflow that plays well with knowledge-rag? Open a PR — one `<category>/rag-<name>/SKILL.md` folder per skill, follow the template above, add an entry to [CATALOG.md](CATALOG.md).
 
 **Guidelines:**
-- Name in `kebab-case`, prefixed with `rag-` to make the origin clear
+- Name in `kebab-case`, prefixed with `rag-` to make the origin clear; the folder name and the frontmatter `name` must match
 - `description` must be specific enough to auto-trigger correctly (avoid "helps with X" — say "when the user asks Y, do Z")
 - Every step must map to a concrete MCP tool call or explicit reasoning step
 - Include ≥1 real example and ≥1 edge case
+- A new category folder also needs a `force-include` entry in `pyproject.toml`, so the wheel ships it
 
 ---
 

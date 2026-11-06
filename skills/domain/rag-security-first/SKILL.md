@@ -23,7 +23,7 @@ Trigger this skill for any security-flavored task:
 - Defensive control validation
 - Compliance / hardening questions
 
-**Prerequisite:** the RAG should be loaded with security-relevant content. The [`cybersecurity` preset](../presets/cybersecurity.yaml) is optimized for this — it ships 8 categories, 200+ routing keywords, and 69 query expansions covering `sqli` → `SQL injection`, `privesc` → `privilege escalation`, etc.
+**Prerequisite:** the RAG should be loaded with security-relevant content. The [`cybersecurity` preset](../../../presets/cybersecurity.yaml) is optimized for this — it ships 8 categories, 128 routing keywords, and 69 query expansions covering `sqli` → `SQL injection`, `privesc` → `privilege escalation`, etc.
 
 ---
 
@@ -31,8 +31,8 @@ Trigger this skill for any security-flavored task:
 
 For security tasks, the corpus is **primary**:
 
-1. Search the corpus **before** hitting any external threat-intel MCP (`mcp__cti__*`, `mcp__virustotal__*`, `mcp__shodan__*`).
-2. Use the query-expansion mappings (`sqli` → `SQL injection`) — they exist for a reason.
+1. Search the corpus **before** hitting any external threat-intel tools.
+2. Search with the user's own term — the server expands abbreviations like `sqli` → `SQL injection` automatically.
 3. Cite the MITRE technique ID + the internal runbook link.
 4. Only escalate to external threat-intel when the corpus does not cover the specific IOC / CVE / technique in enough depth.
 
@@ -55,11 +55,13 @@ For security tasks, the corpus is **primary**:
 
 3. **Search the corpus with the security preset in mind:**
    ```
-   search_knowledge(query="<signature> <intent>", max_results=5, min_score=0.15)
+   search_knowledge(query="<signature> <intent>", max_results=5)
    ```
    Example: `search_knowledge(query="LSASS dump credential access detection", max_results=5)`
 
-4. **If the RAG has a routing preset,** the categories `redteam` / `blueteam` / `mitre` / `ctf` are likely present. Filter when specificity matters:
+   Do not use `min_score` as a relevance gate: `score` is min-max normalized per query, so the top hit is always 1.0 even when off-topic. Judge relevance by reading the snippets and, when present, `reranker_score` (the raw cross-encoder score, comparable across queries).
+
+4. **If the RAG has a routing preset,** the categories `redteam` / `blueteam` / `security` / `ctf` are likely present. Filter when specificity matters:
    ```
    search_knowledge(query="lateral movement WinRM", category="blueteam", max_results=5)
    ```
@@ -70,17 +72,11 @@ For security tasks, the corpus is **primary**:
    |---|---|
    | **Technique** | MITRE ATT&CK ID + name + tactic |
    | **Detection** | log signals, EDR queries (KQL / SPL / LQL), Sigma rules — from corpus |
-   | **Response** | runbook steps from `blueteam` category or `def-*` skills |
+   | **Response** | runbook steps from the `blueteam` category |
    | **Attacker view** | tools / commands from `redteam` category (authorized engagements only) |
    | **References** | citations to corpus files + MITRE technique URL + CVE URL |
 
-6. **Only escalate to external threat-intel MCPs when the corpus is thin on the specific IOC:**
-   ```
-   # Only if RAG returns generic-only hits, not IOC-specific:
-   mcp__virustotal__vt_file_report(hash=...)
-   mcp__cti__ti_check_ioc(ioc=..., ioc_type="hash")
-   mcp__shodan__shodan_host(ip=...)
-   ```
+6. **Only escalate to external threat-intel tools when the corpus is thin on the specific IOC.** Use whatever threat-intel tools the current workspace provides, following their own schemas — do not assume specific tool names or parameters.
 
 7. **After resolution**, chain to [`rag-index-decisions`](https://github.com/lyonzin/knowledge-rag/blob/master/skills/maintenance/rag-index-decisions/SKILL.md) if the incident produced a new detection rule, runbook entry, or lesson.
 
@@ -95,9 +91,9 @@ User: *"We saw process creation of `rundll32.exe comsvcs.dll MiniDump 632 dump.d
 Agent:
 ```
 search_knowledge(query="rundll32 comsvcs MiniDump LSASS credential dump",
-                 max_results=5, min_score=0.15)
-→ 4 hits: mitre-T1003.001-lsass.md (0.94), redteam-cred-dumping.md (0.82),
-          blueteam-lsass-detection.md (0.79), edr-tuning-lsass.md (0.71)
+                 max_results=5)
+→ 4 hits: mitre-T1003.001-lsass.md, redteam-cred-dumping.md,
+          blueteam-lsass-detection.md, edr-tuning-lsass.md
 
 Reply: "Yes, high-confidence malicious [mitre-T1003.001-lsass.md].
 
@@ -126,12 +122,15 @@ User: *"Is CVE-2024-3400 relevant to our infra?"*
 
 Agent:
 ```
-search_knowledge(query="CVE-2024-3400", max_results=5) → 0 hits (specific CVE not indexed)
+search_knowledge(query="CVE-2024-3400", hybrid_alpha=0.0, max_results=5)
+→ identifiers tokenize into sub-tokens ("cve", "2024", "3400"), so hits can match on
+  fragments only; confirm a snippet actually contains "CVE-2024-3400" before treating
+  it as indexed. Here: 0 relevant hits.
 search_knowledge(query="PAN-OS GlobalProtect vulnerability", max_results=5) → 2 hits
-  → asset-inventory-perimeter.md (0.68), vuln-response-playbook.md (0.55)
+  → asset-inventory-perimeter.md, vuln-response-playbook.md
 
 Reply: "The corpus does not have CVE-2024-3400 specifically indexed. Checking external
-sources... [chains to mcp__cti__vuln_cve(cve_id='CVE-2024-3400')]
+sources... [chains to the workspace's threat-intel tools]
 
 From external threat intel: CVE-2024-3400 is a critical PAN-OS GlobalProtect command
 injection (CVSS 10.0), actively exploited since March 2024.
@@ -145,7 +144,7 @@ injection (CVSS 10.0), actively exploited since March 2024.
 1. Confirm PAN-OS version on those 2 firewalls
 2. Check if GlobalProtect gateway feature is enabled (only vulnerable if yes)
 3. If yes → apply hotfix per PAN advisory; if no → still upgrade but non-emergency
-4. Hunt for IOCs from the campaign — chain to mcp__cti__ti_check_ioc"
+4. Hunt for IOCs from the campaign — use the workspace's threat-intel tools"
 ```
 
 **Example 3 — Red team, authorized engagement**
@@ -156,8 +155,8 @@ Agent:
 ```
 search_knowledge(query="Kerberoasting SPN request authorized pentest",
                  category="redteam", max_results=5)
-→ 4 hits: kerberoasting-technique.md (0.91), rubeus-usage.md (0.83),
-          post-exploit-cred-cracking.md (0.75), opsec-considerations.md (0.68)
+→ 4 hits: kerberoasting-technique.md, rubeus-usage.md,
+          post-exploit-cred-cracking.md, opsec-considerations.md
 
 Reply: "**MITRE ATT&CK T1558.003** (Steal or Forge Kerberos Tickets: Kerberoasting)
 [kerberoasting-technique.md].

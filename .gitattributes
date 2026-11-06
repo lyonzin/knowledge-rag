@@ -1,0 +1,6 @@
+# core.autocrlf=true (Git for Windows' default) checks text out with CRLF, which
+# breaks shell scripts under WSL and Linux shells sharing the checkout. Skill
+# frontmatter also stays byte-identical everywhere: the installer's SHA-256
+# manifests must match any checkout, so the SKILL.md files keep LF too.
+*.sh text eol=lf
+skills/**/SKILL.md text eol=lf

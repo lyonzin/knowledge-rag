@@ -69,6 +69,9 @@ Changelog = "https://github.com/lyonzin/knowledge-rag/releases"
 [project.scripts]
 knowledge-rag = "mcp_server.server:main"
 knowledge-rag-guarded = "mcp_server.guarded:guarded_main"
+# Same as `knowledge-rag skills`. skills/install.sh and install.ps1 call this name because releases
+# up to 5.0.0 lack it: their `knowledge-rag` ignores `skills` and would start the MCP server instead.
+knowledge-rag-skills = "mcp_server.skills_cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["mcp_server"]
@@ -83,6 +86,11 @@ exclude = ["/mcp_server/data/**"]
 "presets/research.yaml" = "mcp_server/data/research.yaml"
 "presets/general.yaml" = "mcp_server/data/general.yaml"
 "presets/multilingual.yaml" = "mcp_server/data/multilingual.yaml"
+# `knowledge-rag skills install` copies these; a source checkout reads skills/ directly.
+"skills/foundation" = "mcp_server/data/skills/foundation"
+"skills/workflow" = "mcp_server/data/skills/workflow"
+"skills/maintenance" = "mcp_server/data/skills/maintenance"
+"skills/domain" = "mcp_server/data/skills/domain"
 
 [tool.hatch.build.targets.sdist]
 include = [
@@ -90,6 +98,10 @@ include = [
     "documents/examples/",
     "config.example.yaml",
     "presets/",
+    "skills/foundation/",
+    "skills/workflow/",
+    "skills/maintenance/",
+    "skills/domain/",
     "README.md",
     "LICENSE",
     "pyproject.toml",
