@@ -4823,9 +4823,12 @@ def search_knowledge(
             technical terms like CVE IDs or tool names), 0.3 = balanced default, 1.0 = semantic-only
             (best for conceptual or natural-language queries).
         min_score: Minimum score (0.0–1.0) a result needs to be returned; default 0.0 returns all
-            results. Scores are min-max normalized within each query's results (the top result scores
-            1.0, the weakest near 0.0), so this drops the weakest results of every query relative to
-            the others rather than applying an absolute relevance bar.
+            results. Scores are min-max normalized per query over its candidates: the best scores 1.0
+            and the weakest 0.0, while a single candidate or candidates that all tie score 1.0. On the
+            hybrid path (results labeled hybrid, semantic or keyword) the candidates are the returned
+            results, so any min_score above 0 drops at least the weakest one unless all tie; fts5
+            results are BM25 scores normalized over up to max(3 * max_results, 20) hits, so even the
+            weakest returned one can score well above 0.0. It is not an absolute relevance bar.
         snippet_mode: When true (default), truncates content to ~500 characters from the start of the
             matching chunk, at a natural break point, and adds a content_length field with the full
             size. Use get_document() to fetch full content when needed. Set to false to return the full
@@ -4865,7 +4868,8 @@ def search_knowledge(
     hybrid_alpha = max(0.0, min(hybrid_alpha if hybrid_alpha is not None else 0.3, 1.0))
     min_score = max(0.0, min(min_score if min_score is not None else 0.0, 1.0))
 
-    valid_categories = list(config.keyword_routes.keys()) + list(set(config.category_mappings.values())) + ["general"]
+    # Routes and mappings usually name the same categories: list each once, in config order.
+    valid_categories = list(dict.fromkeys([*config.keyword_routes, *config.category_mappings.values(), "general"]))
     if category and category not in valid_categories:
         return json.dumps(
             {"status": "error", "message": f"Invalid category '{category}'. Valid: {', '.join(valid_categories)}"}
@@ -5096,8 +5100,10 @@ def list_categories() -> str:
         JSON string with category names, document counts per category, and total document count.
 
     Usage: Use before filtering search_knowledge() or list_documents() by category to see
-    which categories exist and how many documents each contains. Use get_index_stats() instead
-    for broader system health metrics (model name, cache hit rate, BM25 status).
+    which categories exist and how many documents each contains; search_knowledge() still
+    rejects a listed name that is not configured, such as one stored by add_document().
+    Use get_index_stats() instead for broader system health metrics (model name, cache hit
+    rate, BM25 status).
     """
     orchestrator = get_orchestrator()
     categories = orchestrator.list_categories()
@@ -5131,9 +5137,10 @@ def list_documents(category: Optional[str] = None, limit: int = 100, offset: int
         in this page) and the filepaths, categories, and metadata of this page, ordered by filepath.
 
     Usage: Use to browse what's in the index, one page at a time; to see every document, call
-    again with offset + count until offset reaches total. Use list_categories() first to see valid category names. Use
-    search_knowledge() when you want to find documents by topic rather than browsing the full
-    list. Use get_document() to read a specific file once you have its filepath.
+    again with offset + count until offset reaches total. Use list_categories() first to see
+    which categories hold documents. Use search_knowledge() when you want to find documents by
+    topic rather than browsing the full list. Use get_document() to read a specific file once
+    you have its filepath.
     """
     offset = max(0, offset)
     limit = max(1, min(limit, _LIST_DOCUMENTS_MAX_LIMIT))
@@ -5232,7 +5239,9 @@ def update_document(filepath: str, content: str) -> str:
     Update the content of an existing document in the knowledge base.
 
     Mutating — overwrites the file on disk and re-indexes immediately. Old chunks are
-    removed and replaced with new ones. Full content replacement, not a patch.
+    removed and replaced with new ones. Full content replacement, not a patch. The category
+    is detected again from the path through category_mappings (general when none matches), so
+    a category stored by add_document() or add_from_url() is not kept.
 
     Args:
         filepath: Full or relative path to the document file. Must be an already-indexed
@@ -5309,7 +5318,7 @@ def add_from_url(url: str, category: str = "general", title: Optional[str] = Non
     Args:
         url: Full URL to fetch (https:// required). The page must be publicly accessible.
         category: Category stored with the document and the folder it is saved in
-            (<category>/<title>.md); default: general. Any name is accepted, but search_knowledge()
+            (<category>/<title slug>.md); default: general. Any name is accepted, but search_knowledge()
             filters only by configured categories (category_mappings values, keyword_routes keys,
             general), and update_document() or re-indexing the file detects it again from the path
             through category_mappings. list_categories() shows the categories in use.

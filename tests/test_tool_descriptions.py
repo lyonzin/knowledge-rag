@@ -1,9 +1,11 @@
-"""Tool descriptions must not hard-code category names (GH #258).
+"""Tool descriptions that agents rely on (GH #258).
 
 MCP clients show a tool's description as its documentation. Categories come from
 ``category_mappings`` and ``keyword_routes`` in config.yaml, so a fixed list
 offers agents categories that may not exist and hides the configured ones; the
-descriptions point to list_categories() instead.
+descriptions point to list_categories() instead. A 0.0–1.0 ``min_score`` reads
+like an absolute relevance scale, so its description must say that scores are
+normalized per query.
 """
 
 import asyncio
@@ -42,3 +44,11 @@ def test_given_a_category_parameter_when_listing_tools_then_its_description_poin
 
     assert with_category, "no tool has a category parameter, so this test checks nothing"
     assert missing == []
+
+
+def test_given_search_knowledge_when_listing_tools_then_min_score_says_scores_are_normalized_per_query():
+    description = next(tool.description for tool in _listed_tools() if tool.name == "search_knowledge")
+
+    min_score_text = description.split("min_score:", 1)[1]
+
+    assert "min-max normalized per query" in min_score_text

@@ -25,7 +25,7 @@ Search using semantic retrieval and BM25 with optional cross-encoder reranking, 
 | `max_results` | int | 5 | Maximum results to return; clamped to `search.max_results` (100 by default) |
 | `category` | string | null | Filter by category. Accepts the configured categories (`category_mappings` values and `keyword_routes` keys) plus `general`; other values return an error that lists the valid ones. `list_categories()` shows which categories hold documents |
 | `hybrid_alpha` | float | 0.3 | Balance: 0.0 = keyword only, 1.0 = semantic only |
-| `min_score` | float | 0.0 | Minimum score (0.0-1.0) to include a result. Scores are min-max normalized within each query's results (top result 1.0, weakest near 0.0), so this drops the weakest results of every query relative to the others; it is not an absolute relevance threshold |
+| `min_score` | float | 0.0 | Minimum score (0.0-1.0) to include a result. Scores are min-max normalized per query over its candidates: the best scores 1.0 and the weakest 0.0, while a single candidate or candidates that all tie score 1.0. On the hybrid path (results labeled `hybrid`, `semantic` or `keyword`) the candidates are the returned results, so any `min_score` above 0 drops at least the weakest one unless all tie; `fts5` results are BM25 scores normalized over up to `max(3 * max_results, 20)` hits, so even the weakest returned one can score well above 0.0. It is not an absolute relevance threshold |
 | `snippet_mode` | bool | true | Truncate content to ~500 chars from the start of the matching chunk, at natural break points. Adds `content_length` field. With `snippet_mode=false`, `content` can include the adjacent chunks and `match_offset` (when present) is where the matching chunk starts in it |
 | `search_method` | string | "auto" | `auto`, `hybrid`, or `fts5`; explicit `fts5` requires the feature to be enabled and ready |
 | `include_folders` | list[string] | null | Recursively search only these directories relative to `documents_dir`, before top-k selection |
@@ -225,7 +225,7 @@ add_document(
 
 #### `update_document`
 
-Update an existing document. Removes old chunks from the index and re-indexes with new content.
+Update an existing document. Removes old chunks from the index and re-indexes with new content. The category is detected again from the path through `category_mappings` (`general` when none matches), so a category stored by `add_document` or `add_from_url` is not kept.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -271,7 +271,7 @@ Fetch content from a URL, strip HTML (scripts, styles, nav, footer, header), con
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `url` | string | required | URL to fetch content from |
-| `category` | string | "general" | Category stored with the document and the folder it is saved in (`<category>/<title>.md`); same rules as `add_document` |
+| `category` | string | "general" | Category stored with the document and the folder it is saved in (`<category>/<title slug>.md`); same rules as `add_document` |
 | `title` | string | null | Custom title (auto-detected from `<title>` tag if not provided) |
 
 **Example:**

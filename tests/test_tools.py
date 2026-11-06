@@ -64,6 +64,18 @@ class TestSearchKnowledge:
         r = json.loads(search_knowledge("test", category="NONEXISTENT"))
         assert r["status"] == "error"
 
+    def test_given_overlapping_categories_when_category_is_invalid_then_each_valid_one_is_listed_once(
+        self, mock_orch, monkeypatch
+    ):
+        from mcp_server import server
+
+        monkeypatch.setattr(server.config, "keyword_routes", {"notes": ["todo"], "general": ["misc"]})
+        monkeypatch.setattr(server.config, "category_mappings", {"docs/notes": "notes", "docs": "docs"})
+
+        message = json.loads(server.search_knowledge("test", category="missing"))["message"]
+
+        assert message == "Invalid category 'missing'. Valid: notes, general, docs"
+
     def test_valid_query_success(self, mock_orch):
         from mcp_server.server import search_knowledge
 
