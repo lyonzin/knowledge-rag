@@ -10,6 +10,12 @@ updates:
       - "dependencies"
       - "python"
     open-pull-requests-limit: 5
+    ignore:
+      # onnxruntime-gpu >=1.28 publishes CUDA 13 wheels on PyPI while the
+      # [gpu] extra pins CUDA 12 nvidia libraries (see pyproject.toml).
+      # Keep <1.27 until a CUDA 13 extra exists.
+      - dependency-name: "onnxruntime-gpu"
+        versions: [">=1.27"]
     groups:
       python-deps:
         patterns:
