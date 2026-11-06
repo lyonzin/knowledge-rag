@@ -4815,14 +4815,17 @@ def search_knowledge(
     Args:
         query: Search query text (1–3 keywords recommended; phrase queries also work)
         max_results: Maximum number of results (default: 5, capped by search.max_results).
-        category: Optional category filter — one of: security, ctf, logscale, development, general,
-            redteam, blueteam. Call list_categories() first to see available categories and counts.
+        category: Optional category filter. Accepts the categories the server is configured with
+            (category_mappings values and keyword_routes keys) plus general; any other value returns
+            an error that lists the valid ones. Call list_categories() first to see which categories
+            hold documents and how many.
         hybrid_alpha: Balance between semantic and keyword search. 0.0 = keyword-only (best for exact
             technical terms like CVE IDs or tool names), 0.3 = balanced default, 1.0 = semantic-only
             (best for conceptual or natural-language queries).
-        min_score: Minimum normalized relevance score (0.0–1.0) to include a result. Results scoring
-            below this threshold are discarded. Default 0.0 returns all results. Use 0.2–0.4 to cut
-            low-relevance noise.
+        min_score: Minimum score (0.0–1.0) a result needs to be returned; default 0.0 returns all
+            results. Scores are min-max normalized within each query's results (the top result scores
+            1.0, the weakest near 0.0), so this drops the weakest results of every query relative to
+            the others rather than applying an absolute relevance bar.
         snippet_mode: When true (default), truncates content to ~500 characters from the start of the
             matching chunk, at a natural break point, and adds a content_length field with the full
             size. Use get_document() to fetch full content when needed. Set to false to return the full
@@ -5116,9 +5119,9 @@ def list_documents(category: Optional[str] = None, limit: int = 100, offset: int
     Read-only. No side effects.
 
     Args:
-        category: Optional category filter. Must be a valid category name — call
-            list_categories() to see available options (e.g., security, ctf, logscale,
-            development, general, redteam, blueteam).
+        category: Optional category filter, matched exactly against each document's category; a
+            category without documents returns an empty page (total 0). Call list_categories() to
+            see the categories that hold documents.
         limit: Maximum number of documents to return (default: 100, max: 200).
         offset: Number of matching documents to skip (default: 0). For the next page, call
             again with offset + count until offset reaches total.
@@ -5195,8 +5198,10 @@ def add_document(content: str, filepath: str, category: str = "general") -> str:
         content: Full text content of the document (markdown supported)
         filepath: Relative path within documents directory (e.g., "security/new-technique.md").
             The subdirectory should match the category.
-        category: Document category — one of: security, ctf, logscale, development, general,
-            redteam, blueteam (default: general)
+        category: Category stored with the document (default: general). Any name is accepted, but
+            search_knowledge() filters only by configured categories (category_mappings values,
+            keyword_routes keys, general), and update_document() or re-indexing the file detects it
+            again from the path through category_mappings. list_categories() shows the categories in use.
 
     Returns:
         JSON string with indexing results (filepath, chunks created, status).
@@ -5303,8 +5308,11 @@ def add_from_url(url: str, category: str = "general", title: Optional[str] = Non
 
     Args:
         url: Full URL to fetch (https:// required). The page must be publicly accessible.
-        category: Document category — one of: security, ctf, logscale, development, general,
-            redteam, blueteam (default: general)
+        category: Category stored with the document and the folder it is saved in
+            (<category>/<title>.md); default: general. Any name is accepted, but search_knowledge()
+            filters only by configured categories (category_mappings values, keyword_routes keys,
+            general), and update_document() or re-indexing the file detects it again from the path
+            through category_mappings. list_categories() shows the categories in use.
         title: Optional document title. Auto-detected from the page's <title> tag if omitted.
 
     Returns:

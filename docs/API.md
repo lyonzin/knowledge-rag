@@ -23,9 +23,9 @@ Search using semantic retrieval and BM25 with optional cross-encoder reranking, 
 |-----------|------|---------|-------------|
 | `query` | string | required | Search query text; use identifiers for lexical search or a question for semantic search |
 | `max_results` | int | 5 | Maximum results to return; clamped to `search.max_results` (100 by default) |
-| `category` | string | null | Filter by category |
+| `category` | string | null | Filter by category. Accepts the configured categories (`category_mappings` values and `keyword_routes` keys) plus `general`; other values return an error that lists the valid ones. `list_categories()` shows which categories hold documents |
 | `hybrid_alpha` | float | 0.3 | Balance: 0.0 = keyword only, 1.0 = semantic only |
-| `min_score` | float | 0.0 | Minimum relevance score (0.0-1.0) to include a result. Use 0.2-0.4 to cut noise |
+| `min_score` | float | 0.0 | Minimum score (0.0-1.0) to include a result. Scores are min-max normalized within each query's results (top result 1.0, weakest near 0.0), so this drops the weakest results of every query relative to the others; it is not an absolute relevance threshold |
 | `snippet_mode` | bool | true | Truncate content to ~500 chars from the start of the matching chunk, at natural break points. Adds `content_length` field. With `snippet_mode=false`, `content` can include the adjacent chunks and `match_offset` (when present) is where the matching chunk starts in it |
 | `search_method` | string | "auto" | `auto`, `hybrid`, or `fts5`; explicit `fts5` requires the feature to be enabled and ready |
 | `include_folders` | list[string] | null | Recursively search only these directories relative to `documents_dir`, before top-k selection |
@@ -158,7 +158,7 @@ List indexed documents one page at a time, optionally filtered by category.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `category` | string | null | Optional category filter |
+| `category` | string | null | Optional filter, matched exactly against each document's category; a category without documents returns `total: 0`. `list_categories()` lists the categories in the index |
 | `limit` | int | 100 | Maximum documents to return, clamped to 1–200 |
 | `offset` | int | 0 | Matching documents to skip; negative values count as 0 |
 
@@ -209,7 +209,7 @@ Add a new document to the knowledge base from raw content. Saves the file to the
 |-----------|------|---------|-------------|
 | `content` | string | required | Full text content of the document |
 | `filepath` | string | required | Relative path within documents dir (e.g., `security/new-technique.md`) |
-| `category` | string | "general" | Document category |
+| `category` | string | "general" | Category stored with the document. Any name is accepted, but `search_knowledge` filters only by configured categories, and `update_document` or re-indexing the file detects it again from the path through `category_mappings` |
 
 **Example (cookbook):**
 
@@ -271,7 +271,7 @@ Fetch content from a URL, strip HTML (scripts, styles, nav, footer, header), con
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `url` | string | required | URL to fetch content from |
-| `category` | string | "general" | Document category |
+| `category` | string | "general" | Category stored with the document and the folder it is saved in (`<category>/<title>.md`); same rules as `add_document` |
 | `title` | string | null | Custom title (auto-detected from `<title>` tag if not provided) |
 
 **Example:**
@@ -279,7 +279,7 @@ Fetch content from a URL, strip HTML (scripts, styles, nav, footer, header), con
 ```python
 add_from_url(
     url="https://attack.mitre.org/techniques/T1558/003/",
-    category="mitre",
+    category="security",
     title="MITRE ATT&CK T1558.003 — Kerberoasting",
 )
 ```

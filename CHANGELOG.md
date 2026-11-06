@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+### Unreleased
+
+**Fixed:**
+
+- The `search_knowledge`, `list_documents`, `add_document` and `add_from_url` descriptions, which MCP clients show to agents, no longer list a fixed set of categories (`security, ctf, logscale, …`) that ignored `category_mappings` and left out `aar`. They point to `list_categories()` and say what each tool accepts: `search_knowledge` filters only by configured categories (`category_mappings` values, `keyword_routes` keys and `general`), `list_documents` matches any name exactly, and `add_document`/`add_from_url` store any name, but `update_document` and re-indexing detect the category again from the file's path through `category_mappings` (#258).
+- The `min_score` description no longer suggests an absolute relevance threshold. Scores are min-max normalized within each query's results, so the top result scores 1.0 and `min_score` drops each query's weakest results relative to the others (#258).
+
+---
+
 ### v5.0.0 (2026-11-05) — Paged list_documents, index safety and merge-blocking CI gates
 
 Major release because of one behavior change. **BREAKING:** `list_documents` now returns at most 100 documents by default (up to 200 with `limit`). A script or client that called it without arguments and expected the whole index now gets the first page; call it again with `offset` until it reaches `total` to list everything. Nothing else needs a change on upgrade, and the existing index needs no reindex, with one exception: if you enabled `profile: "multilingual"` on a copy of the old `config.example.yaml`, delete its empty `query_prefix`/`passage_prefix` lines and run `reindex_documents(force=True)` (see Fixed, #261).
