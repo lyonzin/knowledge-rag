@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+### Unreleased
+
+**Added:**
+
+- `get_reindex_status` reports which files failed the last reindex. When the reindex is inactive, `last_result` now includes `failed_files`, a list of `{"path": ..., "reason": ...}` entries deduped by path (at most 100, with `failed_files_truncated: true` when more than 100 distinct files failed), where the reason is the short exception message, type-prefixed and bounded to 300 characters. Below the cap, `errors` matches `len(failed_files)`. A failed `full_rebuild` lists the first failing paths in `last_error` and keeps the full list in the partial `last_result`. The failures were logged to the server's stderr before, which MCP clients could not see (#288).
+
+---
+
 ### v5.0.1 (2026-11-06) — Skills installer, npx forwarding and the CUDA memory fix
 
 Patch release. Ships the cross-platform skills installer, the npx argument forwarding and folder-creation fixes behind it, the CUDA arena shrink that returns VRAM after every run, corrected tool descriptions, and the redesigned README. Nothing breaking; existing indexes need no reindex.

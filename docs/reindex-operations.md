@@ -17,8 +17,12 @@ that combination before starting a worker.
 
 After a call returns `status: "started"`, poll `get_reindex_status()`.
 When `reindex.active` becomes false, inspect both `last_error` and
-`last_result.errors`. A stopped worker or an HTTP/MCP success response does not
-prove all documents were indexed.
+`last_result.errors`. `last_result.failed_files` lists which files failed and
+why (deduped by path, at most 100 entries; `failed_files_truncated: true` means
+more failed). A failed `full_rebuild=True` run reports the first failing paths
+in `last_error` and keeps the partial `last_result` with the full list. A
+stopped worker or an HTTP/MCP success response does not prove all documents
+were indexed.
 
 Inspect representative sources and retrieval results after a large operation.
 A parser error should retain the previous indexed content for that source and
@@ -123,7 +127,7 @@ reindex_documents(force=True)
 
 # If the process was interrupted, restart the same configuration, then:
 reindex_documents(resume=True)
-# Poll again and inspect last_error and last_result.errors.
+# Poll again and inspect last_error, last_result.errors and last_result.failed_files.
 ```
 
 ## Progress fields
