@@ -29,7 +29,7 @@ childProcess.spawn = (command, args) => {
     [
         pytest.param(
             ["skills", "install", "--target", "dir with spaces", "--yes"],
-            ["-m", "mcp_server.skills_cli", "install", "--target", "dir with spaces", "--yes"],
+            ["-m", "mcp_server.skills_cli", "skills", "install", "--target", "dir with spaces", "--yes"],
             id="skills-skip-the-server",
         ),
         pytest.param(["init"], ["-m", "mcp_server.server", "init"], id="init"),
@@ -56,3 +56,25 @@ def test_npm_wrapper_routes_arguments(tmp_path, arguments, expected):
     )
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout.splitlines()[-1]) == expected
+
+
+@pytest.mark.parametrize("arguments", [["--version"], ["--install-only"]])
+def test_npm_wrapper_exits_before_spawning_python(tmp_path, arguments):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is not installed")
+    stub = tmp_path / "stub.js"
+    stub.write_text(STUB, encoding="utf-8")
+    env = dict(os.environ, HOME=str(tmp_path), USERPROFILE=str(tmp_path))
+    result = subprocess.run(
+        [node, "-r", str(stub), str(CLI), *arguments],
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""  # the stub's spawn prints a JSON line on stdout
+    assert "knowledge-rag" in result.stderr

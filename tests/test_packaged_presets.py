@@ -1,7 +1,9 @@
 """Source checkout and wheel configuration export the same preset content."""
 
+import os
 import shutil
 import subprocess
+import sys
 import tarfile
 import tomllib
 import zipfile
@@ -53,6 +55,34 @@ def test_built_wheel_contains_each_canonical_resource_once(tmp_path, from_sdist)
         assert resources == {f"mcp_server/data/{name}" for name in expected}
         for name, content in expected.items():
             assert archive.read(f"mcp_server/data/{name}") == content
+        entry_points = next(name for name in names if name.endswith(".dist-info/entry_points.txt"))
+        assert "knowledge-rag-skills = mcp_server.skills_cli:main" in archive.read(entry_points).decode("utf-8")
+
+
+def test_extracted_wheel_provides_the_skills_for_the_installer(tmp_path):
+    from hatchling.builders.wheel import WheelBuilder
+
+    wheel = next(WheelBuilder(str(ROOT)).build(directory=str(tmp_path / "wheel"), versions=["standard"]))
+    with zipfile.ZipFile(wheel) as archive:
+        archive.extractall(tmp_path / "site")
+    env = dict(os.environ, PYTHONPATH=str(tmp_path / "site"), KNOWLEDGE_RAG_DIR=str(tmp_path / "base"))
+    result = subprocess.run(
+        [sys.executable, "-c", "from mcp_server.skills_bundle import bundled_skills; print(len(bundled_skills()))"],
+        cwd=tmp_path / "site",
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "10"
+
+
+def test_skill_sources_keep_lf_line_endings_on_any_checkout():
+    """The installer hashes what it installs; CRLF conversions would make manifests differ per checkout."""
+    assert b"\r" not in (ROOT / "skills" / "install.sh").read_bytes()
 
 
 def test_gitignore_keeps_bundled_presets_versionable_and_runtime_data_private(tmp_path):

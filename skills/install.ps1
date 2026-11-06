@@ -20,43 +20,59 @@
     irm https://raw.githubusercontent.com/lyonzin/knowledge-rag/master/skills/install.ps1 | iex
 #>
 
-# No param() block: advanced parameter binding would reject the double-dash
-# options before they reach knowledge-rag.
-$forwarded = @($args)
-if ($forwarded.Count -eq 0 -or $forwarded[0] -notin @("install", "uninstall", "status", "-h", "--help")) {
-    $forwarded = @("install") + $forwarded
-}
-
-function Find-Application([string]$Name) {
-    Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-}
-
-function Write-Help([string[]]$Lines) {
-    foreach ($line in $Lines) { [Console]::Error.WriteLine($line) }
-}
-
-# knowledge-rag-skills runs `knowledge-rag skills`. Releases up to 5.0.0 lack it, and their
-# `knowledge-rag` would ignore `skills` and start the MCP server, so never call that one.
-$installer = Find-Application "knowledge-rag-skills"
-if ($installer) {
-    & $installer.Source @forwarded
-    $code = $LASTEXITCODE
-} elseif (Find-Application "knowledge-rag") {
-    Write-Help @(
-        "This knowledge-rag is too old for the skills installer. Upgrade it, then run this again:",
-        "  pip install -U knowledge-rag    (or: pipx upgrade knowledge-rag, uv tool upgrade knowledge-rag)"
+# The whole body runs inside a script block, so piping this file into
+# Invoke-Expression does not leak its variables and functions into the caller.
+# The block's own $args carries the file arguments: a `param([object[]]$a)`
+# would bind the whole argument array as one element on Windows PowerShell 5.1.
+& {
+    # No advanced parameter binding on the file itself: it would reject the double-dash
+    # options before they reach knowledge-rag-skills.
+    $forwarded = @(
+        foreach ($argument in $args) {
+            $text = [string]$argument
+            # Windows PowerShell 5.1 eats a trailing backslash before its closing quote;
+            # doubling it makes the native command receive one.
+            if ($PSVersionTable.PSVersion.Major -le 5 -and $text.EndsWith('\')) { $text + '\' } else { $text }
+        }
     )
-    $code = 1
-} else {
-    Write-Help @(
-        "knowledge-rag is not installed, or not on PATH. Install it, then run this again:",
-        "  pip install knowledge-rag    (or: pipx install knowledge-rag, uv tool install knowledge-rag)",
-        "Or run the same installer through npm, which needs Node.js and Python 3.11 or later:",
-        "  npx -y knowledge-rag skills install",
-        "Installed it in a virtual environment? Activate that environment first."
-    )
-    $code = 127
-}
+    if ($forwarded.Count -eq 0 -or $forwarded[0] -cnotin @("install", "uninstall", "status", "-h", "--help")) {
+        $forwarded = @("install") + $forwarded
+    }
 
-# Under `irm ... | iex` this runs in the caller's session, which exit would close.
-if ($PSCommandPath) { exit $code }
+    function Find-Application([string]$Name) {
+        Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    }
+
+    function Write-Help([string[]]$Lines) {
+        foreach ($line in $Lines) { [Console]::Error.WriteLine($line) }
+    }
+
+    # knowledge-rag-skills runs `knowledge-rag skills`. Releases up to 5.0.0 lack it, and their
+    # `knowledge-rag` would ignore `skills` and start the MCP server, so never call that one.
+    $installer = Find-Application "knowledge-rag-skills"
+    if ($installer) {
+        & $installer.Source @forwarded
+        # $global: - assigning $LASTEXITCODE inside this block would shadow the automatic
+        # variable with a local that native commands never update.
+        $code = $global:LASTEXITCODE
+        if ($null -eq $code) { $code = 1 }
+    } elseif (Find-Application "knowledge-rag") {
+        Write-Help @(
+            "This knowledge-rag is too old for the skills installer. Upgrade it, then run this again:",
+            "  pip install -U knowledge-rag    (or: pipx upgrade knowledge-rag, uv tool upgrade knowledge-rag)"
+        )
+        $code = 1
+    } else {
+        Write-Help @(
+            "knowledge-rag is not installed, or not on PATH. Install it, then run this again:",
+            "  pip install knowledge-rag    (or: pipx install knowledge-rag, uv tool install knowledge-rag)",
+            "Or run the same installer through npm, which needs Node.js and Python 3.11 or later:",
+            "  npx -y knowledge-rag skills install",
+            "Installed it in a virtual environment? Activate that environment first."
+        )
+        $code = 127
+    }
+
+    # Under `irm ... | iex` this runs in the caller's session, which exit would close.
+    if ($PSCommandPath) { exit $code }
+} @args

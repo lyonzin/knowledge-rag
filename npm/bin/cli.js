@@ -187,11 +187,12 @@ function ensureInstalled(python) {
 // ---------------------------------------------------------------------------
 
 // `skills ...` runs the installer module itself: going through mcp_server.server
-// would load chromadb and fastembed and create the server's data folders. Every
-// other argument list (`init`, `--transport sse`, none) goes to the server.
+// would load chromadb and fastembed and create the server's data folders. The
+// module drops the leading `skills` itself. Every other argument list (`init`,
+// `--transport sse`, none) goes to the server.
 function pythonArgs(args) {
   if (args[0] === "skills") {
-    return ["-m", "mcp_server.skills_cli", ...args.slice(1)];
+    return ["-m", "mcp_server.skills_cli", ...args];
   }
   return ["-m", "mcp_server.server", ...args];
 }

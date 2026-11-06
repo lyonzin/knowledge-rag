@@ -16,7 +16,13 @@ PROBE = f"import sys, {{module}}; print(sorted(name for name in {HEAVY!r} if nam
 def _python(arguments: list, cwd: Path, **env: str) -> subprocess.CompletedProcess:
     """Run a fresh interpreter in ``cwd`` with KNOWLEDGE_RAG_DIR unset unless ``env`` sets it."""
     environment = {key: value for key, value in os.environ.items() if key != "KNOWLEDGE_RAG_DIR"}
-    environment.update(PYTHONPATH=str(ROOT), PYTHONIOENCODING="utf-8", **env)
+    environment.update(
+        PYTHONPATH=str(ROOT),
+        PYTHONIOENCODING="utf-8",
+        HOME=str(cwd),
+        USERPROFILE=str(cwd),
+        **env,
+    )
     return subprocess.run(
         [sys.executable, *arguments],
         cwd=cwd,

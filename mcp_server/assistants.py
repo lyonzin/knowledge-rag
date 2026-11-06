@@ -11,11 +11,14 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 _AGENTS = "~/.agents/skills"  # user folder of the Agent Skills convention, read by most assistants
+_WSL_CODEPAGE = 65001  # makes cmd.exe print a non-ASCII profile name as UTF-8
+_WSL_TIMEOUT = 15
 
 
 @dataclass(frozen=True)
@@ -73,7 +76,7 @@ def _expand(template: str, home: Home) -> Path | None:
     if head == "~":
         base = home.path
     elif home.env.get(head[1:]):
-        base = Path(home.env[head[1:]])
+        base = Path(os.path.expanduser(home.env[head[1:]]))
     else:
         return None
     return base / rest if rest else base
@@ -114,18 +117,36 @@ def _wsl_windows_profile() -> Path | None:
     """Under WSL, the Windows user profile as a Linux path, such as /mnt/c/Users/Ana."""
     if not os.environ.get("WSL_DISTRO_NAME"):
         return None
+    profile = None
     try:
-        # Code page 65001 makes cmd.exe print a non-ASCII profile name as UTF-8.
-        windows = _run(["cmd.exe", "/d", "/c", "chcp 65001 >nul & echo %USERPROFILE%"])
+        # `set USERPROFILE` prints the value verbatim; `echo %USERPROFILE%` would let a profile
+        # name with & or | break the command. Only the last non-empty line is the answer.
+        windows = _run(["cmd.exe", "/d", "/c", f"chcp {_WSL_CODEPAGE} >nul & set USERPROFILE"])
+        lines = [line.strip() for line in windows.splitlines() if line.strip()]
+        windows = lines[-1] if lines else ""
         linux = _run(["wslpath", "-u", windows])
+        candidate = Path(linux)
+        if windows and "%" not in windows and candidate.is_dir():
+            profile = candidate
     except (OSError, subprocess.SubprocessError):
-        return None
-    profile = Path(linux)
-    return profile if windows and "%" not in windows and profile.is_dir() else None
+        profile = None
+    if profile is None:
+        print(
+            "[WARN] could not read the Windows profile under WSL; use --target to point at its skills folder",
+            file=sys.stderr,
+        )
+    return profile
 
 
 def _run(command: list[str]) -> str:
     completed = subprocess.run(
-        command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15, check=True
+        command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdin=subprocess.DEVNULL,
+        timeout=_WSL_TIMEOUT,
+        check=True,
     )
     return completed.stdout.strip()
