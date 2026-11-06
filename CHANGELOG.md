@@ -13,7 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-### Unreleased
+### v5.0.1 (2026-11-06) — Skills installer, npx forwarding and the CUDA memory fix
+
+Patch release. Ships the cross-platform skills installer, the npx argument forwarding and folder-creation fixes behind it, the CUDA arena shrink that returns VRAM after every run, corrected tool descriptions, and the redesigned README. Nothing breaking; existing indexes need no reindex.
 
 **Added:**
 
