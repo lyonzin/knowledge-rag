@@ -31,4 +31,5 @@ paths = [
 ]
 regexes = [
     '''lyonzin@users\.noreply\.github\.com''',  # public placeholder address
+    '''replace-with-a-long-random-token''',  # README bearer example
 ]
