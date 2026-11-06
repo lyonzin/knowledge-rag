@@ -27,8 +27,10 @@ def _isolated_env(tmp_path):
 
 def test_import_preserves_callers_stdout(tmp_path):
     (tmp_path / "config.yaml").write_text("[]", encoding="utf-8")
+    # The re-export is lazy, so ask for it: loading the config prints its warning.
     script = (
-        "import sys; original = sys.stdout; import mcp_server; assert sys.stdout is original; print('caller output')"
+        "import sys; original = sys.stdout; from mcp_server import Config; "
+        "assert sys.stdout is original; print('caller output')"
     )
     result = subprocess.run(
         [sys.executable, "-c", script],

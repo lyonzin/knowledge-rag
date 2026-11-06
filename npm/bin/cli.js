@@ -183,15 +183,23 @@ function ensureInstalled(python) {
 }
 
 // ---------------------------------------------------------------------------
-// Run the MCP server
+// Run the MCP server, or the skills installer
 // ---------------------------------------------------------------------------
 
-function runServer(args) {
+// `skills ...` runs the installer module itself: going through mcp_server.server
+// would load chromadb and fastembed and create the server's data folders. Every
+// other argument list (`init`, `--transport sse`, none) goes to the server.
+function pythonArgs(args) {
+  if (args[0] === "skills") {
+    return ["-m", "mcp_server.skills_cli", ...args.slice(1)];
+  }
+  return ["-m", "mcp_server.server", ...args];
+}
+
+function runPython(args) {
   const venvPython = getVenvPython();
 
-  // Forward the arguments, so `npx knowledge-rag skills install`, `init` and
-  // `--transport sse` reach the Python CLI.
-  const child = spawn(venvPython, ["-m", "mcp_server.server", ...args], {
+  const child = spawn(venvPython, pythonArgs(args), {
     stdio: "inherit",
     windowsHide: true,
   });
@@ -210,7 +218,7 @@ function runServer(args) {
   process.on("SIGTERM", () => forwardSignal("SIGTERM"));
 
   child.on("error", (err) => {
-    fatal(`Failed to start MCP server: ${err.message}`);
+    fatal(`Failed to start ${pythonArgs(args)[1]}: ${err.message}`);
   });
 
   child.on("exit", (code, signal) => {
@@ -250,7 +258,7 @@ function main() {
     process.exit(0);
   }
 
-  runServer(args);
+  runPython(args);
 }
 
 main();

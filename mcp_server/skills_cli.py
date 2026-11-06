@@ -233,3 +233,7 @@ def _finish(args: argparse.Namespace, outcomes: Sequence[str]) -> int:
     elif args.command == "install" and DONE in outcomes:
         print("\nStart a new session in each assistant to load the skills.")
     return 1 if FAILED in outcomes else 0
+
+
+if __name__ == "__main__":  # `python -m mcp_server.skills_cli`, which the npm wrapper runs
+    raise SystemExit(main())
