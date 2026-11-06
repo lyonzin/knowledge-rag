@@ -54,7 +54,10 @@ class _Session:
 
 
 class _FakeCrossEncoder:
-    """TextCrossEncoder stand-in; FastEmbed keeps the session at ``model.model``."""
+    """TextCrossEncoder stand-in; FastEmbed keeps the session at ``model.model``.
+
+    Each document scores its position, so every score is distinct and traceable.
+    """
 
     def __init__(self, providers):
         self.model = SimpleNamespace(model=_Session(providers))
@@ -62,7 +65,7 @@ class _FakeCrossEncoder:
 
     def rerank(self, query, documents, **kwargs):
         self.rerank_kwargs.append(kwargs)
-        return [0.0 for _ in documents]
+        return [float(index) for index in range(len(documents))]
 
 
 class _RenamedApiSession(_Session):
@@ -189,7 +192,7 @@ def test_cuda_reranker_run_shrinks_arena_afterwards(monkeypatch):
 
 
 def test_reranker_splits_candidates_into_bounded_batches(monkeypatch):
-    """Given 60 candidates, when reranking, then FastEmbed runs batches of 16 instead of one padded run of 60.
+    """Given 60 scored candidates, when reranking, then FastEmbed gets batches of 16 and every score ranks the top 5.
 
     Sixteen still scores the default 15 candidates (5 results x 3) in a single run.
     """
@@ -198,8 +201,11 @@ def test_reranker_splits_candidates_into_bounded_batches(monkeypatch):
     encoder = _FakeCrossEncoder([CPU])
     candidates = [{"document": f"candidate {index}"} for index in range(60)]
     with patch("mcp_server.server.TextCrossEncoder", return_value=encoder):
-        CrossEncoderReranker().rerank("query", candidates, top_k=5)
+        top = CrossEncoderReranker().rerank("query", candidates, top_k=5)
 
+    assert [(doc["document"], doc["reranker_score"]) for doc in top] == [
+        (f"candidate {index}", float(index)) for index in range(59, 54, -1)
+    ]
     assert encoder.rerank_kwargs == [{"batch_size": 16}]
 
 
