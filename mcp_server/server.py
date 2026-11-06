@@ -4816,9 +4816,10 @@ def search_knowledge(
         query: Search query text (1–3 keywords recommended; phrase queries also work)
         max_results: Maximum number of results (default: 5, capped by search.max_results).
         category: Optional category filter. Accepts the categories the server is configured with
-            (category_mappings values and keyword_routes keys) plus general; any other value returns
-            an error that lists the valid ones. Call list_categories() first to see which categories
-            hold documents and how many.
+            (category_mappings values and keyword_routes keys) plus general; an empty string, like
+            omitting it, searches every category, and any other value returns an error that lists
+            the valid ones. Call list_categories() first to see which categories hold documents and
+            how many.
         hybrid_alpha: Balance between semantic and keyword search. 0.0 = keyword-only (best for exact
             technical terms like CVE IDs or tool names), 0.3 = balanced default, 1.0 = semantic-only
             (best for conceptual or natural-language queries).
@@ -5125,9 +5126,10 @@ def list_documents(category: Optional[str] = None, limit: int = 100, offset: int
     Read-only. No side effects.
 
     Args:
-        category: Optional category filter, matched exactly against each document's category; a
-            category without documents returns an empty page (total 0). Call list_categories() to
-            see the categories that hold documents.
+        category: Optional category filter, matched exactly against each document's category; an
+            empty string, like omitting it, lists every document, and a category without documents
+            returns an empty page (total 0). Call list_categories() to see the categories that hold
+            documents.
         limit: Maximum number of documents to return (default: 100, max: 200).
         offset: Number of matching documents to skip (default: 0). For the next page, call
             again with offset + count until offset reaches total.
@@ -5317,15 +5319,20 @@ def add_from_url(url: str, category: str = "general", title: Optional[str] = Non
 
     Args:
         url: Full URL to fetch (https:// required). The page must be publicly accessible.
-        category: Category stored with the document and the folder it is saved in
-            (<category>/<title slug>.md); default: general. Any name is accepted, but search_knowledge()
-            filters only by configured categories (category_mappings values, keyword_routes keys,
-            general), and update_document() or re-indexing the file detects it again from the path
-            through category_mappings. list_categories() shows the categories in use.
+        category: Category stored with the document and the folder it is saved in; default:
+            general. Being part of the path, it must stay inside documents_dir: a value such as
+            ../outside returns a "Filepath rejected" error. Any other name is accepted, but
+            search_knowledge() filters only by configured categories (category_mappings values,
+            keyword_routes keys, general), and update_document() or re-indexing the file detects it
+            again from the path through category_mappings. list_categories() shows the categories
+            in use.
         title: Optional document title. Auto-detected from the page's <title> tag if omitted.
 
     Returns:
-        JSON string with indexing results (detected title, filepath, chunks created, status).
+        JSON string with indexing results (filepath, category, chunks added, status). The page is
+        saved as <category>/<title slug>.md, or as <title slug>-<first 8 hex characters of the
+        URL's SHA-256>.md (then 16, then the full digest) when a file not saved from this URL
+        already has the shorter name. Use the returned filepath instead of building the path.
 
     Usage: Use to ingest web content (writeups, blog posts, documentation pages) directly
     by URL. Use add_document() instead when you already have the text content. The document

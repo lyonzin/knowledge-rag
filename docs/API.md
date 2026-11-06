@@ -23,7 +23,7 @@ Search using semantic retrieval and BM25 with optional cross-encoder reranking, 
 |-----------|------|---------|-------------|
 | `query` | string | required | Search query text; use identifiers for lexical search or a question for semantic search |
 | `max_results` | int | 5 | Maximum results to return; clamped to `search.max_results` (100 by default) |
-| `category` | string | null | Filter by category. Accepts the configured categories (`category_mappings` values and `keyword_routes` keys) plus `general`; other values return an error that lists the valid ones. `list_categories()` shows which categories hold documents |
+| `category` | string | null | Filter by category. Accepts the configured categories (`category_mappings` values and `keyword_routes` keys) plus `general`; an empty string, like omitting it, searches every category, and other values return an error that lists the valid ones. `list_categories()` shows which categories hold documents |
 | `hybrid_alpha` | float | 0.3 | Balance: 0.0 = keyword only, 1.0 = semantic only |
 | `min_score` | float | 0.0 | Minimum score (0.0-1.0) to include a result. Scores are min-max normalized per query over its candidates: the best scores 1.0 and the weakest 0.0, while a single candidate or candidates that all tie score 1.0. On the hybrid path (results labeled `hybrid`, `semantic` or `keyword`) the candidates are the returned results, so any `min_score` above 0 drops at least the weakest one unless all tie; `fts5` results are BM25 scores normalized over up to `max(3 * max_results, 20)` hits, so even the weakest returned one can score well above 0.0. It is not an absolute relevance threshold |
 | `snippet_mode` | bool | true | Truncate content to ~500 chars from the start of the matching chunk, at natural break points. Adds `content_length` field. With `snippet_mode=false`, `content` can include the adjacent chunks and `match_offset` (when present) is where the matching chunk starts in it |
@@ -158,7 +158,7 @@ List indexed documents one page at a time, optionally filtered by category.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `category` | string | null | Optional filter, matched exactly against each document's category; a category without documents returns `total: 0`. `list_categories()` lists the categories in the index |
+| `category` | string | null | Optional filter, matched exactly against each document's category; an empty string, like omitting it, lists every document, and a category without documents returns `total: 0`. `list_categories()` lists the categories in the index |
 | `limit` | int | 100 | Maximum documents to return, clamped to 1–200 |
 | `offset` | int | 0 | Matching documents to skip; negative values count as 0 |
 
@@ -271,8 +271,10 @@ Fetch content from a URL, strip HTML (scripts, styles, nav, footer, header), con
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `url` | string | required | URL to fetch content from |
-| `category` | string | "general" | Category stored with the document and the folder it is saved in (`<category>/<title slug>.md`); same rules as `add_document` |
+| `category` | string | "general" | Category stored with the document and the folder it is saved in. Being part of the path, it must stay inside `documents_dir`: a value such as `../outside` returns a `Filepath rejected` error. Otherwise the same rules as `add_document` apply |
 | `title` | string | null | Custom title (auto-detected from `<title>` tag if not provided) |
+
+The page is saved as `<category>/<title slug>.md`, or as `<title slug>-<first 8 hex characters of the URL's SHA-256>.md` (then 16, then the full digest) when a file not saved from this URL already has the shorter name. Use the `filepath` in the response instead of building the path.
 
 **Example:**
 
