@@ -23,6 +23,7 @@
 [![Quality Gate](https://github.com/lyonzin/knowledge-rag/actions/workflows/quality-gate.yml/badge.svg)](https://github.com/lyonzin/knowledge-rag/actions/workflows/quality-gate.yml)
 [![Glama Score](https://glama.ai/mcp/servers/lyonzin/knowledge-rag/badges/score.svg)](https://glama.ai/mcp/servers/lyonzin/knowledge-rag)
 [![OpenSSF Best Practices](https://bestpractices.coreinfrastructure.org/projects/13864/badge)](https://bestpractices.coreinfrastructure.org/projects/13864)
+</div>
 
 - **11.1 ms** median uncached hybrid query on CPU, **6.1 ms** on CUDA: 36 queries over 149 chunks on one Windows host, reranker off ([audit](docs/audit-2026-10-03.md#real-cpu-and-nvidia-workload))
 - **0.03 ms** median for a repeated query served from the cache, same workload ([audit](docs/audit-2026-10-03.md#real-cpu-and-nvidia-workload))
