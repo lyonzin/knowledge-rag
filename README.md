@@ -10,19 +10,19 @@
 
 **knowledge-rag** is a local retrieval-augmented generation (RAG) server for the Model Context Protocol (MCP). It indexes the documents and code on your machine and gives Claude Code, Cursor, VS Code and other MCP clients 13 tools to search them, using hybrid search (BM25 keywords plus vector similarity) with cross-encoder reranking on by default. Everything runs in one Python process with embedded ChromaDB and FastEmbed ONNX models: no Docker, no database server, no API key. Indexing and search work offline once the models are cached.
 
-<p align="center">
+<div align="center">
+
+[![PyPI](https://img.shields.io/pypi/v/knowledge-rag)](https://pypi.org/project/knowledge-rag/)
+[![NPM](https://img.shields.io/npm/v/knowledge-rag)](https://www.npmjs.com/package/knowledge-rag)
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/knowledge-rag?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/knowledge-rag)
+![Python](https://img.shields.io/badge/python-3.11%2B-green.svg)
+![License](https://img.shields.io/badge/license-MIT-yellow.svg)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)
+![GPU](https://img.shields.io/badge/GPU-NVIDIA%20CUDA-76B900.svg?logo=nvidia)
 [![CodeQL](https://github.com/lyonzin/knowledge-rag/actions/workflows/security.yml/badge.svg)](https://github.com/lyonzin/knowledge-rag/actions/workflows/security.yml)
 [![Quality Gate](https://github.com/lyonzin/knowledge-rag/actions/workflows/quality-gate.yml/badge.svg)](https://github.com/lyonzin/knowledge-rag/actions/workflows/quality-gate.yml)
+[![Glama Score](https://glama.ai/mcp/servers/lyonzin/knowledge-rag/badges/score.svg)](https://glama.ai/mcp/servers/lyonzin/knowledge-rag)
 [![OpenSSF Best Practices](https://bestpractices.coreinfrastructure.org/projects/13864/badge)](https://bestpractices.coreinfrastructure.org/projects/13864)
-[![Glama score](https://glama.ai/mcp/servers/lyonzin/knowledge-rag/badges/score.svg)](https://glama.ai/mcp/servers/lyonzin/knowledge-rag)<br>
-[![PyPI version](https://img.shields.io/pypi/v/knowledge-rag)](https://pypi.org/project/knowledge-rag/)
-[![npm version](https://img.shields.io/npm/v/knowledge-rag)](https://www.npmjs.com/package/knowledge-rag)
-[![PyPI downloads](https://static.pepy.tech/personalized-badge/knowledge-rag?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/knowledge-rag)<br>
-![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-green.svg)
-![Platforms: Windows, Linux, macOS](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)
-![Optional NVIDIA CUDA](https://img.shields.io/badge/GPU-NVIDIA%20CUDA-76B900.svg?logo=nvidia)
-![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)
-</p>
 
 - **11.1 ms** median uncached hybrid query on CPU, **6.1 ms** on CUDA: 36 queries over 149 chunks on one Windows host, reranker off ([audit](docs/audit-2026-10-03.md#real-cpu-and-nvidia-workload))
 - **0.03 ms** median for a repeated query served from the cache, same workload ([audit](docs/audit-2026-10-03.md#real-cpu-and-nvidia-workload))
