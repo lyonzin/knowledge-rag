@@ -7,7 +7,7 @@
 # Keep this file lean — only what's needed to run tests, linters, and benches.
 
 # ── Linting & formatting ────────────────────────────────────────────────────
-ruff>=0.17.3,<1.0
+ruff>=0.17.4,<1.0
 pre-commit>=4.7.0,<5.0
 
 # ── Tests ───────────────────────────────────────────────────────────────────
