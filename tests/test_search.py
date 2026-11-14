@@ -1103,7 +1103,7 @@ class TestRerankToggle:
 class TestMmrWithReranker:
     """GH #294 — MMR must run (and de-duplicate) when the reranker is enabled."""
 
-    def _make_orch(self, monkeypatch, pool_size=9):
+    def _make_orch(self, monkeypatch, pool_size=9, scores=None):
         import mcp_server.server as srv
 
         orch = _build_dispatch_orch(monkeypatch)
@@ -1153,7 +1153,8 @@ class TestMmrWithReranker:
 
             def rerank(self, query, documents, top_k):
                 for i, doc in enumerate(documents):
-                    doc["reranker_score"] = float(pool_size - i)
+                    chunk = int(doc["chunk_id"].rsplit("_", 1)[1])
+                    doc["reranker_score"] = float(scores[chunk] if scores else pool_size - i)
                 documents.sort(key=lambda d: d["reranker_score"], reverse=True)
                 return documents[:top_k]
 
@@ -1174,6 +1175,18 @@ class TestMmrWithReranker:
         sources = [r["source"] for r in results]
         dup_count = sum(1 for s in sources if s in ("/0", "/1"))
         assert dup_count == 1, f"duplicates must be deduped by MMR, got sources {sources}"
+
+    def test_results_stay_ordered_by_score_after_mmr(self, monkeypatch):
+        """given MMR picks a distinct chunk before a higher-scored duplicate,
+        when the results are returned, then they are still ordered by score —
+        MMR decides which results are returned, not their order."""
+        orch = self._make_orch(monkeypatch, scores=[9, 8, 5, 4, 3, 2, 1, 0.5, 0])
+
+        results = orch.query("alpha beta gamma")
+
+        assert [r["source"] for r in results] == ["/0", "/1", "/2"]
+        scores = [r["score"] for r in results]
+        assert scores == sorted(scores, reverse=True), f"scores must not increase down the list: {scores}"
 
     def test_e2e_query_dedupes_duplicate_docs(self, isolated_orchestrator, monkeypatch):
         """given two identical documents and four distinct ones indexed for real,

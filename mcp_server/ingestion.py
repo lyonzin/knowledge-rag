@@ -372,15 +372,41 @@ class DocumentParser:
         rel_str = str(rel).replace("\\", "/")
 
         for pattern in patterns:
-            # Full relative path match (e.g., "docs/drafts/*.tmp"). The
-            # trailing-slash probe makes "folder/*" prune the folder itself
-            # during the walk, not just the files inside it (GH #296).
-            if fnmatch.fnmatch(rel_str, pattern) or fnmatch.fnmatch(rel_str + "/", pattern):
+            # Full relative path match (e.g., "docs/drafts/*.tmp")
+            if fnmatch.fnmatch(rel_str, pattern):
                 return True
             # Check each component (e.g., "node_modules" matches any/node_modules/deep)
             for part in rel.parts:
                 if fnmatch.fnmatch(part, pattern):
                     return True
+
+        return False
+
+    @staticmethod
+    def _excludes_directory(path: Path, base_dir: Path, patterns: List[str]) -> bool:
+        """Check if a directory and everything below it is excluded.
+
+        A "folder/*" pattern never matches the folder's own relative path, so
+        the walk used to enter the folder and drop its files one by one
+        (GH #296). The pattern is tested here without its trailing "/*":
+        a directory matching that stem has its whole content excluded.
+        Directories only — applied to a file, "_*/*" would also exclude a
+        root file named "_index.md".
+        """
+        if DocumentParser._should_exclude(path, base_dir, patterns):
+            return True
+
+        try:
+            rel = path.relative_to(base_dir)
+        except ValueError:
+            rel = path
+
+        rel_str = str(rel).replace("\\", "/")
+
+        for pattern in patterns:
+            stem = pattern.rstrip("*")
+            if stem != pattern and stem.endswith("/") and fnmatch.fnmatch(rel_str, stem[:-1]):
+                return True
 
         return False
 
@@ -404,7 +430,7 @@ class DocumentParser:
                 d
                 for d in dirs
                 if is_path_within(directory, Path(root) / d)
-                and not self._should_exclude(Path(root) / d, directory, exclude)
+                and not self._excludes_directory(Path(root) / d, directory, exclude)
             ]
 
             for fname in files:

@@ -9,11 +9,25 @@ re-embed unchanged files", not "only look at changed files".
 
 from __future__ import annotations
 
+import shutil
 import time
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+import pytest
 
 from mcp_server import server as srv
 from mcp_server.server import DocumentWatcher
+
+
+def _wait_until(predicate, timeout: float = 15.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.05)
+    return predicate()
 
 
 def _stats(**kwargs) -> dict:
@@ -149,6 +163,144 @@ class TestIndexPaths:
         assert stats["errors"] == 0
         assert stats["deleted"] == 0
 
+    def test_deleted_folder_prunes_everything_indexed_below_it(self, isolated_orchestrator) -> None:
+        """given a folder with indexed docs that was deleted as a whole, when
+        index_paths() receives only the folder path, then every doc below it
+        is pruned and its sibling stays indexed."""
+        docs_dir = Path(srv.config.documents_dir)
+        (docs_dir / "proj" / "deep").mkdir(parents=True)
+        self._write(docs_dir / "proj", "a.md", "# a\n")
+        self._write(docs_dir / "proj" / "deep", "b.md", "# b\n")
+        keep = self._write(docs_dir, "project-notes.md", "# keep\n")
+        orch = isolated_orchestrator
+        orch.index_all(force=True)
+        assert len(orch._indexed_docs) == 3
+        shutil.rmtree(docs_dir / "proj")
+
+        stats = orch.index_paths([str(docs_dir / "proj")])
+
+        assert stats["deleted"] == 2, f"both docs below the folder must be pruned: {stats}"
+        assert list(orch._source_to_docid) == [str(keep.resolve())]
+        assert orch.collection.count() == 1
+
+    def test_unavailable_documents_dir_prunes_nothing(self, isolated_orchestrator, tmp_path) -> None:
+        """given documents_dir went away (unplugged drive, unmounted share),
+        when index_paths() receives an indexed path, then nothing is pruned."""
+        docs_dir = Path(srv.config.documents_dir)
+        p = self._write(docs_dir, "a.md", "# a\n")
+        orch = isolated_orchestrator
+        orch.index_all(force=True)
+        docs_dir.rename(tmp_path / "unplugged")
+
+        stats = orch.index_paths([str(p)])
+
+        assert stats["deleted"] == 0, f"an unavailable folder is not a deletion: {stats}"
+        assert len(orch._indexed_docs) == 1
+        assert orch.collection.count() == 1
+        assert stats["errors"] == 1
+
+    def test_unreadable_path_is_not_treated_as_deleted(self, isolated_orchestrator, monkeypatch) -> None:
+        """given an indexed file that cannot be read right now, when
+        index_paths() receives it, then its chunks are kept."""
+        docs_dir = Path(srv.config.documents_dir)
+        p = self._write(docs_dir, "locked.md", "# locked\n")
+        orch = isolated_orchestrator
+        orch.index_all(force=True)
+        real_stat = Path.stat
+
+        def stat(self, *args, **kwargs):
+            if self.name == "locked.md":
+                raise PermissionError(13, "Access is denied", str(self))
+            return real_stat(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", stat)
+
+        stats = orch.index_paths([str(p)])
+
+        assert stats["deleted"] == 0, f"unreadable is not evidence of deletion: {stats}"
+        assert len(orch._indexed_docs) == 1
+
+    @pytest.mark.parametrize("name", ["notes.bak", "~$report.md", ".rag-pending-x.md"])
+    def test_file_the_scan_would_not_index_is_skipped(self, isolated_orchestrator, name) -> None:
+        """given a path the full scan never indexes (unsupported format, Office
+        owner file, staging file), when index_paths() receives it, then it is
+        skipped without being indexed and without an error."""
+        docs_dir = Path(srv.config.documents_dir)
+        p = self._write(docs_dir, name, "# content\n")
+        orch = isolated_orchestrator
+
+        stats = orch.index_paths([str(p)])
+
+        assert stats["errors"] == 0, f"not an error: {stats}"
+        assert stats["indexed"] == 0
+        assert not orch._indexed_docs
+
+    def test_resume_checkpoint_survives_a_partial_pass(self, isolated_orchestrator) -> None:
+        """given a checkpoint left by an interrupted smart reindex, when
+        index_paths() handles one file, then the checkpoint is still there."""
+        docs_dir = Path(srv.config.documents_dir)
+        p = self._write(docs_dir, "a.md", "# a\n")
+        orch = isolated_orchestrator
+        orch._reindex_progress["operation"] = "smart_reindex"
+        orch._checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
+        orch._checkpoint_file.write_text("{}", encoding="utf-8")
+
+        orch.index_paths([str(p)])
+
+        assert orch._checkpoint_file.exists(), "a partial pass must not clear the resume checkpoint"
+
+
+class TestWatcherFolderEvents:
+    """Folder deletes and moves, which do not always come with one event per file."""
+
+    def _watcher(self, tmp_path: Path, monkeypatch, indexed: list[Path]) -> DocumentWatcher:
+        monkeypatch.setattr(srv.config, "documents_dir", tmp_path)
+        monkeypatch.setattr(srv.config, "exclude_patterns", ["Temp/*"])
+        monkeypatch.setattr(srv.config, "supported_formats", {".md"})
+        orch = MagicMock()
+        orch._source_to_docid = {str(p.resolve()): f"doc-{i}" for i, p in enumerate(indexed)}
+        return DocumentWatcher(orchestrator_getter=lambda: orch)
+
+    def test_deleted_folder_reported_as_a_file_is_scheduled(self, tmp_path, monkeypatch) -> None:
+        """given Windows reports a deleted folder as a plain file event, when
+        documents were indexed below it, then the folder path is scheduled."""
+        watcher = self._watcher(tmp_path, monkeypatch, [tmp_path / "proj" / "a.md"])
+
+        watcher.on_deleted(SimpleNamespace(is_directory=False, src_path=str(tmp_path / "proj")))
+
+        assert watcher._pending_paths == {str(tmp_path / "proj")}
+
+    def test_deleted_folder_reported_as_a_directory_is_scheduled(self, tmp_path, monkeypatch) -> None:
+        """given a directory delete event, when documents were indexed below
+        it, then the folder path is scheduled."""
+        watcher = self._watcher(tmp_path, monkeypatch, [tmp_path / "proj" / "a.md"])
+
+        watcher.on_deleted(SimpleNamespace(is_directory=True, src_path=str(tmp_path / "proj")))
+
+        assert watcher._pending_paths == {str(tmp_path / "proj")}
+
+    def test_deleted_path_with_nothing_indexed_below_is_ignored(self, tmp_path, monkeypatch) -> None:
+        """given a deleted unsupported file or an empty folder, when nothing
+        was indexed below it, then no reindex is scheduled."""
+        watcher = self._watcher(tmp_path, monkeypatch, [tmp_path / "project-notes.md"])
+
+        watcher.on_deleted(SimpleNamespace(is_directory=False, src_path=str(tmp_path / "proj")))
+        watcher.on_deleted(SimpleNamespace(is_directory=True, src_path=str(tmp_path / "build")))
+        watcher.on_deleted(SimpleNamespace(is_directory=False, src_path=str(tmp_path / "Temp" / "x.lock")))
+
+        assert not watcher._pending_paths
+
+    def test_moved_folder_schedules_the_old_path_and_never_a_full_scan(self, tmp_path, monkeypatch) -> None:
+        """given a folder move, when documents were indexed below the old
+        path, then the old path is scheduled for pruning and the new folder
+        is left to the per-file events (no full scan for a folder rename)."""
+        watcher = self._watcher(tmp_path, monkeypatch, [tmp_path / "old" / "a.md"])
+        event = SimpleNamespace(is_directory=True, src_path=str(tmp_path / "old"), dest_path=str(tmp_path / "new"))
+
+        watcher.on_moved(event)
+
+        assert watcher._pending_paths == {str(tmp_path / "old")}
+
 
 class TestWatcherPathsE2E:
     def test_observer_reindexes_only_the_changed_file(self, isolated_orchestrator, monkeypatch) -> None:
@@ -173,19 +325,51 @@ class TestWatcherPathsE2E:
         orch.index_paths = spy_index_paths  # type: ignore[method-assign]
 
         watcher = DocumentWatcher(lambda: orch, debounce_seconds=0.3)
-        observer = PollingObserver()
+        observer = PollingObserver(timeout=0.2)
         observer.schedule(watcher, str(docs_dir), recursive=True)
         observer.start()
         try:
-            a.write_text("# a changed\n", encoding="utf-8")
-            time.sleep(1.5)
+            a.write_text("# a changed, and longer\n", encoding="utf-8")
+
+            def reindexed() -> bool:
+                # Looked up on every poll: the entry is replaced while this thread reads.
+                doc_id = orch._source_to_docid.get(str(a.resolve()))
+                return orch._indexed_docs.get(doc_id, {}).get("file_size") == a.stat().st_size
+
+            assert _wait_until(reindexed), "changed file must be re-embedded with fresh metadata"
             assert dispatched.get("paths") == {str(a.resolve())}, (
                 f"watcher must dispatch only the changed path, got {dispatched}"
             )
-            a_id = orch._source_to_docid[str(a.resolve())]
-            assert orch._indexed_docs[a_id]["file_size"] == a.stat().st_size, (
-                "changed file must be re-embedded with fresh metadata"
+        finally:
+            observer.stop()
+            observer.join(timeout=2)
+
+    def test_observer_prunes_a_deleted_folder(self, isolated_orchestrator, monkeypatch) -> None:
+        """given a folder with indexed documents, when it is deleted from disk,
+        then its documents leave the index and the sibling stays."""
+        from watchdog.observers.polling import PollingObserver
+
+        monkeypatch.setattr(srv.config, "supported_formats", {".md"})
+        docs_dir = Path(srv.config.documents_dir)
+        (docs_dir / "proj" / "deep").mkdir(parents=True)
+        (docs_dir / "proj" / "a.md").write_text("# a\n", encoding="utf-8")
+        (docs_dir / "proj" / "deep" / "b.md").write_text("# b\n", encoding="utf-8")
+        keep = docs_dir / "keep.md"
+        keep.write_text("# keep\n", encoding="utf-8")
+        orch = isolated_orchestrator
+        orch.index_all(force=True)
+        assert len(orch._source_to_docid) == 3
+
+        watcher = DocumentWatcher(lambda: orch, debounce_seconds=0.3)
+        observer = PollingObserver(timeout=0.2)
+        observer.schedule(watcher, str(docs_dir), recursive=True)
+        observer.start()
+        try:
+            shutil.rmtree(docs_dir / "proj")
+            assert _wait_until(lambda: list(orch._source_to_docid) == [str(keep.resolve())]), (
+                f"documents of the deleted folder must be pruned, left {list(orch._source_to_docid)}"
             )
+            assert orch.collection.count() == 1
         finally:
             observer.stop()
             observer.join(timeout=2)

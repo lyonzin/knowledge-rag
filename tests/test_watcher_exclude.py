@@ -124,18 +124,28 @@ class TestWatcherExcludeE2E:
         temp_dir = docs_dir / "Temp"
         temp_dir.mkdir(exist_ok=True)
 
-        watcher = DocumentWatcher(lambda: isolated_orchestrator, debounce_seconds=0.3)
-        observer = PollingObserver()
+        orch = isolated_orchestrator
+        scheduled: list[str] = []
+        watcher = DocumentWatcher(lambda: orch, debounce_seconds=0.3)
+        schedule = watcher._schedule_reindex
+        monkeypatch.setattr(watcher, "_schedule_reindex", lambda path: (scheduled.append(path), schedule(path)))
+        observer = PollingObserver(timeout=0.2)
         observer.schedule(watcher, str(docs_dir), recursive=True)
         observer.start()
         try:
+            # The excluded file is written first: by the time the real edit below
+            # is indexed, the observer has already reported both.
             (temp_dir / "scratch.txt").write_text("noise")
-            time.sleep(1.0)
-            assert not watcher._pending_paths, "event inside the excluded folder must not schedule a reindex"
-            (docs_dir / "real.txt").write_text("# real change")
-            time.sleep(1.5)
-            indexed = str((docs_dir / "real.txt").resolve()) in isolated_orchestrator._source_to_docid
-            assert indexed, "event outside the excluded folder must trigger a reindex that indexes the file"
+            real = docs_dir / "real.txt"
+            real.write_text("# real change")
+            deadline = time.monotonic() + 15
+            while str(real.resolve()) not in orch._source_to_docid and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert str(real.resolve()) in orch._source_to_docid, "a real edit must be indexed"
+            assert [Path(p).name for p in scheduled] == ["real.txt"], (
+                f"only the real edit may schedule a reindex, got {scheduled}"
+            )
+            assert list(orch._source_to_docid) == [str(real.resolve())]
         finally:
             observer.stop()
             observer.join(timeout=2)
