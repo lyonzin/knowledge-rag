@@ -91,11 +91,13 @@ def test_bm25_retry_does_not_accumulate_duplicate_documents(monkeypatch):
     orchestrator.collection.get.return_value = {"ids": ["a", "b"], "documents": ["alpha", "beta"]}
     orchestrator.bm25_index = server.BM25Index()
     orchestrator._bm25_initialized = False
-    build = orchestrator.bm25_index.build_index
-    monkeypatch.setattr(orchestrator.bm25_index, "build_index", Mock(side_effect=MemoryError("injected OOM")))
+    build = server.BM25Index.build_index
+    # GH #299: the rebuild builds into a fresh BM25Index and swaps it in, so
+    # failure injection must patch the class, not the published instance.
+    monkeypatch.setattr(server.BM25Index, "build_index", Mock(side_effect=MemoryError("injected OOM")))
     orchestrator._ensure_bm25_index()
     assert not orchestrator._bm25_initialized
-    monkeypatch.setattr(orchestrator.bm25_index, "build_index", build)
+    monkeypatch.setattr(server.BM25Index, "build_index", build)
     orchestrator._ensure_bm25_index()
     assert orchestrator._bm25_initialized
     assert orchestrator.bm25_index.corpus_ids == ["a", "b"]
