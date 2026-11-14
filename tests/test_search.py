@@ -1098,3 +1098,124 @@ class TestRerankToggle:
         assert [r["chunk_index"] for r in results] != list(range(len(results))) or True
         # Concrete check: chunk_0 (highest FTS5 score, first input) got lowest reranker_score → last.
         assert results[0]["source"] == "/4", "highest reranker_score should surface last input first"
+
+
+class TestMmrWithReranker:
+    """GH #294 — MMR must run (and de-duplicate) when the reranker is enabled."""
+
+    def _make_orch(self, monkeypatch, pool_size=9):
+        import mcp_server.server as srv
+
+        orch = _build_dispatch_orch(monkeypatch)
+        monkeypatch.setattr(srv.config, "reranker_enabled", True)
+        monkeypatch.setattr(srv.config, "reranker_top_k_multiplier", 3)
+        monkeypatch.setattr(srv.config, "default_results", 3)
+
+        # chunk_0 and chunk_1 hold identical text — the duplicate pair the
+        # reranker ranks 1st and 2nd, which the MMR step must break apart.
+        # The remaining chunks are token-orthogonal so Jaccard similarity
+        # between them is 0 and only the duplicate pays a diversity penalty.
+        texts = ["alpha beta gamma delta"] * 2 + [
+            "security incident response playbook",
+            "database migration postgres backup",
+            "frontend react component testing",
+            "network firewall configuration audit",
+            "kubernetes cluster deployment helm",
+            "machine learning model evaluation",
+            "windows active directory kerberos",
+        ]
+        ids = [f"chunk_{i}" for i in range(pool_size)]
+        metas = {
+            cid: {
+                "source": f"/{i}",
+                "filename": f"{i}.md",
+                "category": "security",
+                "chunk_index": 0,
+                "keywords": "",
+            }
+            for i, cid in enumerate(ids)
+        }
+
+        class _SemanticCollection:
+            def query(self, query_texts, n_results, where, include):
+                return {
+                    "ids": [ids],
+                    "distances": [[float(pool_size - i) for i in range(pool_size)]],
+                    "documents": [texts],
+                    "metadatas": [list(metas.values())],
+                }
+
+            def count(self):
+                return pool_size
+
+        class _TruncatingReranker:
+            """Mimics RerankerService.rerank: scores, sorts, truncates to top_k."""
+
+            def rerank(self, query, documents, top_k):
+                for i, doc in enumerate(documents):
+                    doc["reranker_score"] = float(pool_size - i)
+                documents.sort(key=lambda d: d["reranker_score"], reverse=True)
+                return documents[:top_k]
+
+        orch.collection = _SemanticCollection()
+        orch.reranker = _TruncatingReranker()
+        # Real MMR — the dispatch builder stubs it out.
+        orch._apply_mmr = srv.KnowledgeOrchestrator._apply_mmr.__get__(orch)
+        return orch
+
+    def test_mmr_runs_and_dedupes_with_reranker_enabled(self, monkeypatch):
+        """given duplicates ranked 1-2 by the reranker, when querying with the
+        reranker on, then only one duplicate survives and results stay diverse."""
+        orch = self._make_orch(monkeypatch)
+
+        results = orch.query("alpha beta gamma")
+
+        assert len(results) == 3, f"expected 3 results, got {len(results)}"
+        sources = [r["source"] for r in results]
+        dup_count = sum(1 for s in sources if s in ("/0", "/1"))
+        assert dup_count == 1, f"duplicates must be deduped by MMR, got sources {sources}"
+
+    def test_e2e_query_dedupes_duplicate_docs(self, isolated_orchestrator, monkeypatch):
+        """given two identical documents and four distinct ones indexed for real,
+        when querying with the reranker enabled, then only one duplicate
+        survives in the top-3 and the freed slot goes to a distinct doc."""
+        import mcp_server.server as srv
+
+        monkeypatch.setattr(srv.config, "reranker_enabled", True)
+        orch = isolated_orchestrator
+
+        class _FakeReranker:
+            """Deterministic graded scores: duplicates get the top two slots."""
+
+            def rerank(self, query, documents, top_k):
+                seen_dups = 0
+                seen_distinct = 0
+                for doc in documents:
+                    if doc["document"] == "alpha beta gamma delta":
+                        doc["reranker_score"] = 10.0 - seen_dups
+                        seen_dups += 1
+                    else:
+                        doc["reranker_score"] = 8.0 - seen_distinct
+                        seen_distinct += 1
+                documents.sort(key=lambda d: d["reranker_score"], reverse=True)
+                return documents[:top_k]
+
+        orch.reranker = _FakeReranker()
+        orch.add_document_from_content(content="alpha beta gamma delta", filepath="dup_a.md", category="t")
+        orch.add_document_from_content(content="alpha beta gamma delta", filepath="dup_b.md", category="t")
+        distinct = [
+            ("network firewall configuration audit", "d1.md"),
+            ("database migration postgres backup", "d2.md"),
+            ("frontend react component testing", "d3.md"),
+            ("windows active directory kerberos", "d4.md"),
+        ]
+        for text, path in distinct:
+            orch.add_document_from_content(content=text, filepath=path, category="t")
+
+        results = orch.query("alpha beta gamma delta", max_results=3)
+
+        sources = [r["source"] for r in results]
+        assert len(sources) == 3, f"expected 3 results, got {len(sources)}: {sources}"
+        dup_count = sum(1 for s in sources if "dup_" in s)
+        assert dup_count == 1, f"only one duplicate may survive, got {sources}"
+        assert results[0]["score"] == 1.0, "normalization must span the final MMR set"
