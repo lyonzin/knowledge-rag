@@ -372,8 +372,10 @@ class DocumentParser:
         rel_str = str(rel).replace("\\", "/")
 
         for pattern in patterns:
-            # Full relative path match (e.g., "docs/drafts/*.tmp")
-            if fnmatch.fnmatch(rel_str, pattern):
+            # Full relative path match (e.g., "docs/drafts/*.tmp"). The
+            # trailing-slash probe makes "folder/*" prune the folder itself
+            # during the walk, not just the files inside it (GH #296).
+            if fnmatch.fnmatch(rel_str, pattern) or fnmatch.fnmatch(rel_str + "/", pattern):
                 return True
             # Check each component (e.g., "node_modules" matches any/node_modules/deep)
             for part in rel.parts:
