@@ -16,6 +16,9 @@ def test_completed_update_cannot_be_hidden_by_an_earlier_query_cache_write(
     orchestrator = isolated_orchestrator
     monkeypatch.setattr(server.config, "reranker_enabled", False)
     monkeypatch.setattr(server.config, "fts5_enabled", False)
+    # GH #299: the background BM25 refresh would invalidate the cache mid-race;
+    # this test is about the query-cache race, so the refresh is neutralized.
+    monkeypatch.setattr(orchestrator, "_run_bm25_rebuild", lambda: None)
     source = server.config.documents_dir / "document.txt"
     source.write_text("old content for the query", encoding="utf-8")
     assert orchestrator.index_all()["errors"] == 0

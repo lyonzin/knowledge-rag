@@ -1749,6 +1749,8 @@ class KnowledgeOrchestrator:
         self.bm25_index = BM25Index()
         self._bm25_initialized = False
         self._bm25_build_lock = threading.Lock()
+        self._bm25_build_running = threading.Event()
+        self._bm25_stale = threading.Event()
 
         # Cross-encoder reranker (lazy-loaded on first query)
         self.reranker = CrossEncoderReranker()
@@ -1920,12 +1922,60 @@ class KnowledgeOrchestrator:
             if index_lock is not None:
                 index_lock.release()
 
-    def _rebuild_bm25_from_collection(self) -> None:
-        """Read stable Chroma pages while holding the mutation lock, then publish."""
-        with self._bm25_build_lock:
-            if self._bm25_initialized:
-                return
+    def _ensure_bm25_index_or_refresh(self) -> None:
+        """Hybrid-query guard: never block a search on a stale generation (GH #299).
 
+        A cold index rebuilds synchronously (the query has no keyword
+        channel otherwise). A warm-but-stale index serves the current
+        generation and refreshes it on a background thread, swapping the
+        reference atomically when the new build is ready.
+        """
+        if not getattr(self, "_bm25_initialized", False):
+            self._ensure_bm25_index()
+            return
+        stale = getattr(self, "_bm25_stale", None)
+        running = getattr(self, "_bm25_build_running", None)
+        if stale is None or running is None:
+            return  # bare test doubles keep the original synchronous contract
+        if stale.is_set() and not running.is_set():
+            stale.clear()
+            running.set()
+            threading.Thread(target=self._run_bm25_rebuild, daemon=True, name="bm25-rebuild").start()
+
+    def _run_bm25_rebuild(self) -> None:
+        index_lock = getattr(self, "_index_lock", None)
+        if index_lock is not None and not index_lock.acquire(blocking=False):
+            self._clear_bm25_running()
+            return
+        try:
+            self._rebuild_bm25_from_collection()
+        finally:
+            self._clear_bm25_running()
+            if index_lock is not None:
+                index_lock.release()
+
+    def _clear_bm25_running(self) -> None:
+        running = getattr(self, "_bm25_build_running", None)
+        if running is not None:
+            running.clear()
+
+    def _mark_bm25_stale(self) -> None:
+        """Note that the published BM25 generation no longer matches Chroma.
+
+        Only meaningful when a generation exists: cold indexes rebuild on
+        the next keyword query regardless (GH #299).
+        """
+        if self._bm25_initialized:
+            self._bm25_stale.set()
+
+    def _rebuild_bm25_from_collection(self) -> None:
+        """Read stable Chroma pages while holding the mutation lock, then publish.
+
+        Builds into a fresh index and swaps the reference atomically, so
+        concurrent queries keep serving the previous generation until the
+        new one is complete (GH #299).
+        """
+        with self._bm25_build_lock:
             try:
                 count = self.collection.count()
                 if count == 0:
@@ -1933,25 +1983,28 @@ class KnowledgeOrchestrator:
                     # not outlive its chunks (#259). Leave flag False so a later
                     # call retries once documents become available.
                     self.bm25_index.clear()
+                    self._bm25_initialized = False
                     return
 
                 # Batch to avoid SQLite "too many SQL variables" (chromadb 1.x
                 # rebuilds IN(?, ?, ...) per row; single get(limit=count) blows
                 # past the 999 default max_variable_number at ~48k chunks).
                 batch_size = 500
-                # Retry starts from a clean corpus after any partial load/build.
-                self.bm25_index._reset_corpus()
+                fresh = BM25Index()
                 for offset in range(0, count, batch_size):
                     batch = self.collection.get(include=["documents"], limit=batch_size, offset=offset)
                     if not batch.get("ids"):
                         return
-                    self.bm25_index.add_documents(batch["ids"], batch["documents"] or [])
-                if not self.bm25_index.corpus:
+                    fresh.add_documents(batch["ids"], batch["documents"] or [])
+                if not fresh.corpus:
                     return
 
-                self.bm25_index.build_index()
-                print(f"[INFO] BM25 index built with {len(self.bm25_index)} documents", file=sys.stderr)
+                fresh.build_index()
+                self.bm25_index = fresh
                 self._bm25_initialized = True
+                # cached results may predate the new generation's keyword hits
+                self._invalidate_caches()
+                print(f"[INFO] BM25 index built with {len(fresh)} documents", file=sys.stderr)
             except Exception as e:
                 print(f"[WARN] Failed to build BM25 index: {e}", file=sys.stderr)
                 # Do not mark initialized; retry allowed on next call.
@@ -2551,9 +2604,9 @@ class KnowledgeOrchestrator:
                 self._write_collection.delete(ids=newly_created)
                 self._fts5_sync_remove_ids(newly_created)
             self._restore_document_chunks(previous)
-            self._bm25_initialized = False
+            self._mark_bm25_stale()
             raise
-        self._bm25_initialized = False
+        self._mark_bm25_stale()
         return added, skipped, len(previous["ids"])
 
     def _index_document(self, doc: Document) -> Tuple[int, int]:
@@ -2678,7 +2731,7 @@ class KnowledgeOrchestrator:
         results = target.get(where={"doc_id": doc_id}, include=[])
         if results["ids"]:
             target.delete(ids=results["ids"])
-            self._bm25_initialized = False
+            self._mark_bm25_stale()
             self._fts5_sync_remove_ids(results["ids"])
             return len(results["ids"])
         return 0
@@ -3808,7 +3861,7 @@ class KnowledgeOrchestrator:
             raise Fts5NotReadyError("FTS5 fast-path is disabled in config; set search.lexical_fast_path.enabled=true")
 
         if hybrid_alpha < 1.0:
-            self._ensure_bm25_index()
+            self._ensure_bm25_index_or_refresh()
 
         # Keyword routing — informational only.
         # `routed_category` is surfaced via the `routed_by` field for telemetry,
@@ -4288,6 +4341,8 @@ class KnowledgeOrchestrator:
         if old_id:
             self._indexed_docs[old_id] = old_info
             self._source_to_docid[str(doc.source)] = old_id
+        # uncertain rollback: the collection state is no longer known, so the
+        # published generation must be rebuilt from scratch, not refreshed
         self._bm25_initialized = False
         self._invalidate_caches()
         try:
@@ -4362,6 +4417,7 @@ class KnowledgeOrchestrator:
         except Exception:
             self._indexed_docs[doc_id] = old_info
             self._source_to_docid[source] = doc_id
+            # uncertain rollback: rebuild from scratch on the next query
             self._bm25_initialized = False
             try:
                 self._restore_document_chunks(previous)
@@ -4840,6 +4896,7 @@ class KnowledgeOrchestrator:
         repairs = dict(getattr(self, "_pending_document_repairs", {}))
         repairs[source_key] = sorted(set(repairs.get(source_key, []) + ids))
         self._pending_document_repairs = repairs
+        # uncertain restoration: the published generation must be rebuilt
         self._bm25_initialized = False
         try:
             # Load/merge old failures before publishing this one, never drop them.
