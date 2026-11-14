@@ -67,6 +67,8 @@ def isolated_orchestrator(tmp_path, monkeypatch):
     orch._index_lock = threading.RLock()
     orch._publication_lock = server.PublicationLock()
     orch._bm25_build_lock = threading.Lock()
+    orch._bm25_build_running = threading.Event()
+    orch._bm25_stale = threading.Event()
     orch._staging_target = None
     orch.embed_fn = Embeddings()
     orch.chroma_client = chromadb.EphemeralClient()
