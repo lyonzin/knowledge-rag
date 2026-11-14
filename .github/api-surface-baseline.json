@@ -4,6 +4,135 @@
       "classes": {},
       "functions": {}
     },
+    "mcp_server.assistants": {
+      "classes": {
+        "Harness": {
+          "bases": [],
+          "methods": {
+            "__init__": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "name"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "label"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "markers"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "commands"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "skills_dirs"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": false
+            }
+          }
+        },
+        "Home": {
+          "bases": [],
+          "methods": {
+            "__init__": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "path"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "env"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "which"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "suffix"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": false
+            }
+          }
+        }
+      },
+      "functions": {
+        "detect": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "home"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "skills_folder": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "harness"
+            },
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "home"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "user_homes": {
+          "args": [],
+          "is_async": false,
+          "returns_annotated": true
+        }
+      }
+    },
     "mcp_server.config": {
       "classes": {
         "Config": {
@@ -280,6 +409,12 @@
                   "has_default": true,
                   "kind": "positional",
                   "name": "log_level"
+                },
+                {
+                  "annotated": true,
+                  "has_default": true,
+                  "kind": "positional",
+                  "name": "ef_search"
                 }
               ],
               "is_async": false,
@@ -2136,6 +2271,24 @@
               "is_async": false,
               "returns_annotated": false
             },
+            "dispatch": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "event"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": false
+            },
             "on_created": {
               "args": [
                 {
@@ -2517,6 +2670,24 @@
                   "has_default": true,
                   "kind": "positional",
                   "name": "resume_state"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            },
+            "index_paths": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "paths"
                 }
               ],
               "is_async": false,
@@ -3175,6 +3346,229 @@
               "has_default": false,
               "kind": "positional",
               "name": "content"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        }
+      }
+    },
+    "mcp_server.skills_bundle": {
+      "classes": {
+        "Plan": {
+          "bases": [],
+          "methods": {
+            "__init__": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "folder"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "states"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "manifest"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": false
+            }
+          }
+        },
+        "Skill": {
+          "bases": [],
+          "methods": {
+            "__init__": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "name"
+                },
+                {
+                  "annotated": true,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "content"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": false
+            },
+            "digest": {
+              "args": [
+                {
+                  "annotated": false,
+                  "has_default": false,
+                  "kind": "positional",
+                  "name": "self"
+                }
+              ],
+              "is_async": false,
+              "returns_annotated": true
+            }
+          }
+        },
+        "SkillWriteError": {
+          "bases": [
+            "OSError"
+          ],
+          "methods": {}
+        }
+      },
+      "functions": {
+        "bundled_skills": {
+          "args": [],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "holds_skills": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "folder"
+            },
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "skills"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "install": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "plan"
+            },
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "skills"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "plan_folder": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "folder"
+            },
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "skills"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "read_manifest": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "folder"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "skill_state": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "folder"
+            },
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "skill"
+            },
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "manifest"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "uninstall": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "plan"
+            },
+            {
+              "annotated": true,
+              "has_default": false,
+              "kind": "positional",
+              "name": "skills"
+            }
+          ],
+          "is_async": false,
+          "returns_annotated": true
+        }
+      }
+    },
+    "mcp_server.skills_cli": {
+      "classes": {},
+      "functions": {
+        "build_parser": {
+          "args": [],
+          "is_async": false,
+          "returns_annotated": true
+        },
+        "main": {
+          "args": [
+            {
+              "annotated": true,
+              "has_default": true,
+              "kind": "positional",
+              "name": "argv"
             }
           ],
           "is_async": false,

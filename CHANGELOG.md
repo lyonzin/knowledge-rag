@@ -13,7 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-### Unreleased
+### v5.1.0 (2026-11-14) — Path-level watcher, non-blocking BM25 and orphan cleanup
+
+Minor release. Ships the fixes for six reports from one large installation (a whole drive as `documents_dir`, about 610,000 chunks): the file watcher applies `exclude_patterns` and reindexes only what changed, scans prune excluded folders, a document write or a restart no longer makes the next search on a large index wait minutes for BM25, MMR runs with the reranker enabled, and a reindex removes orphan chunks. Also new: `get_reindex_status` lists the files that failed, `search.ef_search`, and the `self_recall` probe in `get_index_stats`. Nothing breaking on upgrade, and existing indexes need no reindex. `evaluate_retrieval` now measures at `hybrid_alpha=0.3`, so a baseline recorded with an earlier version has to be recorded again.
 
 **Added:**
 
