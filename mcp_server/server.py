@@ -1532,7 +1532,7 @@ class DocumentWatcher(FileSystemEventHandler):
                 return
             print(f"[WATCHER] {count} file(s) changed, starting incremental reindex...", file=sys.stderr)
             orch = self._get_orchestrator()
-            stats = orch.index_all(force=False)
+            stats = orch.index_paths(paths)
             if stats.get("skipped_reason") == "reindex_already_running":
                 with self._lock:
                     self._pending_paths.update(paths)
@@ -1633,17 +1633,25 @@ class DocumentWatcher(FileSystemEventHandler):
         self._schedule_reindex(event.src_path)
 
     def on_deleted(self, event):
+        if event.is_directory:
+            # Windows reports only the folder for bulk deletes — dispatch the
+            # dir path so index_paths falls back to a full scan (GH #297).
+            if not self._is_excluded(event.src_path):
+                self._schedule_reindex(event.src_path)
+            return
         # An indexed file deleted from inside an excluded folder still needs a
         # reindex so the stale chunks get pruned (GH #295).
-        if (
-            not event.is_directory
-            and self._is_supported(event.src_path)
-            and (not self._is_excluded(event.src_path) or self._is_indexed(event.src_path))
+        if self._is_supported(event.src_path) and (
+            not self._is_excluded(event.src_path) or self._is_indexed(event.src_path)
         ):
             self._schedule_reindex(event.src_path)
 
     def on_moved(self, event):
         if event.is_directory:
+            # Bulk folder moves: Windows reports only the folder — dispatch it
+            # so index_paths falls back to a full scan (GH #297).
+            if not self._is_excluded(event.dest_path):
+                self._schedule_reindex(event.dest_path)
             return
         # Schedule when the destination is indexable, or when the source was
         # indexed (a move INTO an excluded folder must prune the old chunks).
@@ -1651,6 +1659,10 @@ class DocumentWatcher(FileSystemEventHandler):
             event.src_path
         ):
             self._schedule_reindex(event.dest_path)
+            # dispatch the source too: a move out of the corpus (or into an
+            # excluded folder) must prune the old chunks (GH #297)
+            if self._is_indexed(event.src_path):
+                self._schedule_reindex(event.src_path)
 
 
 # =============================================================================
@@ -2435,6 +2447,66 @@ class KnowledgeOrchestrator:
             self._invalidate_caches()
 
         return stats
+
+    def index_paths(self, paths: Iterable[str]) -> Dict[str, Any]:
+        """Incremental reindex of specific paths (watcher-driven, GH #297).
+
+        Each existing, supported, non-excluded file goes through the same
+        per-doc worker as a full scan (mtime/size check still skips unchanged
+        files). Gone or newly-excluded paths are pruned when indexed. A
+        directory in the batch falls back to a full scan: Windows reports
+        only the folder for bulk deletes/moves, so nested files would
+        otherwise stay stale.
+        """
+        if not self._index_lock.acquire(blocking=False):
+            stats = self._init_index_stats()
+            stats["skipped_reason"] = "reindex_already_running"
+            return stats
+        try:
+            return self._index_paths_impl([str(p) for p in paths])
+        finally:
+            self._index_lock.release()
+
+    def _index_paths_impl(self, paths: List[str]) -> Dict[str, Any]:
+        stats = self._init_index_stats()
+        docs_dir = config.documents_dir
+        candidates: List[Path] = []
+        for raw in paths:
+            try:
+                path = Path(raw).resolve()
+            except OSError:
+                continue
+            if not is_path_within(docs_dir, path):
+                continue
+            if path.is_dir():
+                return self._index_all_impl(force=False)
+            candidates.append(path)
+        if not candidates:
+            return stats
+
+        path_to_docid = self._build_path_to_docid_map()
+        tracking = self._init_reindex_tracking(None, stats)
+        stats["total_files"] = len(candidates)
+        for idx, path in enumerate(candidates):
+            excluded = self.parser._should_exclude(path, Path(docs_dir), config.exclude_patterns)
+            if excluded or not path.exists():
+                self._remove_indexed_path(path, path_to_docid, stats)
+                continue
+            self._process_one_document(idx, path, False, path_to_docid, stats, tracking)
+        return self._finalize_reindex(stats, tracking)
+
+    def _remove_indexed_path(self, path: Path, path_to_docid: Dict[str, str], stats: Dict[str, Any]) -> None:
+        """Prune a single indexed path whose file is gone or now excluded (GH #297)."""
+        resolved = str(path)
+        doc_id = path_to_docid.get(resolved) or self._source_to_docid.get(resolved)
+        if doc_id is None:
+            stats["skipped"] += 1
+            return
+        removed = self._remove_document_chunks(doc_id)
+        stats["chunks_removed"] += removed
+        stats["deleted"] += 1
+        self._source_to_docid.pop(resolved, None)
+        self._indexed_docs.pop(doc_id, None)
 
     # v4.8.0 Fase 3: kept as fallback constant for tests that instantiate
     # Orchestrator without a full Config (e.g. `object.__new__` mocks in
