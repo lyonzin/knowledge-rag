@@ -4353,6 +4353,8 @@ class KnowledgeOrchestrator:
 
         Balances relevance (score) vs diversity (dissimilarity to already selected docs).
         lambda=1.0 = pure relevance, lambda=0.0 = pure diversity, default 0.7 = relevance-heavy.
+        A candidate with the same words as a selected result is outside that
+        balance: it is taken only when no distinct candidate is left.
 
         ``results`` arrive ordered by relevance. MMR decides which of them are
         returned; the ones it keeps stay in that order, so the list a caller
@@ -4387,6 +4389,10 @@ class KnowledgeOrchestrator:
                     max_sim[i] = max(max_sim[i], similarity)
                 relevance = (raw_scores[i] - score_lo) / score_span if score_span > 0 else 1.0
                 mmr_score = lambda_param * relevance - (1 - lambda_param) * max_sim[i]
+                if max_sim[i] >= 1.0:
+                    # The same text as a result already selected tells the reader
+                    # nothing new: it takes a slot only when no other is left.
+                    mmr_score = float("-inf")
 
                 if mmr_score > best_mmr:
                     best_mmr = mmr_score
