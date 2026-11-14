@@ -1,8 +1,12 @@
 """Coverage for GPU auto-detect tri-state routing (v4.8.0 Fase 2).
 
 Tests the tri-state gpu_mode ("auto" | "true" | "false") and its effect on
-FastEmbedEmbeddings._load_model routing. All tests mock verify_gpu_readiness
-and TextEmbedding so they do not require a real GPU or downloadable model.
+FastEmbedEmbeddings._load_model routing. The routing tests mock
+verify_gpu_readiness and TextEmbedding so they do not require a real GPU or
+downloadable model.
+
+Also covers the environment verify_gpu_readiness gives its nvidia-smi probe
+(GH #311), with the platform, the environment and the subprocess call mocked.
 """
 
 from __future__ import annotations
@@ -190,3 +194,76 @@ class TestLoadModelRouting:
         captured = capsys.readouterr()
         assert "CUDA load failed" in captured.err
         assert "forced-cuda-fallback" in captured.err
+
+
+# ============================================================================
+# nvidia-smi probe environment — ProgramFiles when the MCP client dropped it
+# ============================================================================
+
+
+class TestNvidiaSmiProbeEnv:
+    """Verify the nvidia-smi probe gets a ProgramFiles value the MCP client did not forward (GH #311).
+
+    platform.system and os.environ are replaced as the module sees them, so the
+    tests run the same on every OS and never modify the real environment.
+    """
+
+    @patch("mcp_server.server.platform.system", lambda: "Windows")
+    @patch("mcp_server.server.os.environ", {"SYSTEMDRIVE": "D:", "PATH": "D:\\Windows\\System32"})
+    def test_windows_without_program_files_derives_it_from_system_drive(self):
+        probe_env = FastEmbedEmbeddings._build_nvidia_smi_env()
+
+        # ProgramFiles is added and the forwarded variables are kept
+        assert probe_env == {
+            "SYSTEMDRIVE": "D:",
+            "PATH": "D:\\Windows\\System32",
+            "PROGRAMFILES": "D:\\Program Files",
+        }
+
+    @patch("mcp_server.server.platform.system", lambda: "Windows")
+    @patch("mcp_server.server.os.environ", {"SYSTEMDRIVE": "D:", "PROGRAMW6432": "E:\\Program Files"})
+    def test_windows_without_program_files_prefers_programw6432(self):
+        probe_env = FastEmbedEmbeddings._build_nvidia_smi_env()
+
+        assert probe_env["PROGRAMFILES"] == "E:\\Program Files"
+
+    @patch("mcp_server.server.platform.system", lambda: "Windows")
+    @patch("mcp_server.server.os.environ", {})
+    def test_windows_without_system_drive_falls_back_to_c_drive(self):
+        probe_env = FastEmbedEmbeddings._build_nvidia_smi_env()
+
+        assert probe_env == {"PROGRAMFILES": "C:\\Program Files"}
+
+    @patch("mcp_server.server.platform.system", lambda: "Windows")
+    @patch("mcp_server.server.os.environ", {"SYSTEMDRIVE": "D:", "PROGRAMFILES": "", "PROGRAMW6432": ""})
+    def test_windows_treats_empty_values_as_missing(self):
+        probe_env = FastEmbedEmbeddings._build_nvidia_smi_env()
+
+        assert probe_env["PROGRAMFILES"] == "D:\\Program Files"
+
+    @patch("mcp_server.server.platform.system", lambda: "Windows")
+    @patch("mcp_server.server.os.environ", {"PROGRAMFILES": "C:\\Program Files"})
+    def test_windows_with_program_files_inherits_the_environment(self):
+        # None makes subprocess.run inherit the process environment unchanged
+        assert FastEmbedEmbeddings._build_nvidia_smi_env() is None
+
+    @patch("mcp_server.server.platform.system", lambda: "Linux")
+    @patch("mcp_server.server.os.environ", {"PATH": "/usr/bin"})
+    def test_non_windows_inherits_the_environment(self):
+        assert FastEmbedEmbeddings._build_nvidia_smi_env() is None
+
+    def test_verify_gpu_readiness_runs_nvidia_smi_with_that_environment(self):
+        # Arrange — checks 1 and 2 pass; a failing nvidia-smi ends the probe at check 3
+        with (
+            patch("mcp_server.server.platform.system", lambda: "Windows"),
+            patch("mcp_server.server.os.environ", {"SYSTEMDRIVE": "C:"}),
+            patch("onnxruntime.get_available_providers", return_value=["CUDAExecutionProvider"]),
+            patch("mcp_server.server.os.path.isfile", return_value=True),
+            patch("mcp_server.server.os.path.isdir", return_value=False),
+            patch("mcp_server.server.subprocess.run", return_value=MagicMock(returncode=255, stdout="")) as mock_run,
+        ):
+            # Act
+            FastEmbedEmbeddings.verify_gpu_readiness()
+
+        # Assert
+        assert mock_run.call_args.kwargs["env"] == {"SYSTEMDRIVE": "C:", "PROGRAMFILES": "C:\\Program Files"}

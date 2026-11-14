@@ -109,7 +109,7 @@ Any probe exception is a failure and leads to CPU fallback. The application also
 |---|---|
 | CUDA missing from available providers | Confirm the interpreter path and installed runtime distributions; repair an isolated environment if CPU/GPU wheels overlap. |
 | Missing DLL/shared library | Check the named file, runtime family, package location, and loader search path. A missing CUDA 12 DLL alone does not establish which ORT wheel was installed. |
-| `nvidia-smi` absent or failing | Check driver installation and executable search path. Avoid replacing drivers just to fix a Python package conflict. |
+| `nvidia-smi` absent or failing | Check driver installation and executable search path. Avoid replacing drivers just to fix a Python package conflict. If it works in a terminal but fails under an MCP client on Windows, see [Windows MCP SDK subprocess environment](#windows-mcp-sdk-subprocess-environment). |
 | Provider listed but session uses CPU | Inspect ORT's stderr for loader/driver errors; verify CUDA and cuDNN compatibility, then rerun an actual embedding. |
 | CUDA-only dependencies on macOS | Use CPU. This extra does not provide Apple GPU acceleration. |
 | RAM/VRAM exhaustion | Reduce `documents.embed_batch_size`, measure peak memory, and test the intended model/corpus. Moving work to GPU does not eliminate host RAM use. |
@@ -118,14 +118,27 @@ Containers need host GPU access and a compatible runtime image. WSL2 uses the Wi
 
 ### Windows MCP SDK subprocess environment
 
-Compare the server's environment with the working terminal if CUDA works in a
-foreground script but the same server falls back under a Python MCP stdio client.
-On the audit host, the SDK's reduced default environment omitted `PROGRAMW6432`:
-`nvidia-smi` then exited 255 with an NVML error. Inheriting that variable alone
-from the trusted parent restored the probe and actual CUDA inference. Adding
-`WINDIR` or changing `CREATE_NO_WINDOW` did not resolve that reproduction.
+Symptom: the banner reports `GPU STATUS: UNAVAILABLE` with the reason
+`nvidia-smi failed or returned no GPU`, although `nvidia-smi` works in a
+terminal and CUDA works in a foreground script. Cause: the MCP client started
+the server with a reduced environment. The Python MCP SDK's stdio client, which
+mcp-proxy and other clients are built on, forwards neither `ProgramFiles` nor
+`ProgramW6432`, and `nvidia-smi` then exits 255 with an NVML error. On the
+audit host, either variable alone restored the probe and actual CUDA inference.
+Adding `WINDIR` or changing `CREATE_NO_WINDOW` did not resolve that
+reproduction.
 
-For a client using `StdioServerParameters`, extend its environment explicitly:
+Versions after v5.1.0 give the `nvidia-smi` probe a `ProgramFiles` value when
+the server's environment has none (#311), so the client configuration needs no
+change. For v5.1.0 and older, add the variable to the server's `env` in the
+client configuration:
+
+```json
+"env": { "ProgramFiles": "C:\\Program Files" }
+```
+
+A client that builds `StdioServerParameters` itself can instead forward either
+variable from its own environment:
 
 ```python
 import os
