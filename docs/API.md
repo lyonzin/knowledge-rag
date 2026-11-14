@@ -380,7 +380,9 @@ corpus, validate retrieval, then switch clients. See the
 
 #### `evaluate_retrieval` — full example
 
-Measure retrieval quality against a ground-truth test set. Useful for tuning `hybrid_alpha`, testing query expansion effectiveness, or validating after reindexing.
+Measure retrieval quality against a ground-truth test set. Useful for testing query expansion effectiveness, or validating after bulk ingestion, a model change or a reindex.
+
+Each case runs as one top-5 search with the defaults of `search_knowledge` (`hybrid_alpha=0.3`, `search_method="auto"`, no category or folder filter), so the figures describe what a client gets when it passes no options. The tool takes no search options: to compare `hybrid_alpha` values, run the same questions through `search_knowledge` with each value.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
