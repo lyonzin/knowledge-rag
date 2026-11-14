@@ -2147,6 +2147,7 @@ class KnowledgeOrchestrator:
             self._maybe_persist_checkpoint(idx, tracking)
             self._maybe_print_progress(idx, stats, _progress_interval)
 
+        self._prune_orphan_chunks(documents, stats)
         return self._finalize_reindex(stats, tracking)
 
     # Cap on detailed per-file failures exposed by get_reindex_status (#288).
@@ -2173,6 +2174,7 @@ class KnowledgeOrchestrator:
             "chunks_added": 0,
             "chunks_removed": 0,
             "dedup_skipped": 0,
+            "orphan_chunks_removed": 0,
             "categories": {},
         }
 
@@ -2255,6 +2257,95 @@ class KnowledgeOrchestrator:
                 stats["deleted"] += 1
                 self._source_to_docid.pop(str(source.resolve()), None)
                 del self._indexed_docs[doc_id]
+
+    def _prune_orphan_chunks(self, documents, stats: Dict[str, Any]) -> None:
+        """Delete chunks of documents the catalogue no longer knows (GH #298).
+
+        ``remove_document`` and the path prune both go through the catalogue,
+        so chunks whose ``doc_id`` dropped out of it (a lost or restored
+        index_metadata.json) could never be removed: they kept turning up in
+        search results and in every BM25 build. Runs after the pass has
+        registered every indexable file, and deletes on the evidence the path
+        prune accepts — the source is gone, the scan leaves it out, or it is
+        indexed again under another id. An unreadable source keeps its
+        chunks, and an empty scan (unavailable ``documents_dir``) deletes
+        nothing (#259).
+        """
+        if not documents:
+            return
+        try:
+            self._remove_orphan_chunks(stats)
+        except Exception as exc:
+            # The pass goes on to its end: what it indexed is not saved yet.
+            self._record_failed_file(stats, "orphan chunks", self._failure_reason(exc))
+            print(f"[ERROR] Failed to remove orphan chunks: {exc}", file=sys.stderr)
+
+    # Rows of unknown documents that the last look decided to keep. They stay
+    # in the collection, so without this every pass would page through it again.
+    _kept_unknown_rows = 0
+
+    def _remove_orphan_chunks(self, stats: Dict[str, Any]) -> None:
+        """Find the rows the catalogue does not account for and delete the orphans among them."""
+        # A healthy pass must not enumerate Chroma rows: the catalogue records
+        # each document's chunk count, so the collection is paged through only
+        # when it holds more rows than the catalogue and the last look explain.
+        target = self._write_collection
+        total = target.count()
+        catalogued = sum(info.get("chunks", 0) for info in self._indexed_docs.values())
+        if total <= catalogued + self._kept_unknown_rows:
+            return
+        unknown: Dict[str, List[str]] = {}
+        sources: Dict[str, str] = {}
+        batch_size = self._CHROMA_BATCH_SIZE
+        for offset in range(0, total, batch_size):
+            page = target.get(include=["metadatas"], limit=batch_size, offset=offset)
+            for chunk_id, meta in zip(page.get("ids") or [], page.get("metadatas") or []):
+                doc_id = (meta or {}).get("doc_id")
+                if doc_id and doc_id not in self._indexed_docs:
+                    unknown.setdefault(doc_id, []).append(chunk_id)
+                    sources[doc_id] = meta.get("source") or ""
+        base_dir = resolve_path(Path(config.documents_dir).expanduser())
+        path_to_docid = self._build_path_to_docid_map()
+        orphans = [
+            chunk_id
+            for doc_id, chunk_ids in unknown.items()
+            if self._is_orphan_source(sources[doc_id], base_dir, path_to_docid)
+            for chunk_id in chunk_ids
+        ]
+        self._kept_unknown_rows = sum(len(chunk_ids) for chunk_ids in unknown.values()) - len(orphans)
+        for start in range(0, len(orphans), batch_size):
+            batch = orphans[start : start + batch_size]
+            target.delete(ids=batch)
+            # Per batch: a later one may fail, and these rows are gone either way.
+            self._mark_bm25_stale()
+            stats["orphan_chunks_removed"] += len(batch)
+            self._fts5_sync_remove_ids(batch)
+        if orphans:
+            print(f"[INDEX] Removed {len(orphans)} orphan chunks", file=sys.stderr)
+
+    def _is_orphan_source(self, source: str, base_dir: Path, path_to_docid: Dict[str, str]) -> bool:
+        """Whether chunks under an unknown doc_id have nothing left to belong to."""
+        path = Path(source)
+        if not source or not path.is_absolute():
+            return False  # names no particular file: nothing to check the chunks against
+        # The string comes from stored metadata. A path on another drive, a
+        # network share or a device is outside documents_dir whatever it holds,
+        # and resolving a share would contact its server.
+        roots = {Path(base_dir.anchor), Path(Path(config.documents_dir).expanduser().anchor)}
+        if Path(path.anchor) not in roots or not is_path_within(config.documents_dir, path):
+            return True
+        try:
+            io_path(path).stat()
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False  # unreadable is not evidence of deletion
+        if self.parser._is_excluded_from_scan(path, base_dir, config.exclude_patterns):
+            return True
+        # The file is there and the scan reaches it: its chunks are stale only
+        # if this pass indexed it again, which gave it another id (path, mtime
+        # and size make the id).
+        return self._indexed_doc_id(path, path_to_docid) is not None
 
     def _init_reindex_tracking(self, resume_state: Optional[Dict[str, Any]], stats: Dict[str, Any]) -> Dict[str, Any]:
         """Build the mutable per-run tracking dict (checkpoint + throughput + resume)."""
@@ -2580,7 +2671,7 @@ class KnowledgeOrchestrator:
             else:
                 self._clear_checkpoint()
 
-        if stats["indexed"] > 0 or stats["updated"] > 0 or stats["deleted"] > 0:
+        if stats["indexed"] > 0 or stats["updated"] > 0 or stats["deleted"] > 0 or stats["orphan_chunks_removed"] > 0:
             self._invalidate_caches()
 
         return stats
