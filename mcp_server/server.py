@@ -1985,6 +1985,7 @@ class KnowledgeOrchestrator:
         documents = self._scan_and_count_documents(stats)
         path_to_docid = self._build_path_to_docid_map()
         self._prune_orphan_documents(documents, stats)
+        self._prune_unknown_doc_chunks(stats)
 
         tracking = self._init_reindex_tracking(resume_state, stats)
         tracking["repair_sources"] = repairs
@@ -2024,6 +2025,7 @@ class KnowledgeOrchestrator:
             "chunks_added": 0,
             "chunks_removed": 0,
             "dedup_skipped": 0,
+            "orphan_chunks_removed": 0,
             "categories": {},
         }
 
@@ -2106,6 +2108,45 @@ class KnowledgeOrchestrator:
                 stats["deleted"] += 1
                 self._source_to_docid.pop(str(source.resolve()), None)
                 del self._indexed_docs[doc_id]
+
+    def _prune_unknown_doc_chunks(self, stats: Dict[str, Any]) -> None:
+        """Delete chunks whose doc_id is missing from the metadata catalogue.
+
+        A lost or truncated index_metadata.json leaves chunks in Chroma that
+        ``remove_document`` can never reach and that pollute search results
+        and every BM25 rebuild (GH #298). Never runs during a nuclear
+        rebuild: the staged collection is populated on purpose while
+        ``_indexed_docs`` still describes the production catalogue.
+        """
+        if getattr(self, "_staging_target", None) is not None:
+            return
+        if not io_path(config.documents_dir).is_dir():
+            return
+        # Healthy reindexes must not enumerate Chroma rows (rollback-journal
+        # contract): page through the collection only when the chunk counts
+        # prove there are more rows than the catalogue accounts for.
+        chunk_counts = [info.get("chunks") for info in self._indexed_docs.values()]
+        if all(c is not None for c in chunk_counts) and self.collection.count() <= sum(chunk_counts):
+            return
+        known = set(self._indexed_docs)
+        unknown_ids: List[str] = []
+        batch_size = 500
+        # shortcut: paged metadata get; the FTS5 chunk-id table could make
+        # this cheaper when fts5_enabled, upgrade if huge reindexes hurt.
+        for offset in range(0, self.collection.count(), batch_size):
+            page = self.collection.get(include=["metadatas"], limit=batch_size, offset=offset)
+            for chunk_id, meta in zip(page.get("ids") or [], page.get("metadatas") or []):
+                doc_id = (meta or {}).get("doc_id")
+                if doc_id is not None and doc_id not in known:
+                    unknown_ids.append(chunk_id)
+        if not unknown_ids:
+            return
+        for start in range(0, len(unknown_ids), batch_size):
+            batch = unknown_ids[start : start + batch_size]
+            self._write_collection.delete(ids=batch)
+            self._fts5_sync_remove_ids(batch)
+        stats["orphan_chunks_removed"] = len(unknown_ids)
+        print(f"[INDEX] Pruned {len(unknown_ids)} orphan chunks (GH #298)", file=sys.stderr)
 
     def _init_reindex_tracking(self, resume_state: Optional[Dict[str, Any]], stats: Dict[str, Any]) -> Dict[str, Any]:
         """Build the mutable per-run tracking dict (checkpoint + throughput + resume)."""
