@@ -1759,6 +1759,10 @@ def _is_saved_from(path: Path, url: str) -> bool:
 # embeddings, one batched query_embeddings) — measured ~0.23s on a 70k-chunk
 # index. Results are cached for _SELF_RECALL_CACHE_TTL_SECONDS and dropped
 # alongside the query cache on every index mutation.
+# search_knowledge()'s default balance. evaluate_retrieval() searches with the
+# same one, so its figures describe what a client gets without passing options.
+_DEFAULT_HYBRID_ALPHA = 0.3
+
 _SELF_RECALL_SAMPLE_SIZE = 300
 _SELF_RECALL_CACHE_TTL_SECONDS = 300.0
 _SELF_RECALL_SEED = 42
@@ -4834,7 +4838,10 @@ class KnowledgeOrchestrator:
         return output
 
     def evaluate_retrieval(self, test_cases: List[Dict[str, str]]) -> Dict[str, Any]:
-        """Evaluate retrieval quality with test queries. Returns MRR@5 and Recall@5."""
+        """Evaluate retrieval quality with test queries. Returns MRR@5 and Recall@5.
+
+        Each case is one top-5 search with the defaults of search_knowledge().
+        """
         _validate_retrieval_cases(test_cases)
         per_query = []
         mrr_sum = 0.0
@@ -4845,7 +4852,7 @@ class KnowledgeOrchestrator:
             query = tc.get("query", "")
             expected = tc.get("expected_filepath", "")
 
-            results = self.query(query, max_results=k)
+            results = self.query(query, max_results=k, hybrid_alpha=_DEFAULT_HYBRID_ALPHA)
 
             found_rank = None
             for i, r in enumerate(results):
@@ -5477,7 +5484,7 @@ def search_knowledge(
     query: str,
     max_results: int = 5,
     category: Optional[str] = None,
-    hybrid_alpha: float = 0.3,
+    hybrid_alpha: float = _DEFAULT_HYBRID_ALPHA,
     min_score: float = 0.0,
     snippet_mode: bool = True,
     search_method: str = "auto",
@@ -5543,7 +5550,7 @@ def search_knowledge(
         )
 
     max_results = max(1, min(max_results or 5, config.max_results))
-    hybrid_alpha = max(0.0, min(hybrid_alpha if hybrid_alpha is not None else 0.3, 1.0))
+    hybrid_alpha = max(0.0, min(hybrid_alpha if hybrid_alpha is not None else _DEFAULT_HYBRID_ALPHA, 1.0))
     min_score = max(0.0, min(min_score if min_score is not None else 0.0, 1.0))
 
     # Routes and mappings usually name the same categories: list each once, in config order.
@@ -6121,9 +6128,12 @@ def evaluate_retrieval(test_cases: str) -> str:
         JSON string with MRR@5 (Mean Reciprocal Rank), Recall@5, and per-query hit/miss breakdown.
         MRR@5 above 0.7 indicates good retrieval quality.
 
-    Usage: Use to audit search quality after bulk document ingestion or after tuning
-    hybrid_alpha. Use get_index_stats() for system health checks instead. Use
-    search_knowledge() for actual document retrieval — this tool is for quality measurement only.
+    Usage: Use to audit search quality after bulk document ingestion, a model change or a
+    reindex. Each case runs as one top-5 search with the defaults of search_knowledge()
+    (hybrid_alpha 0.3, search_method auto, no category or folder filter), so the figures
+    describe what a client gets when it passes no options; this tool takes no search options.
+    Use get_index_stats() for system health checks instead. Use search_knowledge() for actual
+    document retrieval — this tool is for quality measurement only.
     """
     try:
         cases = json.loads(test_cases) if isinstance(test_cases, str) else test_cases

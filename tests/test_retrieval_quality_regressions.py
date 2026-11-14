@@ -1,5 +1,6 @@
 """Ranking candidates and evaluation inputs must reflect actual retrieval quality."""
 
+import inspect
 import json
 from unittest.mock import Mock
 
@@ -39,6 +40,19 @@ def test_valid_evaluation_cases_keep_reciprocal_rank_contract():
     metrics = orchestrator.evaluate_retrieval([{"query": "query", "expected_filepath": "expected.md"}])
     assert metrics["mrr_at_5"] == 0.5
     assert metrics["recall_at_5"] == 1.0
+
+
+def test_evaluation_searches_with_the_default_alpha_of_search_knowledge():
+    """given no search options, when a case is evaluated, then it is searched
+    with search_knowledge's default hybrid_alpha, so the figures describe what
+    an MCP client gets (GH #294)."""
+    client_default = inspect.signature(server.search_knowledge).parameters["hybrid_alpha"].default
+    orchestrator = object.__new__(server.KnowledgeOrchestrator)
+    orchestrator.query = Mock(return_value=[{"source": "/docs/expected.md"}])
+
+    orchestrator.evaluate_retrieval([{"query": "query", "expected_filepath": "expected.md"}])
+
+    orchestrator.query.assert_called_once_with("query", max_results=5, hybrid_alpha=client_default)
 
 
 @pytest.mark.parametrize(

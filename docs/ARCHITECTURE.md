@@ -134,8 +134,10 @@ clients should not assume a transaction across separate MCP calls.
 
 The RRF constant is 60 and ranks are one-based. Metadata path scoring and
 optional reranking also affect the final order. Changing alpha does not by
-itself establish a latency or quality improvement. Measure representative
-queries and expected sources with [evaluate_retrieval](API.md).
+itself establish a latency or quality improvement. [evaluate_retrieval](API.md)
+measures representative queries and expected sources at the default alpha;
+to compare other values, run the same questions through `search_knowledge`
+with each one.
 Alpha is not used by the FTS5 path; select `search_method="hybrid"` when comparing
 hybrid weights.
 

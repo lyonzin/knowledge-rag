@@ -50,7 +50,7 @@ Use this workflow when the user asks to evaluate retrieval, after a relevant cha
 
    A small corpus can still be evaluated. Report the number and coverage of questions; do not infer a universal quality threshold or declare a fixed delta statistically significant. With five cases, one changed result has a large effect.
 
-5. Compare with a previous run only after recording corpus revision, model, dimensions, query/passage prefixes, search configuration, and question set. The tool runs each case as one top-5 search with `hybrid_alpha=0.5` and `search_method="auto"`, without a category or folder filter. `search_knowledge` defaults to `hybrid_alpha=0.3`, so its ranking of the same query can differ from what the tool measures. The tool accepts no `hybrid_alpha`, `search_method`, or `min_score` argument; to compare those options, execute a separate controlled search workload with the same questions.
+5. Compare with a previous run only after recording corpus revision, model, dimensions, query/passage prefixes, search configuration, and question set. The tool runs each case as one top-5 search with the defaults of `search_knowledge` (`hybrid_alpha=0.3`, `search_method="auto"`), without a category or folder filter, so it measures what a client gets when it passes no options. Up to version 5.0.1 the tool searched with `hybrid_alpha=0.5`: figures recorded with those versions are not comparable, so record a new baseline after upgrading. The tool accepts no `hybrid_alpha`, `search_method`, or `min_score` argument; to compare those options, execute a separate controlled search workload with the same questions.
 
 6. Investigate changes before recommending a rebuild:
 
