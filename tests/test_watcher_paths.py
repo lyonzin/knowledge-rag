@@ -53,9 +53,18 @@ class _RecordingOrchestrator:
     def __init__(self, busy: bool = False):
         self.calls: list = []
         self.busy = busy
+        self.failed: list = []
+        self.truncated = False
 
     def _result(self) -> dict:
-        return _stats(skipped_reason="reindex_already_running") if self.busy else _stats(indexed=1)
+        if self.busy:
+            return _stats(skipped_reason="reindex_already_running")
+        return _stats(
+            indexed=1,
+            errors=len(self.failed),
+            failed_files=[{"path": path, "reason": "PermissionError: locked"} for path in self.failed],
+            failed_files_truncated=self.truncated,
+        )
 
     def index_paths(self, paths):
         self.calls.append(("paths", set(paths)))
@@ -122,6 +131,87 @@ class TestWatcherDispatchesPaths:
         _run_pass(watcher, "a.md")
 
         assert orch.calls == [("all", False), ("paths", {"a.md"})]
+
+    def test_batch_at_the_limit_is_still_path_level(self) -> None:
+        """given exactly as many changed paths as the limit, when the pass
+        runs, then it reindexes those paths."""
+        orch = _RecordingOrchestrator()
+        watcher = DocumentWatcher(lambda: orch)
+        watcher._full_scan_due = False
+        batch = {f"f{i}.md" for i in range(DocumentWatcher._FULL_SCAN_BATCH)}
+
+        _run_pass(watcher, *batch)
+
+        assert orch.calls == [("paths", batch)]
+
+
+class TestWatcherRetriesWhatFailed:
+    """In 5.0.1 every pass was a full scan, so a file that failed was tried
+    again at the next event. A path-level pass has to carry it over."""
+
+    def test_path_that_failed_is_taken_again_by_the_next_pass(self) -> None:
+        """given a file that could not be indexed (locked by another program),
+        when another file changes later, then the pass takes both."""
+        orch = _RecordingOrchestrator()
+        orch.failed = ["locked.md"]
+        watcher = DocumentWatcher(lambda: orch)
+        watcher._full_scan_due = False
+
+        _run_pass(watcher, "locked.md")
+        orch.failed = []
+        _run_pass(watcher, "other.md")
+        _run_pass(watcher, "third.md")
+
+        assert orch.calls == [
+            ("paths", {"locked.md"}),
+            ("paths", {"locked.md", "other.md"}),
+            ("paths", {"third.md"}),
+        ]
+
+    def test_failed_path_does_not_start_a_pass_on_its_own(self) -> None:
+        """given a file that fails every time (a corrupt PDF), when the pass
+        ends, then nothing is pending and no timer is armed — it is retried at
+        the next change, not in a loop."""
+        orch = _RecordingOrchestrator()
+        orch.failed = ["corrupt.pdf"]
+        watcher = DocumentWatcher(lambda: orch)
+        watcher._full_scan_due = False
+
+        watcher._pending_paths.add("corrupt.pdf")
+        watcher._do_reindex()
+
+        assert not watcher._pending_paths
+        assert watcher._timer is None
+
+    def test_file_that_failed_the_full_scan_is_taken_again(self) -> None:
+        """given the first pass of the session, a full scan, in which one file
+        failed, when the next change arrives, then that file is tried again."""
+        orch = _RecordingOrchestrator()
+        orch.failed = ["locked.md"]
+        watcher = DocumentWatcher(lambda: orch)
+
+        _run_pass(watcher, "a.md")
+        orch.failed = []
+        _run_pass(watcher, "b.md")
+
+        assert orch.calls == [("all", False), ("paths", {"locked.md", "b.md"})]
+
+    def test_more_failures_than_the_report_lists_make_the_next_pass_a_full_scan(self) -> None:
+        """given a pass with more failed files than the report can list, when
+        the next change arrives, then the pass is a full scan, which tries
+        every one of them again."""
+        orch = _RecordingOrchestrator()
+        orch.failed = ["one.md"]
+        orch.truncated = True
+        watcher = DocumentWatcher(lambda: orch)
+        watcher._full_scan_due = False
+
+        _run_pass(watcher, "one.md")
+        orch.failed, orch.truncated = [], False
+        _run_pass(watcher, "b.md")
+        _run_pass(watcher, "c.md")
+
+        assert [kind for kind, _ in orch.calls] == ["paths", "all", "paths"]
 
 
 class TestIndexPaths:
@@ -249,11 +339,13 @@ class TestIndexPaths:
         assert stats["deleted"] == 0, f"an unavailable folder is not a deletion: {stats}"
         assert len(orch._indexed_docs) == 1
         assert orch.collection.count() == 1
-        assert stats["errors"] == 1
+        # Reported as the full scan reports it, so the watcher takes the pass again.
+        assert [entry["path"] for entry in stats["failed_files"]] == [str(docs_dir)]
 
     def test_unreadable_path_is_not_treated_as_deleted(self, isolated_orchestrator, monkeypatch) -> None:
         """given an indexed file that cannot be read right now, when
-        index_paths() receives it, then its chunks are kept."""
+        index_paths() receives it, then its chunks are kept and the path is
+        reported as failed, so it is tried again."""
         docs_dir = Path(srv.config.documents_dir)
         p = self._write(docs_dir, "locked.md", "# locked\n")
         orch = isolated_orchestrator
@@ -271,6 +363,79 @@ class TestIndexPaths:
 
         assert stats["deleted"] == 0, f"unreadable is not evidence of deletion: {stats}"
         assert len(orch._indexed_docs) == 1
+        assert [Path(entry["path"]).name for entry in stats["failed_files"]] == ["locked.md"]
+
+    def test_document_that_fails_to_parse_is_reported_as_failed(self, isolated_orchestrator, monkeypatch) -> None:
+        """given a file whose parsing fails, when index_paths() handles it,
+        then the failure is reported with its path, so it is tried again."""
+        docs_dir = Path(srv.config.documents_dir)
+        p = self._write(docs_dir, "broken.md", "# broken\n")
+        orch = isolated_orchestrator
+        monkeypatch.setattr(orch.parser, "parse_file", MagicMock(side_effect=ValueError("truncated file")))
+
+        stats = orch.index_paths([str(p)])
+
+        assert [Path(entry["path"]).name for entry in stats["failed_files"]] == ["broken.md"]
+        assert not orch._indexed_docs
+
+    @pytest.mark.parametrize("pattern", ["Archive/old", "Archive/old/*", "old"])
+    def test_file_below_an_excluded_folder_is_not_indexed(self, isolated_orchestrator, monkeypatch, pattern) -> None:
+        """given a pattern that makes the scan skip a folder, however it is
+        written, when index_paths() receives a file below that folder, then
+        the file is not indexed — as the full scan would not index it."""
+        monkeypatch.setattr(srv.config, "exclude_patterns", [pattern])
+        docs_dir = Path(srv.config.documents_dir)
+        (docs_dir / "Archive" / "old" / "deep").mkdir(parents=True)
+        p = self._write(docs_dir / "Archive" / "old" / "deep", "legacy.md", "# legacy\n")
+        orch = isolated_orchestrator
+
+        stats = orch.index_paths([str(p)])
+        scanned = orch.index_all()
+
+        assert stats["indexed"] == 0 and stats["errors"] == 0, stats
+        assert scanned["indexed"] == 0, "the full scan agrees"
+        assert not orch._indexed_docs
+
+    def test_pending_repair_makes_the_pass_a_full_scan(self, isolated_orchestrator, monkeypatch) -> None:
+        """given a rollback that left a repair pending, when index_paths()
+        runs, then the pass is a full scan, the one that applies repairs."""
+        docs_dir = Path(srv.config.documents_dir)
+        a = self._write(docs_dir, "a.md", "# a\n")
+        b = self._write(docs_dir, "b.md", "# b\n")
+        orch = isolated_orchestrator
+        orch.index_all(force=True)
+        b_id = orch._source_to_docid[str(b.resolve())]
+        monkeypatch.setattr(orch, "_load_document_repairs", lambda: {str(b.resolve()): [b_id]})
+
+        stats = orch.index_paths([str(a)])
+
+        assert stats["total_files"] == 2, f"a full scan covers the corpus: {stats}"
+        assert stats["updated"] == 1, f"the source under repair is reindexed: {stats}"
+
+    def test_event_path_through_a_symlinked_documents_dir(self, isolated_orchestrator, monkeypatch, tmp_path) -> None:
+        """given documents_dir is a symlink, when index_paths() receives paths
+        as the observer reports them (below the link), then they are indexed,
+        excluded and pruned like the same files in a full scan."""
+        real = Path(srv.config.documents_dir)
+        link = tmp_path / "linked-docs"
+        try:
+            link.symlink_to(real, target_is_directory=True)
+        except OSError:
+            pytest.skip("symlinks are not available here")
+        monkeypatch.setattr(srv.config, "documents_dir", link)
+        monkeypatch.setattr(srv.config, "exclude_patterns", ["Temp/*"])
+        (real / "Temp").mkdir()
+        self._write(real, "a.md", "# a\n")
+        self._write(real / "Temp", "x.md", "# x\n")
+        orch = isolated_orchestrator
+
+        stats = orch.index_paths([str(link / "a.md"), str(link / "Temp" / "x.md")])
+
+        assert stats["indexed"] == 1, stats
+        assert orch.index_all()["skipped"] == 1, "the full scan sees the same document"
+        (real / "a.md").unlink()
+        assert orch.index_paths([str(link / "a.md")])["deleted"] == 1
+        assert not orch._indexed_docs
 
     @pytest.mark.parametrize("name", ["notes.bak", "~$report.md", ".rag-pending-x.md"])
     def test_file_the_scan_would_not_index_is_skipped(self, isolated_orchestrator, name) -> None:
@@ -311,6 +476,7 @@ class TestWatcherFolderEvents:
         monkeypatch.setattr(srv.config, "supported_formats", {".md"})
         orch = MagicMock()
         orch._source_to_docid = {str(p.resolve()): f"doc-{i}" for i, p in enumerate(indexed)}
+        orch._indexed_docs = {f"doc-{i}": {"source": str(p)} for i, p in enumerate(indexed)}
         return DocumentWatcher(orchestrator_getter=lambda: orch)
 
     def test_deleted_folder_reported_as_a_file_is_scheduled(self, tmp_path, monkeypatch) -> None:
@@ -355,9 +521,11 @@ class TestWatcherFolderEvents:
 
 
 class TestWatcherPathsE2E:
-    def test_observer_reindexes_only_the_changed_file(self, isolated_orchestrator, monkeypatch) -> None:
-        from watchdog.observers.polling import PollingObserver
+    """A polling observer against a real orchestrator."""
 
+    def test_observer_reindexes_only_the_changed_file(self, isolated_orchestrator, monkeypatch, start_watcher) -> None:
+        """given two indexed files, when one is edited, then the watcher hands
+        only that path to index_paths() and its new version is indexed."""
         monkeypatch.setattr(srv.config, "supported_formats", {".md"})
         docs_dir = Path(srv.config.documents_dir)
         a = docs_dir / "a.md"
@@ -366,42 +534,26 @@ class TestWatcherPathsE2E:
         b.write_text("# b\n", encoding="utf-8")
         orch = isolated_orchestrator
         orch.index_all(force=True)
+        dispatched: list = []
+        index_paths = orch.index_paths
+        monkeypatch.setattr(orch, "index_paths", lambda paths: (dispatched.append(set(paths)), index_paths(paths))[1])
+        start_watcher(docs_dir, full_scan_due=False)
 
-        dispatched: dict = {}
-        real_index_paths = orch.index_paths
+        a.write_text("# a changed, and longer\n", encoding="utf-8")
 
-        def spy_index_paths(paths):
-            dispatched["paths"] = set(paths)
-            return real_index_paths(paths)
+        def reindexed() -> bool:
+            # Looked up on every poll: the entry is replaced while this thread reads.
+            doc_id = orch._source_to_docid.get(str(a.resolve()))
+            return orch._indexed_docs.get(doc_id, {}).get("file_size") == a.stat().st_size
 
-        orch.index_paths = spy_index_paths  # type: ignore[method-assign]
+        assert _wait_until(reindexed), "changed file must be re-embedded with fresh metadata"
+        assert dispatched and all(batch == {str(a)} for batch in dispatched), (
+            f"watcher must dispatch only the changed path, got {dispatched}"
+        )
 
-        watcher = DocumentWatcher(lambda: orch, debounce_seconds=0.3)
-        watcher._full_scan_due = False  # the session's full scan already ran
-        observer = PollingObserver(timeout=0.2)
-        observer.schedule(watcher, str(docs_dir), recursive=True)
-        observer.start()
-        try:
-            a.write_text("# a changed, and longer\n", encoding="utf-8")
-
-            def reindexed() -> bool:
-                # Looked up on every poll: the entry is replaced while this thread reads.
-                doc_id = orch._source_to_docid.get(str(a.resolve()))
-                return orch._indexed_docs.get(doc_id, {}).get("file_size") == a.stat().st_size
-
-            assert _wait_until(reindexed), "changed file must be re-embedded with fresh metadata"
-            assert dispatched.get("paths") == {str(a.resolve())}, (
-                f"watcher must dispatch only the changed path, got {dispatched}"
-            )
-        finally:
-            observer.stop()
-            observer.join(timeout=2)
-
-    def test_observer_prunes_a_deleted_folder(self, isolated_orchestrator, monkeypatch) -> None:
+    def test_observer_prunes_a_deleted_folder(self, isolated_orchestrator, monkeypatch, start_watcher) -> None:
         """given a folder with indexed documents, when it is deleted from disk,
         then its documents leave the index and the sibling stays."""
-        from watchdog.observers.polling import PollingObserver
-
         monkeypatch.setattr(srv.config, "supported_formats", {".md"})
         docs_dir = Path(srv.config.documents_dir)
         (docs_dir / "proj" / "deep").mkdir(parents=True)
@@ -412,30 +564,45 @@ class TestWatcherPathsE2E:
         orch = isolated_orchestrator
         orch.index_all(force=True)
         assert len(orch._source_to_docid) == 3
+        start_watcher(docs_dir, full_scan_due=False)
 
-        watcher = DocumentWatcher(lambda: orch, debounce_seconds=0.3)
-        watcher._full_scan_due = False  # the session's full scan already ran
-        observer = PollingObserver(timeout=0.2)
-        observer.schedule(watcher, str(docs_dir), recursive=True)
-        observer.start()
-        try:
-            shutil.rmtree(docs_dir / "proj")
-            assert _wait_until(lambda: list(orch._source_to_docid) == [str(keep.resolve())]), (
-                f"documents of the deleted folder must be pruned, left {list(orch._source_to_docid)}"
-            )
-            assert orch.collection.count() == 1
-        finally:
-            observer.stop()
-            observer.join(timeout=2)
+        shutil.rmtree(docs_dir / "proj")
+
+        assert _wait_until(lambda: list(orch._source_to_docid) == [str(keep.resolve())]), (
+            f"documents of the deleted folder must be pruned, left {list(orch._source_to_docid)}"
+        )
+        assert orch.collection.count() == 1
+
+    def test_folder_delete_reported_as_one_event_prunes_its_documents(self, isolated_orchestrator, monkeypatch) -> None:
+        """given a folder moved out of the documents folder, which Windows
+        reports as one plain delete event for the folder and nothing for the
+        files in it, when the watcher handles that event, then the documents
+        indexed below the folder are pruned and the sibling stays."""
+        monkeypatch.setattr(srv.config, "supported_formats", {".md"})
+        docs_dir = Path(srv.config.documents_dir)
+        (docs_dir / "proj" / "deep").mkdir(parents=True)
+        (docs_dir / "proj" / "a.md").write_text("# a\n", encoding="utf-8")
+        (docs_dir / "proj" / "deep" / "b.md").write_text("# b\n", encoding="utf-8")
+        keep = docs_dir / "project-notes.md"
+        keep.write_text("# keep\n", encoding="utf-8")
+        orch = isolated_orchestrator
+        orch.index_all(force=True)
+        watcher = DocumentWatcher(lambda: orch)
+        watcher._full_scan_due = False
+        shutil.rmtree(docs_dir / "proj")
+
+        watcher.on_deleted(SimpleNamespace(is_directory=False, src_path=str(docs_dir / "proj")))
+        _run_pass(watcher)
+
+        assert list(orch._source_to_docid) == [str(keep.resolve())]
+        assert orch.collection.count() == 1
 
     def test_first_event_also_indexes_what_changed_while_the_server_was_down(
-        self, isolated_orchestrator, monkeypatch
+        self, isolated_orchestrator, monkeypatch, start_watcher
     ) -> None:
         """given a file edited while no server was watching, when the server
         is back and any other file changes, then the offline edit is indexed
         too — the first pass of a session is a full scan."""
-        from watchdog.observers.polling import PollingObserver
-
         monkeypatch.setattr(srv.config, "supported_formats", {".md"})
         docs_dir = Path(srv.config.documents_dir)
         touched = docs_dir / "touched.md"
@@ -450,16 +617,11 @@ class TestWatcherPathsE2E:
             doc_id = orch._source_to_docid.get(str(path.resolve()))
             return orch._indexed_docs.get(doc_id, {}).get("file_size")
 
-        watcher = DocumentWatcher(lambda: orch, debounce_seconds=0.3)
-        observer = PollingObserver(timeout=0.2)
-        observer.schedule(watcher, str(docs_dir), recursive=True)
-        observer.start()
-        try:
-            touched.write_text("# touched, with the server running\n", encoding="utf-8")
-            assert _wait_until(lambda: indexed_size(offline) == offline.stat().st_size), (
-                "the edit made while the server was down must be indexed by the first pass"
-            )
-            assert indexed_size(touched) == touched.stat().st_size
-        finally:
-            observer.stop()
-            observer.join(timeout=2)
+        start_watcher(docs_dir)
+
+        touched.write_text("# touched, with the server running\n", encoding="utf-8")
+
+        assert _wait_until(lambda: indexed_size(offline) == offline.stat().st_size), (
+            "the edit made while the server was down must be indexed by the first pass"
+        )
+        assert _wait_until(lambda: indexed_size(touched) == touched.stat().st_size)

@@ -4,21 +4,19 @@ Document writes used to set ``_bm25_initialized = False``, so the next
 hybrid query rebuilt BM25 from every chunk in Chroma (pages of 500)
 synchronously — 2-4 minutes on a ~610k-chunk index, timing out MCP
 clients after any change. Writes now mark the published generation
-stale. A stale generation whose last build was quick is refreshed before
-the search, as it always was; one whose build takes longer keeps serving
-searches while a background thread refreshes it. Only a build that
-published clears the stale mark, so a refresh that could not run or
-failed is retried by a later query.
+stale. A small index is refreshed before the search, as it always was;
+a large one keeps serving searches while a background thread refreshes
+it. Only a build that published clears the stale mark, so a refresh that
+could not run or failed is retried by a later query.
 """
 
 from __future__ import annotations
 
 import threading
 import time
+from unittest.mock import MagicMock
 
 from mcp_server import server as srv
-
-LARGE_INDEX_BUILD_SECONDS = 60.0
 
 
 def _wait_until(predicate, timeout: float = 10.0) -> bool:
@@ -58,8 +56,8 @@ def _keyword_hit(orch, term: str, hybrid_alpha: float = 0.5) -> bool:
     return any(r["bm25_rank"] is not None for r in orch.query(term, max_results=3, hybrid_alpha=hybrid_alpha))
 
 
-class TestQuickIndexRefreshesBeforeTheSearch:
-    """An index whose last build was quick behaves as it did before GH #299."""
+class TestSmallIndexRefreshesBeforeTheSearch:
+    """An index within the inline limit behaves as it did before GH #299."""
 
     def test_keyword_search_right_after_a_write_finds_the_new_document(
         self, isolated_orchestrator, monkeypatch
@@ -81,6 +79,18 @@ class TestQuickIndexRefreshesBeforeTheSearch:
         orch = isolated_orchestrator
         _warm_index(orch, monkeypatch)
         _write_new_document(orch)
+
+        assert _keyword_hit(orch, "uniquetoken")
+
+    def test_index_exactly_at_the_limit_is_still_refreshed_before_the_search(
+        self, isolated_orchestrator, monkeypatch
+    ) -> None:
+        """given an index holding exactly as many chunks as the inline limit,
+        when a search follows a write, then it finds the new document."""
+        orch = isolated_orchestrator
+        _warm_index(orch, monkeypatch)
+        _write_new_document(orch)
+        monkeypatch.setattr(orch, "_BM25_INLINE_REFRESH_CHUNKS", orch.collection.count())
 
         assert _keyword_hit(orch, "uniquetoken")
 
@@ -130,6 +140,24 @@ class TestQuickIndexRefreshesBeforeTheSearch:
         monkeypatch.setattr(orch.bm25_index, "build_index", build)
         assert _keyword_hit(orch, "quarks")
 
+    def test_write_that_fails_and_cannot_be_rolled_back_marks_the_generation_stale(
+        self, isolated_orchestrator, monkeypatch
+    ) -> None:
+        """given a write that fails after changing the collection, when
+        restoring the previous chunks fails as well, then the generation is
+        marked stale — the collection no longer matches it."""
+        orch = isolated_orchestrator
+        _warm_index(orch, monkeypatch)
+        edited = srv.config.documents_dir / "a1.md"
+        edited.write_text("initial corpus content, rewritten and longer", encoding="utf-8")
+        monkeypatch.setattr(orch, "_index_document", MagicMock(side_effect=RuntimeError("embedding failure")))
+        monkeypatch.setattr(orch, "_restore_document_chunks", MagicMock(side_effect=OSError("disk full")))
+
+        stats = orch.index_paths([str(edited)])
+
+        assert stats["errors"] == 1, stats
+        assert orch._bm25_stale.is_set()
+
     def test_first_hybrid_query_is_cached(self, isolated_orchestrator, monkeypatch) -> None:
         """given a cold index, when the same hybrid query runs twice, then the
         second one is served from the query cache."""
@@ -174,27 +202,36 @@ class TestQuickIndexRefreshesBeforeTheSearch:
 
 
 class TestLargeIndexRefreshesInTheBackground:
-    """An index whose last build took longer than the inline budget."""
+    """An index holding more chunks than the inline limit."""
 
     def _large_stale_index(self, orch, monkeypatch) -> None:
         _warm_index(orch, monkeypatch)
-        orch._bm25_build_seconds = LARGE_INDEX_BUILD_SECONDS
         _write_new_document(orch)
+        monkeypatch.setattr(orch, "_BM25_INLINE_REFRESH_CHUNKS", orch.collection.count() - 1)
 
     def test_search_does_not_wait_for_the_refresh(self, isolated_orchestrator, monkeypatch) -> None:
-        """given a stale large index and a slow refresh, when a hybrid search
-        runs, then it returns at once, serving the published generation."""
+        """given a stale large index and a refresh that has not finished, when
+        a hybrid search runs, then it returns, serving the published generation."""
         orch = isolated_orchestrator
         self._large_stale_index(orch, monkeypatch)
         release = threading.Event()
-        monkeypatch.setattr(orch, "_rebuild_bm25_from_collection", lambda **kwargs: release.wait(10))
+        monkeypatch.setattr(orch, "_rebuild_bm25_from_collection", lambda **kwargs: release.wait(30))
+        answered = threading.Event()
+        hits: list = []
 
-        started = time.monotonic()
-        assert _keyword_hit(orch, "initial")
-        elapsed = time.monotonic() - started
-        release.set()
+        def search():
+            hits.append(_keyword_hit(orch, "initial"))
+            answered.set()
 
-        assert elapsed < 5, f"the search must not wait for the refresh, took {elapsed:.2f}s"
+        thread = threading.Thread(target=search)
+        thread.start()
+        try:
+            assert answered.wait(10), "the search must not wait for the refresh"
+            assert hits == [True], "the published generation is served"
+            assert not _refresh_idle(orch), "the refresh is still running"
+        finally:
+            release.set()
+            thread.join(5)
         assert _wait_until(lambda: _refresh_idle(orch))
 
     def test_concurrent_searches_start_a_single_refresh(self, isolated_orchestrator, monkeypatch) -> None:
@@ -218,17 +255,41 @@ class TestLargeIndexRefreshesInTheBackground:
         assert _wait_until(lambda: _refresh_idle(orch))
         assert len(calls) == 1, f"expected exactly one refresh, got {len(calls)}"
 
-    def test_refresh_publishes_the_new_generation_and_drops_cached_results(
-        self, isolated_orchestrator, monkeypatch
-    ) -> None:
+    def test_refresh_publishes_the_new_generation(self, isolated_orchestrator, monkeypatch) -> None:
         """given a stale large index, when a search starts the refresh, then
-        the same search, once the refresh published, has the keyword match —
-        its cached result from the replaced generation is dropped."""
+        once it published a search has the new document's keyword match."""
         orch = isolated_orchestrator
         self._large_stale_index(orch, monkeypatch)
 
-        assert _wait_until(lambda: _keyword_hit(orch, "uniquetoken"))
-        assert not orch._bm25_stale.is_set()
+        orch.query("quarks", max_results=3)
+
+        assert _wait_until(lambda: not orch._bm25_stale.is_set())
+        assert _keyword_hit(orch, "uniquetoken")
+
+    def test_published_refresh_drops_results_cached_from_the_replaced_generation(
+        self, isolated_orchestrator, monkeypatch
+    ) -> None:
+        """given a search cached while the refresh was still running, when the
+        refresh publishes, then the same search is computed again and has the
+        keyword match it lacked."""
+        orch = isolated_orchestrator
+        self._large_stale_index(orch, monkeypatch)
+        rebuild = orch._rebuild_bm25_from_collection
+        gate = threading.Event()
+
+        def gated_rebuild(**kwargs):
+            gate.wait(30)
+            return rebuild(**kwargs)
+
+        monkeypatch.setattr(orch, "_rebuild_bm25_from_collection", gated_rebuild)
+
+        assert not _keyword_hit(orch, "uniquetoken"), "served from the generation without the new document"
+        assert not _keyword_hit(orch, "uniquetoken"), "and cached"
+        assert orch.query_cache.stats()["hits"] == 1
+        gate.set()
+
+        assert _wait_until(lambda: _refresh_idle(orch) and not orch._bm25_stale.is_set())
+        assert _keyword_hit(orch, "uniquetoken"), "the cached result must not outlive the generation it came from"
 
     def test_refresh_behind_a_writer_stays_due(self, isolated_orchestrator, monkeypatch) -> None:
         """given a writer holding the index lock, when the background refresh
@@ -254,4 +315,28 @@ class TestLargeIndexRefreshesInTheBackground:
             release.set()
             thread.join(5)
 
+        assert _wait_until(lambda: _keyword_hit(orch, "quarks"))
+
+    def test_refresh_that_could_not_start_can_start_later(self, isolated_orchestrator, monkeypatch) -> None:
+        """given the background thread cannot be started, when a later search
+        runs, then a refresh can still start — the guard was not left taken."""
+        orch = isolated_orchestrator
+        self._large_stale_index(orch, monkeypatch)
+        start = threading.Thread.start
+        refused: list = []
+
+        def start_unless_refresh(thread):
+            if thread.name == "bm25-refresh":
+                refused.append(thread)
+                raise RuntimeError("can't start new thread")
+            start(thread)
+
+        monkeypatch.setattr(threading.Thread, "start", start_unless_refresh)
+
+        orch.query("one", max_results=3)
+
+        monkeypatch.setattr(threading.Thread, "start", start)
+        assert len(refused) == 1
+        assert _refresh_idle(orch)
+        assert orch._bm25_stale.is_set()
         assert _wait_until(lambda: _keyword_hit(orch, "quarks"))
