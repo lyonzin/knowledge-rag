@@ -3839,8 +3839,15 @@ class KnowledgeOrchestrator:
                         "distance": data["distance"],
                     }
                 )
-            reranked = self.reranker.rerank(query_text, rerank_input, top_k=max_results)
+            reranked = self.reranker.rerank(query_text, rerank_input, top_k=len(rerank_input))
             sorted_results = [(d["chunk_id"], d) for d in reranked]
+
+        # MMR: Maximal Marginal Relevance — diversify results to reduce redundancy.
+        # Runs BEFORE score normalization so normalized scores span the final
+        # result set, not the pre-MMR pool. Requires the full reranked pool,
+        # hence top_k=len(rerank_input) above (GH #294).
+        if len(sorted_results) > max_results:
+            sorted_results = self._apply_mmr(sorted_results, max_results, lambda_param=0.7)
 
         # Normalize scores and format
         if sorted_results:
@@ -3850,10 +3857,6 @@ class KnowledgeOrchestrator:
             score_range = max_score - min_score
         else:
             score_range = 0
-
-        # MMR: Maximal Marginal Relevance — diversify results to reduce redundancy
-        if len(sorted_results) > max_results:
-            sorted_results = self._apply_mmr(sorted_results, max_results, lambda_param=0.7)
 
         formatted = []
         for chunk_id, data in sorted_results[:max_results]:
@@ -4042,13 +4045,21 @@ class KnowledgeOrchestrator:
         selected = [results[0]]  # First result always selected (highest score)
         remaining = list(results[1:])
 
+        # Min-max normalize relevance over the candidate pool so cross-encoder
+        # scores (~[-10, 10]) and Jaccard similarity ([0, 1]) share a scale;
+        # otherwise lambda*relevance dominates and duplicates survive (GH #294).
+        raw_scores = [data.get("reranker_score", data.get("rrf_score", 0)) for _, data in results]
+        score_lo = min(raw_scores)
+        score_span = max(raw_scores) - score_lo
+
         while len(selected) < top_k and remaining:
             best_idx = 0
-            best_mmr = -1.0
+            best_mmr = float("-inf")
 
             for i, (chunk_id, data) in enumerate(remaining):
                 # Relevance score (normalized)
                 relevance = data.get("reranker_score", data.get("rrf_score", 0))
+                relevance = (relevance - score_lo) / score_span if score_span > 0 else 1.0
 
                 # Max similarity to any already-selected doc
                 doc_text = data.get("document", "")
