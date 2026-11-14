@@ -1984,24 +1984,30 @@ class KnowledgeOrchestrator:
             if index_lock is not None:
                 index_lock.release()
 
-    def _ensure_bm25_index_or_refresh(self) -> None:
+    def _ensure_bm25_index_or_refresh(self, keyword_only: bool = False) -> None:
         """Query-path guard: build a cold index, refresh a stale one (GH #299).
 
-        A stale generation of a small index is refreshed before the search,
-        so the search sees every completed write — what each release did. On
-        a large index the search keeps the published generation and one
-        background thread refreshes it.
+        A small index is built or refreshed before the search, so the search
+        sees every completed write — what each release did. On a large index
+        the search does not wait: one background thread builds or refreshes
+        BM25 while searches read the published generation, or the semantic
+        channel alone right after a start. A keyword-only search has no other
+        channel, so it still waits for the first build.
         """
         # Bare test doubles stub _ensure_bm25_index and carry neither attribute.
         stale = getattr(self, "_bm25_stale", None)
-        if not getattr(self, "_bm25_initialized", False) or stale is None or not stale.is_set():
+        cold = not getattr(self, "_bm25_initialized", False)
+        if stale is None or not (cold or stale.is_set()):
             self._ensure_bm25_index()
             return
         try:
             large = self.collection.count() > self._BM25_INLINE_REFRESH_CHUNKS
-        except Exception:
-            return  # the search that follows reports a collection it cannot read
-        if not large:
+        except Exception as exc:
+            print(f"[WARN] BM25 left as it is, the collection could not be counted: {exc}", file=sys.stderr)
+            return
+        if cold and (keyword_only or not large):
+            self._ensure_bm25_index()
+        elif not large:
             self._ensure_bm25_index(refresh=True)
         elif self._bm25_refresh_lock.acquire(blocking=False):
             try:
@@ -2010,11 +2016,11 @@ class KnowledgeOrchestrator:
                 self._bm25_refresh_lock.release()
 
     def _refresh_bm25_in_background(self) -> None:
-        """Refresh a large index while searches keep the published generation."""
+        """Build or refresh the BM25 of a large index while searches go on."""
         try:
             self._ensure_bm25_index(refresh=True)
-            if not self._bm25_stale.is_set():
-                # Searches cached results from the generation just replaced.
+            if self._bm25_initialized and not self._bm25_stale.is_set():
+                # Searches cached results from before this generation.
                 self._invalidate_caches()
         finally:
             self._bm25_refresh_lock.release()
@@ -4015,7 +4021,7 @@ class KnowledgeOrchestrator:
             raise Fts5NotReadyError("FTS5 fast-path is disabled in config; set search.lexical_fast_path.enabled=true")
 
         if hybrid_alpha < 1.0:
-            self._ensure_bm25_index_or_refresh()
+            self._ensure_bm25_index_or_refresh(keyword_only=hybrid_alpha <= 0)
 
         # Keyword routing — informational only.
         # `routed_category` is surfaced via the `routed_by` field for telemetry,

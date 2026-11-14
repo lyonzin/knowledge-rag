@@ -6,8 +6,9 @@ synchronously — 2-4 minutes on a ~610k-chunk index, timing out MCP
 clients after any change. Writes now mark the published generation
 stale. A small index is refreshed before the search, as it always was;
 a large one keeps serving searches while a background thread refreshes
-it. Only a build that published clears the stale mark, so a refresh that
-could not run or failed is retried by a later query.
+it — or builds it, right after a start. Only a build that published
+clears the stale mark, so a refresh that could not run or failed is
+retried by a later query.
 """
 
 from __future__ import annotations
@@ -35,12 +36,18 @@ def _refresh_idle(orch) -> bool:
     return True
 
 
-def _warm_index(orch, monkeypatch) -> None:
-    """Three documents and a first hybrid query: a published BM25 generation."""
+def _cold_index(orch, monkeypatch) -> None:
+    """Three documents and no BM25 generation yet, as right after a start."""
     monkeypatch.setattr(srv.config, "reranker_enabled", False)
     orch.add_document_from_content(content="initial corpus content", filepath="a1.md", category="t")
     orch.add_document_from_content(content="other filler text here", filepath="a2.md", category="t")
     orch.add_document_from_content(content="third unrelated passage", filepath="a3.md", category="t")
+    assert not orch._bm25_initialized
+
+
+def _warm_index(orch, monkeypatch) -> None:
+    """Three documents and a first hybrid query: a published BM25 generation."""
+    _cold_index(orch, monkeypatch)
     orch.query("initial", max_results=3)
     assert orch._bm25_initialized
     assert not orch._bm25_stale.is_set()
@@ -340,3 +347,93 @@ class TestLargeIndexRefreshesInTheBackground:
         assert _refresh_idle(orch)
         assert orch._bm25_stale.is_set()
         assert _wait_until(lambda: _keyword_hit(orch, "quarks"))
+
+
+class TestLargeIndexRightAfterAStart:
+    """A large index with no BM25 generation yet: the first search after a start."""
+
+    def _large_cold_index(self, orch, monkeypatch) -> None:
+        _cold_index(orch, monkeypatch)
+        monkeypatch.setattr(orch, "_BM25_INLINE_REFRESH_CHUNKS", orch.collection.count() - 1)
+
+    def test_first_hybrid_search_does_not_wait_for_the_build(self, isolated_orchestrator, monkeypatch) -> None:
+        """given a large index right after a start, when a hybrid search runs,
+        then it answers from the semantic channel while BM25 is built in the
+        background, and once that is published the same search has its
+        keyword match."""
+        orch = isolated_orchestrator
+        self._large_cold_index(orch, monkeypatch)
+        rebuild = orch._rebuild_bm25_from_collection
+        gate = threading.Event()
+
+        def gated_rebuild(**kwargs):
+            gate.wait(30)
+            return rebuild(**kwargs)
+
+        monkeypatch.setattr(orch, "_rebuild_bm25_from_collection", gated_rebuild)
+        answered = threading.Event()
+        found: list = []
+
+        def search():
+            found.extend(orch.query("initial", max_results=3))
+            answered.set()
+
+        thread = threading.Thread(target=search)
+        thread.start()
+        try:
+            assert answered.wait(10), "the search must not wait for the build"
+            assert found, "the semantic channel answers"
+            assert all(row["bm25_rank"] is None for row in found)
+            assert not orch._bm25_initialized
+        finally:
+            gate.set()
+            thread.join(5)
+
+        assert _wait_until(lambda: orch._bm25_initialized and _refresh_idle(orch))
+        assert _keyword_hit(orch, "initial"), "the result cached without keyword matches must not outlive the build"
+
+    def test_first_keyword_only_search_builds_before_answering(self, isolated_orchestrator, monkeypatch) -> None:
+        """given a large index right after a start, when a keyword-only search
+        runs, then it waits for BM25 — there is no other channel to answer from."""
+        orch = isolated_orchestrator
+        self._large_cold_index(orch, monkeypatch)
+
+        results = orch.query("initial", max_results=3, hybrid_alpha=0.0)
+
+        assert [row["filename"] for row in results] == ["a1.md"]
+        assert orch._bm25_initialized
+
+    def test_small_index_right_after_a_start_builds_before_answering(self, isolated_orchestrator, monkeypatch) -> None:
+        """given an index within the inline limit right after a start, when a
+        hybrid search runs, then BM25 is built first, as before."""
+        orch = isolated_orchestrator
+        _cold_index(orch, monkeypatch)
+
+        assert _keyword_hit(orch, "initial")
+
+    def test_build_behind_a_writer_stays_due(self, isolated_orchestrator, monkeypatch) -> None:
+        """given a writer holding the index lock on a large index right after a
+        start, when hybrid searches run, then they are answered and cached, and
+        another search after the writer is done starts the build."""
+        orch = isolated_orchestrator
+        self._large_cold_index(orch, monkeypatch)
+        held, release = threading.Event(), threading.Event()
+
+        def writer():
+            with orch._index_lock:
+                held.set()
+                release.wait(10)
+
+        thread = threading.Thread(target=writer)
+        thread.start()
+        try:
+            assert held.wait(5)
+            assert not _keyword_hit(orch, "initial"), "answered from the semantic channel"
+            assert _wait_until(lambda: _refresh_idle(orch))
+            assert not _keyword_hit(orch, "initial")
+            assert orch.query_cache.stats()["hits"] == 1, "a build that did not run must not drop the cache"
+        finally:
+            release.set()
+            thread.join(5)
+
+        assert _wait_until(lambda: _keyword_hit(orch, "corpus"))
