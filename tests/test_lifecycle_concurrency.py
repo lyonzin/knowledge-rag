@@ -131,11 +131,11 @@ def test_watcher_rearms_events_during_active_callback(monkeypatch, busy):
     monkeypatch.setattr(server.threading, "Timer", Mock(return_value=timer))
     watcher._pending_paths.add("before.txt")
 
-    def index(*args, **kwargs):
+    def index(**kwargs):
         watcher._pending_paths.add("during.txt")
         return {"skipped_reason": "reindex_already_running"} if busy else {}
 
-    orchestrator.index_paths.side_effect = index
+    orchestrator.index_all.side_effect = index
     watcher._do_reindex()
     assert "during.txt" in watcher._pending_paths
     assert ("before.txt" in watcher._pending_paths) is busy

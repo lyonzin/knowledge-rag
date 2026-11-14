@@ -19,7 +19,6 @@ hits with ``bm25_rank: null``.
 import threading
 from unittest.mock import MagicMock
 
-from mcp_server import server
 from mcp_server.server import BM25Index, KnowledgeOrchestrator
 
 
@@ -135,7 +134,7 @@ class TestEmptyBootupDoesNotTrapGuardFlag:
         def _raise(*args, **kwargs):
             raise RuntimeError("simulated OOM during BM25 build")
 
-        monkeypatch.setattr(server.BM25Index, "build_index", _raise)
+        monkeypatch.setattr(o.bm25_index, "build_index", _raise)
 
         o._ensure_bm25_index()
 

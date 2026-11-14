@@ -372,10 +372,8 @@ class DocumentParser:
         rel_str = str(rel).replace("\\", "/")
 
         for pattern in patterns:
-            # Full relative path match (e.g., "docs/drafts/*.tmp"). The
-            # trailing-slash probe makes "folder/*" prune the folder itself
-            # during the walk, not just the files inside it (GH #296).
-            if fnmatch.fnmatch(rel_str, pattern) or fnmatch.fnmatch(rel_str + "/", pattern):
+            # Full relative path match (e.g., "docs/drafts/*.tmp")
+            if fnmatch.fnmatch(rel_str, pattern):
                 return True
             # Check each component (e.g., "node_modules" matches any/node_modules/deep)
             for part in rel.parts:
@@ -383,6 +381,98 @@ class DocumentParser:
                     return True
 
         return False
+
+    @staticmethod
+    def _excludes_directory(path: Path, base_dir: Path, patterns: List[str]) -> bool:
+        """Check if a directory and everything below it is excluded.
+
+        A "folder/*" pattern never matches the folder's own relative path, so
+        the walk used to enter the folder and drop its files one by one
+        (GH #296). The pattern is tested here without its trailing "/*":
+        a directory matching that stem has its whole content excluded.
+        Directories only — applied to a file, "_*/*" would also exclude a
+        root file named "_index.md".
+        """
+        if DocumentParser._should_exclude(path, base_dir, patterns):
+            return True
+
+        try:
+            rel = path.relative_to(base_dir)
+        except ValueError:
+            rel = path
+
+        rel_str = str(rel).replace("\\", "/")
+
+        for pattern in patterns:
+            stem = pattern.rstrip("*")
+            if stem != pattern and stem.endswith("/") and fnmatch.fnmatch(rel_str, stem[:-1]):
+                return True
+
+        return False
+
+    @staticmethod
+    def _is_excluded_from_scan(path: Path, base_dir: Path, patterns: List[str]) -> bool:
+        """Check if the scan leaves a file out: it is excluded, or a folder above it is.
+
+        The walk never enters an excluded folder, so a file below one is left
+        out even when no pattern matches the file's own path — a pattern that
+        names the folder, like "Archive/old", matches no file path.
+        """
+        if DocumentParser._should_exclude(path, base_dir, patterns):
+            return True
+
+        try:
+            rel = path.relative_to(base_dir)
+        except ValueError:
+            return False
+
+        return any(
+            DocumentParser._excludes_directory(base_dir.joinpath(*rel.parts[:depth]), base_dir, patterns)
+            for depth in range(1, len(rel.parts))
+        )
+
+    @staticmethod
+    def _yields_file(filepath: Path, directory: Path, supported: set, exclude: List[str]) -> bool:
+        """The filter the scan applies to each file of a folder it walks."""
+        fname = filepath.name
+        if fname.startswith((".rag-pending-", "~$")):  # staging file or Office owner file
+            return False
+        # supported_formats holds suffixes (".go") and exact filenames ("Dockerfile")
+        if filepath.suffix.lower() not in supported and fname not in supported:
+            return False
+        if exclude and DocumentParser._should_exclude(filepath, directory, exclude):
+            return False
+        return is_path_within(directory, filepath)
+
+    @staticmethod
+    def _as_scanned(path: Path) -> Optional[Path]:
+        """Return a path as iter_files() yields it, or None when it is not below documents_dir.
+
+        The scan walks the resolved documents folder, so its paths start
+        there. An observer reports paths below the folder as it is configured,
+        which differs when the configured folder is a link.
+        """
+        configured = Path(config.documents_dir).expanduser()
+        directory = resolve_path(configured)
+        for root in (configured, directory):
+            try:
+                return directory / Path(path).relative_to(root)
+            except ValueError:
+                continue
+        return None
+
+    @staticmethod
+    def _scan_yields(filepath: Path) -> bool:
+        """Check if a full scan would yield this file, given the path as the scan sees it."""
+        directory = resolve_path(Path(config.documents_dir).expanduser())
+        exclude = config.exclude_patterns
+        if not DocumentParser._yields_file(filepath, directory, set(config.supported_formats), exclude):
+            return False
+        rel = filepath.relative_to(directory)
+        return not any(
+            DocumentParser._excludes_directory(directory.joinpath(*rel.parts[:depth]), directory, exclude)
+            for depth in range(1, len(rel.parts))
+        )
 
     def iter_files(self, directory: Path = None):
         """Yield supported paths without loading content; follow contained links only."""
@@ -404,19 +494,12 @@ class DocumentParser:
                 d
                 for d in dirs
                 if is_path_within(directory, Path(root) / d)
-                and not self._should_exclude(Path(root) / d, directory, exclude)
+                and not self._excludes_directory(Path(root) / d, directory, exclude)
             ]
 
             for fname in files:
-                if fname.startswith((".rag-pending-", "~$")):  # staging file or Office owner file
-                    continue
                 filepath = Path(root) / fname
-                # supported_formats holds suffixes (".go") and exact filenames ("Dockerfile")
-                if filepath.suffix.lower() not in supported and fname not in supported:
-                    continue
-                if exclude and self._should_exclude(filepath, directory, exclude):
-                    continue
-                if not is_path_within(directory, filepath):
+                if not self._yields_file(filepath, directory, supported, exclude):
                     continue
                 resolved = str(resolve_path(filepath))
                 if resolved not in seen_files:

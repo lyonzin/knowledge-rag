@@ -6,7 +6,6 @@ from unittest.mock import Mock
 
 import pytest
 
-from mcp_server import server
 from mcp_server.server import BM25Index, KnowledgeOrchestrator, config
 
 
@@ -129,15 +128,13 @@ def test_given_published_bm25_when_smart_reindex_rebuilds_then_queries_keep_it_u
     assert published
     (config.documents_dir / "d.txt").write_text("delta summary", encoding="utf-8")
     seen_during_rebuild = []
-    build = server.BM25Index.build_index
+    build = orchestrator.bm25_index.build_index
 
-    def observed_build(idx):
+    def observed_build():
         seen_during_rebuild.append(orchestrator.bm25_index.search("alpha"))
-        build(idx)
+        build()
 
-    # GH #299: the rebuild builds into a fresh BM25Index and swaps it in, so
-    # the observation must patch the class.
-    monkeypatch.setattr(server.BM25Index, "build_index", observed_build)
+    monkeypatch.setattr(orchestrator.bm25_index, "build_index", observed_build)
     orchestrator.reindex_all()
     assert seen_during_rebuild == [published]
     assert orchestrator.bm25_index.search("delta")

@@ -67,8 +67,8 @@ def isolated_orchestrator(tmp_path, monkeypatch):
     orch._index_lock = threading.RLock()
     orch._publication_lock = server.PublicationLock()
     orch._bm25_build_lock = threading.Lock()
-    orch._bm25_build_running = threading.Event()
     orch._bm25_stale = threading.Event()
+    orch._bm25_refresh_lock = threading.Lock()
     orch._staging_target = None
     orch.embed_fn = Embeddings()
     orch.chroma_client = chromadb.EphemeralClient()
@@ -92,6 +92,42 @@ def isolated_orchestrator(tmp_path, monkeypatch):
     for collection in orch.chroma_client.list_collections():
         if collection.name.startswith(server.config.collection_name):
             orch.chroma_client.delete_collection(collection.name)
+
+
+@pytest.fixture
+def start_watcher(isolated_orchestrator):
+    """Watch a folder with a polling observer; nothing of it outlives the test.
+
+    Depends on ``isolated_orchestrator`` so it is torn down first: a pass that
+    is still running when the test body ends finishes against the test's own
+    collection and paths, not against whatever the fixtures restore afterwards.
+    """
+    from watchdog.observers.polling import PollingObserver
+
+    from mcp_server import server
+
+    started = []
+
+    def start(directory, *, full_scan_due: bool = True):
+        watcher = server.DocumentWatcher(lambda: isolated_orchestrator, debounce_seconds=0.3)
+        watcher._full_scan_due = full_scan_due
+        observer = PollingObserver(timeout=0.2)
+        observer.schedule(watcher, str(directory), recursive=True)
+        observer.start()
+        started.append((observer, watcher))
+        return watcher
+
+    yield start
+    for observer, watcher in started:
+        observer.stop()
+        observer.join(timeout=5)
+        for _ in range(2):  # a pass that fails re-arms the timer once more
+            with watcher._lock:
+                if watcher._timer is not None:
+                    watcher._timer.cancel()
+                watcher._pending_paths.clear()
+            with watcher._reindex_lock:  # wait for a pass in flight
+                pass
 
 
 # Add project root to path

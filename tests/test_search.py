@@ -1,5 +1,7 @@
 """Tests for search pipeline components (no model/DB required)."""
 
+import pytest
+
 from mcp_server.config import _merge_query_expansion_sources
 from mcp_server.server import BM25Index, KnowledgeOrchestrator, QueryCache
 
@@ -1103,7 +1105,7 @@ class TestRerankToggle:
 class TestMmrWithReranker:
     """GH #294 — MMR must run (and de-duplicate) when the reranker is enabled."""
 
-    def _make_orch(self, monkeypatch, pool_size=9):
+    def _make_orch(self, monkeypatch, pool_size=9, scores=None, second_text="alpha beta gamma delta"):
         import mcp_server.server as srv
 
         orch = _build_dispatch_orch(monkeypatch)
@@ -1111,11 +1113,11 @@ class TestMmrWithReranker:
         monkeypatch.setattr(srv.config, "reranker_top_k_multiplier", 3)
         monkeypatch.setattr(srv.config, "default_results", 3)
 
-        # chunk_0 and chunk_1 hold identical text — the duplicate pair the
-        # reranker ranks 1st and 2nd, which the MMR step must break apart.
-        # The remaining chunks are token-orthogonal so Jaccard similarity
+        # chunk_0 and chunk_1 hold identical text by default — the duplicate
+        # pair the reranker ranks 1st and 2nd, which the MMR step must break
+        # apart. The remaining chunks are token-orthogonal so Jaccard similarity
         # between them is 0 and only the duplicate pays a diversity penalty.
-        texts = ["alpha beta gamma delta"] * 2 + [
+        texts = ["alpha beta gamma delta", second_text] + [
             "security incident response playbook",
             "database migration postgres backup",
             "frontend react component testing",
@@ -1153,7 +1155,8 @@ class TestMmrWithReranker:
 
             def rerank(self, query, documents, top_k):
                 for i, doc in enumerate(documents):
-                    doc["reranker_score"] = float(pool_size - i)
+                    chunk = int(doc["chunk_id"].rsplit("_", 1)[1])
+                    doc["reranker_score"] = float(scores[chunk] if scores else pool_size - i)
                 documents.sort(key=lambda d: d["reranker_score"], reverse=True)
                 return documents[:top_k]
 
@@ -1174,6 +1177,20 @@ class TestMmrWithReranker:
         sources = [r["source"] for r in results]
         dup_count = sum(1 for s in sources if s in ("/0", "/1"))
         assert dup_count == 1, f"duplicates must be deduped by MMR, got sources {sources}"
+
+    def test_results_stay_ordered_by_score_after_mmr(self, monkeypatch):
+        """given MMR picks a distinct chunk before a higher-scored near-duplicate,
+        when the results are returned, then they are still ordered by score —
+        MMR decides which results are returned, not their order."""
+        orch = self._make_orch(
+            monkeypatch, scores=[9, 8, 6, 4, 3, 2, 1, 0.5, 0], second_text="alpha beta gamma delta epsilon"
+        )
+
+        results = orch.query("alpha beta gamma")
+
+        assert [r["source"] for r in results] == ["/0", "/1", "/2"]
+        scores = [r["score"] for r in results]
+        assert scores == sorted(scores, reverse=True), f"scores must not increase down the list: {scores}"
 
     def test_e2e_query_dedupes_duplicate_docs(self, isolated_orchestrator, monkeypatch):
         """given two identical documents and four distinct ones indexed for real,
@@ -1219,3 +1236,66 @@ class TestMmrWithReranker:
         dup_count = sum(1 for s in sources if "dup_" in s)
         assert dup_count == 1, f"only one duplicate may survive, got {sources}"
         assert results[0]["score"] == 1.0, "normalization must span the final MMR set"
+
+
+class TestApplyMmrEdgeCases:
+    """Inputs on which the MMR arithmetic has nothing to compare."""
+
+    @staticmethod
+    def _rows(texts, scores, key="reranker_score"):
+        return [(f"chunk_{i}", {"document": text, key: score}) for i, (text, score) in enumerate(zip(texts, scores))]
+
+    @staticmethod
+    def _apply(rows, top_k):
+        return [chunk_id for chunk_id, _ in object.__new__(KnowledgeOrchestrator)._apply_mmr(rows, top_k)]
+
+    def test_equal_scores_keep_the_incoming_order(self):
+        """given candidates that all have the same score and share no words,
+        when MMR selects, then the first ones are returned in their order."""
+        rows = self._rows(["alpha", "beta", "gamma", "delta", "epsilon"], [2.5] * 5)
+
+        assert self._apply(rows, 3) == ["chunk_0", "chunk_1", "chunk_2"]
+
+    def test_equal_scores_still_drop_a_duplicate(self):
+        """given candidates with the same score, two of them identical, when
+        MMR selects, then the duplicate gives its place to a distinct one."""
+        rows = self._rows(["alpha beta", "alpha beta", "gamma", "delta"], [1.0] * 4)
+
+        assert self._apply(rows, 3) == ["chunk_0", "chunk_2", "chunk_3"]
+
+    def test_copy_of_a_selected_result_loses_to_a_much_weaker_distinct_candidate(self):
+        """given a copy of the top result and distinct candidates the reranker
+        scored far lower, when MMR selects, then the copy is left out: the
+        same text twice tells the reader nothing new (GH #294)."""
+        rows = self._rows(["alpha beta", "alpha beta", "gamma", "delta", "epsilon"], [10.0, 10.0, 1.0, 0.5, 0.0])
+
+        assert self._apply(rows, 3) == ["chunk_0", "chunk_2", "chunk_3"]
+
+    def test_copies_fill_the_list_when_no_distinct_candidate_is_left(self):
+        """given more candidates than results asked for, all with the same
+        text, when MMR selects, then the list is still filled."""
+        rows = self._rows(["alpha beta"] * 4, [4.0, 3.0, 2.0, 1.0])
+
+        assert self._apply(rows, 3) == ["chunk_0", "chunk_1", "chunk_2"]
+
+    @pytest.mark.parametrize("blank", ["", "   \n\t"])
+    def test_empty_documents_are_candidates_like_any_other(self, blank):
+        """given candidates without text, when MMR selects, then nothing
+        fails and they are chosen by score alone."""
+        rows = self._rows([blank, blank, "gamma", blank], [4.0, 3.0, 2.0, 1.0])
+
+        assert self._apply(rows, 3) == ["chunk_0", "chunk_1", "chunk_2"]
+
+    def test_pool_that_fits_is_returned_unchanged(self):
+        """given no more candidates than results asked for, when MMR runs,
+        then it returns them as they came, duplicates included."""
+        rows = self._rows(["alpha", "alpha", "alpha"], [3.0, 2.0, 1.0])
+
+        assert self._apply(rows, 3) == ["chunk_0", "chunk_1", "chunk_2"]
+
+    def test_fused_score_is_used_when_the_reranker_gave_none(self):
+        """given candidates that carry only the fused score (the reranker
+        failed and fell back), when MMR selects, then it works on that score."""
+        rows = self._rows(["alpha beta", "alpha beta", "gamma", "delta"], [0.04, 0.039, 0.038, 0.01], key="rrf_score")
+
+        assert self._apply(rows, 2) == ["chunk_0", "chunk_2"]

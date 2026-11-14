@@ -66,7 +66,7 @@ from watchdog.observers import Observer
 from . import __version__
 from .config import config
 from .file_transaction import replace_with_retry, staged_text_file
-from .filesystem import io_path
+from .filesystem import io_path, resolve_path
 from .fts5_index import Fts5LexicalIndex, Fts5MigrationError, Fts5NotReadyError
 from .ingestion import Document, DocumentParser
 from .metrics import (
@@ -1496,6 +1496,10 @@ class DocumentWatcher(FileSystemEventHandler):
     bulk file copies (1000+ files) from starving the reindex trigger.
     """
 
+    # An observer can drop events when its buffer overflows (a bulk copy), so
+    # a batch this large is reindexed by a full scan, which needs none of them.
+    _FULL_SCAN_BATCH = 500
+
     def __init__(self, orchestrator_getter, debounce_seconds: float = 10.0):
         self._get_orchestrator = orchestrator_getter
         self._debounce = debounce_seconds
@@ -1503,6 +1507,28 @@ class DocumentWatcher(FileSystemEventHandler):
         self._pending_paths: set = set()
         self._timer = None
         self._reindex_lock = threading.Lock()
+        # The first pass of a session is a full scan: it also picks up what
+        # changed while the server was not running. Later passes reindex only
+        # the paths that changed (GH #297).
+        self._full_scan_due = True
+        # Paths the last pass reported as failed. Every pass was a full scan
+        # once, so a locked or half-written file was tried again at the next
+        # change; a path-level pass carries it over to do the same.
+        self._retry_paths: set = set()
+        # Folders that hold indexed documents, rebuilt when the index changes.
+        self._indexed_folders: set = set()
+        self._indexed_folders_generation = None
+
+    def dispatch(self, event):
+        """Keep an exception inside the watcher: an uncaught one ends the observer's thread.
+
+        ``Path.resolve()`` raises RuntimeError for a symlink loop before
+        Python 3.13, and the handlers resolve the paths they are given.
+        """
+        try:
+            super().dispatch(event)
+        except Exception as exc:
+            print(f"[WATCHER] Ignored event for {event.src_path}: {exc}", file=sys.stderr)
 
     def _schedule_reindex(self, path: str):
         """Accumulate-mode debounce: collect paths, fire once after silence."""
@@ -1532,10 +1558,16 @@ class DocumentWatcher(FileSystemEventHandler):
                 return
             print(f"[WATCHER] {count} file(s) changed, starting incremental reindex...", file=sys.stderr)
             orch = self._get_orchestrator()
-            stats = orch.index_paths(paths)
+            full_scan = self._full_scan_due or count > self._FULL_SCAN_BATCH
+            stats = orch.index_all(force=False) if full_scan else orch.index_paths(paths | self._retry_paths)
             if stats.get("skipped_reason") == "reindex_already_running":
                 with self._lock:
                     self._pending_paths.update(paths)
+            else:
+                self._retry_paths = {entry["path"] for entry in stats.get("failed_files", ())}
+                # The report lists a limited number of failures; past that only
+                # a full scan tries every failed file again.
+                self._full_scan_due = bool(stats.get("failed_files_truncated"))
             changed = stats.get("indexed", 0) + stats.get("updated", 0) + stats.get("deleted", 0)
             if changed > 0:
                 print(
@@ -1569,8 +1601,8 @@ class DocumentWatcher(FileSystemEventHandler):
 
     @staticmethod
     def _is_excluded(path: str) -> bool:
-        """Whether config.exclude_patterns covers this path (GH #295)."""
-        return DocumentParser._should_exclude(Path(path), config.documents_dir, config.exclude_patterns)
+        """Whether the scan leaves this path out: it is excluded, or a folder above it is (GH #295)."""
+        return DocumentParser._is_excluded_from_scan(Path(path), config.documents_dir, config.exclude_patterns)
 
     def _is_indexed(self, src_path: str) -> bool:
         """Whether the path belongs to the current index."""
@@ -1579,6 +1611,27 @@ class DocumentWatcher(FileSystemEventHandler):
         except Exception:
             return False
         return str(Path(src_path).resolve()) in orch._source_to_docid
+
+    def _contains_indexed(self, src_path: str) -> bool:
+        """Whether any indexed document lies below this path (a folder that is gone)."""
+        try:
+            orch = self._get_orchestrator()
+        except Exception:
+            return False
+        scanned = DocumentParser._as_scanned(Path(src_path))
+        # The cache generation changes with every index mutation. Scanning the
+        # catalogue for each event instead would stall the observer's thread
+        # during a burst of temporary-file deletes next to a large corpus.
+        generation = orch.query_cache.generation
+        if generation != self._indexed_folders_generation:
+            folders: set = set()
+            for info in list(orch._indexed_docs.values()):
+                parent = os.path.dirname(info.get("source", ""))
+                while parent not in folders and parent != os.path.dirname(parent):
+                    folders.add(parent)
+                    parent = os.path.dirname(parent)
+            self._indexed_folders, self._indexed_folders_generation = folders, generation
+        return str(scanned) in self._indexed_folders
 
     def _is_real_change(self, src_path: str) -> bool:
         """Drop ATTRIB-only events by comparing on-disk (mtime, size) to last-indexed state.
@@ -1633,25 +1686,24 @@ class DocumentWatcher(FileSystemEventHandler):
         self._schedule_reindex(event.src_path)
 
     def on_deleted(self, event):
-        if event.is_directory:
-            # Windows reports only the folder for bulk deletes — dispatch the
-            # dir path so index_paths falls back to a full scan (GH #297).
-            if not self._is_excluded(event.src_path):
+        if not event.is_directory and self._is_supported(event.src_path):
+            # An indexed file deleted from inside an excluded folder still needs a
+            # reindex so the stale chunks get pruned (GH #295).
+            if not self._is_excluded(event.src_path) or self._is_indexed(event.src_path):
                 self._schedule_reindex(event.src_path)
-            return
-        # An indexed file deleted from inside an excluded folder still needs a
-        # reindex so the stale chunks get pruned (GH #295).
-        if self._is_supported(event.src_path) and (
-            not self._is_excluded(event.src_path) or self._is_indexed(event.src_path)
-        ):
+        elif not self._is_excluded(event.src_path) and self._contains_indexed(event.src_path):
+            # A folder deleted or moved away as a whole: no event follows for the
+            # files that were inside it, and Windows reports the folder itself as
+            # a plain file. index_paths prunes what was indexed below (GH #297).
             self._schedule_reindex(event.src_path)
 
     def on_moved(self, event):
         if event.is_directory:
-            # Bulk folder moves: Windows reports only the folder — dispatch it
-            # so index_paths falls back to a full scan (GH #297).
-            if not self._is_excluded(event.dest_path):
-                self._schedule_reindex(event.dest_path)
+            # The files inside arrive as their own move events, which index the
+            # new paths; scheduling the old folder prunes what was indexed below
+            # it even where those events do not come (GH #297).
+            if self._contains_indexed(event.src_path):
+                self._schedule_reindex(event.src_path)
             return
         # Schedule when the destination is indexable, or when the source was
         # indexed (a move INTO an excluded folder must prune the old chunks).
@@ -1749,8 +1801,10 @@ class KnowledgeOrchestrator:
         self.bm25_index = BM25Index()
         self._bm25_initialized = False
         self._bm25_build_lock = threading.Lock()
-        self._bm25_build_running = threading.Event()
+        # GH #299: set by writes, cleared when a build publishes; the lock
+        # admits one background refresh at a time.
         self._bm25_stale = threading.Event()
+        self._bm25_refresh_lock = threading.Lock()
 
         # Cross-encoder reranker (lazy-loaded on first query)
         self.reranker = CrossEncoderReranker()
@@ -1904,78 +1958,104 @@ class KnowledgeOrchestrator:
 
     _bm25_build_lock = threading.Lock()
 
-    def _ensure_bm25_index(self) -> None:
+    # GH #299: a stale generation is refreshed before the search while the
+    # collection holds at most this many chunks, and on a background thread
+    # beyond that. Measured on a desktop CPU with 1,000-character chunks, a
+    # rebuild takes about 2.5 s at this size; at the 610,000 chunks of the
+    # report it takes minutes, which timed MCP clients out.
+    _BM25_INLINE_REFRESH_CHUNKS = 20_000
+
+    def _ensure_bm25_index(self, refresh: bool = False) -> None:
         """Reload derived BM25 data without waiting behind an active writer.
 
         During ingestion, queries use the last published BM25 generation,
         or semantic retrieval alone until the first generation is ready.
         Empty collections and failures remain retryable (issue #114).
+        ``refresh`` rebuilds a published generation that writes left stale.
         """
-        if self._bm25_initialized:
+        if self._bm25_initialized and not refresh:
             return
         index_lock = getattr(self, "_index_lock", None)
         if index_lock is not None and not index_lock.acquire(blocking=False):
             return
         try:
-            self._rebuild_bm25_from_collection()
+            self._rebuild_bm25_from_collection(refresh=refresh)
         finally:
             if index_lock is not None:
                 index_lock.release()
 
-    def _ensure_bm25_index_or_refresh(self) -> None:
-        """Hybrid-query guard: never block a search on a stale generation (GH #299).
+    def _ensure_bm25_index_or_refresh(self, keyword_only: bool = False) -> None:
+        """Query-path guard: build a cold index, refresh a stale one (GH #299).
 
-        A cold index rebuilds synchronously (the query has no keyword
-        channel otherwise). A warm-but-stale index serves the current
-        generation and refreshes it on a background thread, swapping the
-        reference atomically when the new build is ready.
+        A small index is built or refreshed before the search, so the search
+        sees every completed write — what each release did. On a large index
+        the search does not wait: one background thread builds or refreshes
+        BM25 while searches read the published generation, or the semantic
+        channel alone right after a start. A keyword-only search has no other
+        channel: without a generation it waits for the build, its own or one
+        already on its way.
         """
-        if not getattr(self, "_bm25_initialized", False):
+        # Bare test doubles stub _ensure_bm25_index and carry neither attribute.
+        stale = getattr(self, "_bm25_stale", None)
+        cold = not getattr(self, "_bm25_initialized", False)
+        if stale is None or not (cold or stale.is_set()):
             self._ensure_bm25_index()
             return
-        stale = getattr(self, "_bm25_stale", None)
-        running = getattr(self, "_bm25_build_running", None)
-        if stale is None or running is None:
-            return  # bare test doubles keep the original synchronous contract
-        if stale.is_set() and not running.is_set():
-            stale.clear()
-            running.set()
-            threading.Thread(target=self._run_bm25_rebuild, daemon=True, name="bm25-rebuild").start()
-
-    def _run_bm25_rebuild(self) -> None:
-        index_lock = getattr(self, "_index_lock", None)
-        if index_lock is not None and not index_lock.acquire(blocking=False):
-            self._clear_bm25_running()
-            return
         try:
-            self._rebuild_bm25_from_collection()
-        finally:
-            self._clear_bm25_running()
-            if index_lock is not None:
-                index_lock.release()
+            large = self.collection.count() > self._BM25_INLINE_REFRESH_CHUNKS
+        except Exception as exc:
+            print(f"[WARN] BM25 left as it is, the collection could not be counted: {exc}", file=sys.stderr)
+            return
+        if cold and keyword_only:
+            with self._bm25_refresh_lock:  # a build already on its way finishes first
+                self._ensure_bm25_index()
+        elif cold and not large:
+            self._ensure_bm25_index()
+        elif not large:
+            self._ensure_bm25_index(refresh=True)
+        elif self._bm25_refresh_lock.acquire(blocking=False):
+            try:
+                threading.Thread(target=self._refresh_bm25_in_background, daemon=True, name="bm25-refresh").start()
+            except RuntimeError as exc:  # a later search tries again
+                self._bm25_refresh_lock.release()
+                print(f"[WARN] BM25 background build could not start: {exc}", file=sys.stderr)
 
-    def _clear_bm25_running(self) -> None:
-        running = getattr(self, "_bm25_build_running", None)
-        if running is not None:
-            running.clear()
+    def _refresh_bm25_in_background(self) -> None:
+        """Build or refresh the BM25 of a large index while searches go on."""
+        try:
+            self._ensure_bm25_index(refresh=True)
+            if self._bm25_initialized and not self._bm25_stale.is_set():
+                # Searches cached results from before this generation.
+                self._invalidate_caches()
+        finally:
+            self._bm25_refresh_lock.release()
 
     def _mark_bm25_stale(self) -> None:
         """Note that the published BM25 generation no longer matches Chroma.
 
-        Only meaningful when a generation exists: cold indexes rebuild on
-        the next keyword query regardless (GH #299).
+        Only a build that published clears the mark, so a refresh that could
+        not run or failed is retried by a later query. Without a published
+        generation there is nothing to mark: the next keyword query builds.
         """
         if self._bm25_initialized:
             self._bm25_stale.set()
 
-    def _rebuild_bm25_from_collection(self) -> None:
+    def _clear_bm25_stale(self) -> None:
+        """The published generation matches Chroma again (no-op on bare test doubles)."""
+        stale = getattr(self, "_bm25_stale", None)
+        if stale is not None:
+            stale.clear()
+
+    def _rebuild_bm25_from_collection(self, refresh: bool = False) -> None:
         """Read stable Chroma pages while holding the mutation lock, then publish.
 
-        Builds into a fresh index and swaps the reference atomically, so
-        concurrent queries keep serving the previous generation until the
-        new one is complete (GH #299).
+        ``refresh`` replaces a published generation that is marked stale;
+        queries keep reading it until ``build_index`` publishes the new one.
         """
         with self._bm25_build_lock:
+            if self._bm25_initialized and not (refresh and self._bm25_stale.is_set()):
+                return
+
             try:
                 count = self.collection.count()
                 if count == 0:
@@ -1985,26 +2065,30 @@ class KnowledgeOrchestrator:
                     self.bm25_index.clear()
                     self._bm25_initialized = False
                     return
+                if count > self._BM25_INLINE_REFRESH_CHUNKS:
+                    # Minutes of work that searches no longer wait for: say it started.
+                    print(f"[INFO] Building BM25 index from {count} chunks...", file=sys.stderr)
 
                 # Batch to avoid SQLite "too many SQL variables" (chromadb 1.x
                 # rebuilds IN(?, ?, ...) per row; single get(limit=count) blows
                 # past the 999 default max_variable_number at ~48k chunks).
                 batch_size = 500
-                fresh = BM25Index()
+                # Retry starts from a clean corpus after any partial load/build.
+                self.bm25_index._reset_corpus()
                 for offset in range(0, count, batch_size):
                     batch = self.collection.get(include=["documents"], limit=batch_size, offset=offset)
                     if not batch.get("ids"):
                         return
-                    fresh.add_documents(batch["ids"], batch["documents"] or [])
-                if not fresh.corpus:
+                    self.bm25_index.add_documents(batch["ids"], batch["documents"] or [])
+                if not self.bm25_index.corpus:
                     return
 
-                fresh.build_index()
-                self.bm25_index = fresh
+                self.bm25_index.build_index()
+                print(f"[INFO] BM25 index built with {len(self.bm25_index)} documents", file=sys.stderr)
                 self._bm25_initialized = True
-                # cached results may predate the new generation's keyword hits
-                self._invalidate_caches()
-                print(f"[INFO] BM25 index built with {len(fresh)} documents", file=sys.stderr)
+                # The caller holds the index lock, so no write can land between
+                # the pages read above and this point.
+                self._clear_bm25_stale()
             except Exception as e:
                 print(f"[WARN] Failed to build BM25 index: {e}", file=sys.stderr)
                 # Do not mark initialized; retry allowed on next call.
@@ -2504,12 +2588,17 @@ class KnowledgeOrchestrator:
     def index_paths(self, paths: Iterable[str]) -> Dict[str, Any]:
         """Incremental reindex of specific paths (watcher-driven, GH #297).
 
-        Each existing, supported, non-excluded file goes through the same
-        per-doc worker as a full scan (mtime/size check still skips unchanged
-        files). Gone or newly-excluded paths are pruned when indexed. A
-        directory in the batch falls back to a full scan: Windows reports
-        only the folder for bulk deletes/moves, so nested files would
-        otherwise stay stale.
+        Each path gets the decision the full scan would make for it. A file
+        the scan would yield goes through the same per-document worker (mtime
+        and size still skip unchanged files). A deleted path is pruned,
+        together with everything indexed below it when it was a folder. A
+        file the scan no longer yields is pruned when the scan would prune it.
+
+        Only "not found" counts as deleted: an unreadable path is recorded as
+        a failure, and an unavailable ``documents_dir`` prunes nothing (#259).
+        Failures are reported the way the full scan reports them, so the
+        caller can try those paths again. A directory in the batch, or a
+        repair left pending by a failed rollback, makes the pass a full scan.
         """
         if not self._index_lock.acquire(blocking=False):
             stats = self._init_index_stats()
@@ -2521,45 +2610,117 @@ class KnowledgeOrchestrator:
             self._index_lock.release()
 
     def _index_paths_impl(self, paths: List[str]) -> Dict[str, Any]:
+        """Inner implementation of index_paths (caller holds _index_lock)."""
         stats = self._init_index_stats()
-        docs_dir = config.documents_dir
-        candidates: List[Path] = []
-        for raw in paths:
-            try:
-                path = Path(raw).resolve()
-            except OSError:
-                continue
-            if not is_path_within(docs_dir, path):
-                continue
-            if path.is_dir():
-                return self._index_all_impl(force=False)
-            candidates.append(path)
-        if not candidates:
+        if not io_path(config.documents_dir).is_dir():
+            print(
+                f"[WARN] documents_dir unavailable, changed paths not reindexed: {config.documents_dir}",
+                file=sys.stderr,
+            )
+            self._record_failed_file(stats, str(config.documents_dir), self._DOCUMENTS_DIR_UNAVAILABLE_REASON)
             return stats
+        if self._load_document_repairs():
+            return self._index_all_impl(force=False)  # the pass that applies pending repairs
 
+        deleted: List[Path] = []
+        existing: List[Path] = []
+        # Each path once, in the form the scan gives it; None lies outside documents_dir.
+        for path in dict.fromkeys(self.parser._as_scanned(Path(raw)) for raw in paths):
+            if path is None:
+                continue
+            stats["total_files"] += 1
+            try:
+                io_path(path).stat()
+            except FileNotFoundError:
+                deleted.append(path)
+                continue
+            except OSError as exc:
+                # Unreadable is not evidence of deletion.
+                self._record_failed_file(stats, str(path), self._failure_reason(exc))
+                print(f"[ERROR] Failed to index {path}: {exc}", file=sys.stderr)
+                continue
+            if io_path(path).is_dir():
+                return self._index_all_impl(force=False)
+            existing.append(path)
+
+        base_dir = resolve_path(Path(config.documents_dir).expanduser())
         path_to_docid = self._build_path_to_docid_map()
         tracking = self._init_reindex_tracking(None, stats)
-        stats["total_files"] = len(candidates)
-        for idx, path in enumerate(candidates):
-            excluded = self.parser._should_exclude(path, Path(docs_dir), config.exclude_patterns)
-            if excluded or not path.exists():
-                self._remove_indexed_path(path, path_to_docid, stats)
-                continue
-            self._process_one_document(idx, path, False, path_to_docid, stats, tracking)
+        # A partial pass says nothing about an interrupted smart reindex.
+        tracking["checkpoint_enabled"] = False
+        # Prune before indexing, like the full scan does.
+        self._remove_indexed_docs(self._indexed_at_or_below(deleted, path_to_docid), stats)
+        for idx, path in enumerate(existing):
+            if self.parser._scan_yields(path):
+                self._process_one_document(idx, path, False, path_to_docid, stats, tracking)
+            elif not self._prune_unscanned(path, base_dir, path_to_docid, stats):
+                stats["skipped"] += 1
         return self._finalize_reindex(stats, tracking)
 
-    def _remove_indexed_path(self, path: Path, path_to_docid: Dict[str, str], stats: Dict[str, Any]) -> None:
-        """Prune a single indexed path whose file is gone or now excluded (GH #297)."""
-        resolved = str(path)
-        doc_id = path_to_docid.get(resolved) or self._source_to_docid.get(resolved)
+    def _indexed_doc_id(self, path: Path, path_to_docid: Dict[str, str]) -> Optional[str]:
+        """The document indexed from a path given as the scan sees it, if any."""
+        doc_id = path_to_docid.get(str(path))
         if doc_id is None:
-            stats["skipped"] += 1
-            return
-        removed = self._remove_document_chunks(doc_id)
-        stats["chunks_removed"] += removed
-        stats["deleted"] += 1
-        self._source_to_docid.pop(resolved, None)
-        self._indexed_docs.pop(doc_id, None)
+            try:
+                doc_id = self._source_to_docid.get(str(path.resolve()))
+            except (OSError, RuntimeError):  # a symlink loop raises RuntimeError before Python 3.13
+                pass
+        return doc_id
+
+    def _indexed_at_or_below(self, deleted: List[Path], path_to_docid: Dict[str, str]) -> set:
+        """Documents indexed from one of the deleted paths or from below one.
+
+        A folder deleted or moved away as a whole arrives as a single path,
+        with no event for the files that were inside it.
+        """
+        doc_ids: set = set()
+        folders: set = set()
+        for path in deleted:
+            doc_id = self._indexed_doc_id(path, path_to_docid)
+            if doc_id is None:
+                folders.add(str(path))
+            else:
+                doc_ids.add(doc_id)
+        if folders:
+            for source, doc_id in path_to_docid.items():
+                parent = os.path.dirname(source)
+                while parent not in folders and parent != os.path.dirname(parent):
+                    parent = os.path.dirname(parent)
+                if parent in folders:
+                    doc_ids.add(doc_id)
+        return doc_ids
+
+    def _prune_unscanned(
+        self, path: Path, base_dir: Path, path_to_docid: Dict[str, str], stats: Dict[str, Any]
+    ) -> bool:
+        """Prune the document of an existing file the scan no longer yields, if the scan would.
+
+        The scan prunes such a document when its file is excluded or lies
+        outside ``documents_dir``, and keeps it otherwise.
+        """
+        doc_id = self._indexed_doc_id(path, path_to_docid)
+        if doc_id is None:
+            return False
+        excluded = self.parser._should_exclude(path, base_dir, config.exclude_patterns)
+        if is_path_within(config.documents_dir, path) and not excluded:
+            return False
+        self._remove_indexed_docs({doc_id}, stats)
+        return True
+
+    def _remove_indexed_docs(self, doc_ids: set, stats: Dict[str, Any]) -> None:
+        """Prune documents with the bookkeeping of the full scan's prune."""
+        for doc_id in doc_ids:
+            source = self._indexed_docs[doc_id].get("source", "")
+            try:
+                removed = self._remove_document_chunks(doc_id)
+            except Exception as exc:
+                self._record_failed_file(stats, source, self._failure_reason(exc))
+                print(f"[ERROR] Failed to prune {source}: {exc}", file=sys.stderr)
+                continue
+            stats["chunks_removed"] += removed
+            stats["deleted"] += 1
+            self._source_to_docid.pop(str(Path(source).resolve()), None)
+            del self._indexed_docs[doc_id]
 
     # v4.8.0 Fase 3: kept as fallback constant for tests that instantiate
     # Orchestrator without a full Config (e.g. `object.__new__` mocks in
@@ -2599,12 +2760,13 @@ class KnowledgeOrchestrator:
                 self._write_collection.delete(ids=obsolete)
                 self._fts5_sync_remove_ids(obsolete)
         except Exception:
+            # First: the collection has changed, even if undoing it fails below.
+            self._mark_bm25_stale()
             newly_created = sorted(set(ids) - set(previous["ids"]))
             if newly_created:
                 self._write_collection.delete(ids=newly_created)
                 self._fts5_sync_remove_ids(newly_created)
             self._restore_document_chunks(previous)
-            self._mark_bm25_stale()
             raise
         self._mark_bm25_stale()
         return added, skipped, len(previous["ids"])
@@ -2986,6 +3148,10 @@ class KnowledgeOrchestrator:
         staged._index_lock = threading.RLock()
         staged._publication_lock = PublicationLock()
         staged._bm25_build_lock = threading.Lock()
+        # copy() shares these with production: staging writes must not mark the
+        # production generation stale.
+        staged._bm25_stale = threading.Event()
+        staged._bm25_refresh_lock = threading.Lock()
         staged.bm25_index = BM25Index()
         staged._collect_staging_bm25 = True
         staged._bm25_initialized = True
@@ -3159,6 +3325,8 @@ class KnowledgeOrchestrator:
             for key, value in staged_state.items():
                 if key != "collection":
                     setattr(self, key, value)
+            # The staged generation was built from the collection just swapped in.
+            self._clear_bm25_stale()
         else:
             self.bm25_index.clear()
             self._bm25_initialized = False
@@ -3861,7 +4029,10 @@ class KnowledgeOrchestrator:
             raise Fts5NotReadyError("FTS5 fast-path is disabled in config; set search.lexical_fast_path.enabled=true")
 
         if hybrid_alpha < 1.0:
-            self._ensure_bm25_index_or_refresh()
+            self._ensure_bm25_index_or_refresh(keyword_only=hybrid_alpha <= 0)
+        # An answer computed without a BM25 generation lacks its keyword matches;
+        # from the cache it would still be served after the build is published.
+        is_cacheable = hybrid_alpha >= 1.0 or getattr(self, "_bm25_initialized", True)
 
         # Keyword routing — informational only.
         # `routed_category` is surfaced via the `routed_by` field for telemetry,
@@ -4046,16 +4217,17 @@ class KnowledgeOrchestrator:
         # Adjacent Chunk Retrieval — expand content with surrounding chunks for context
         formatted = self._expand_with_adjacent_chunks(formatted)
 
-        self.query_cache.put(
-            query_text,
-            max_results,
-            category_filter,
-            hybrid_alpha,
-            formatted,
-            search_method=search_method,
-            expected_generation=cache_generation,
-            folder_scope=scope_key,
-        )
+        if is_cacheable:
+            self.query_cache.put(
+                query_text,
+                max_results,
+                category_filter,
+                hybrid_alpha,
+                formatted,
+                search_method=search_method,
+                expected_generation=cache_generation,
+                folder_scope=scope_key,
+            )
         if config.fts5_enabled:
             get_metrics().inc(FAST_PATH_HITS_TOTAL, f'{{path="{hybrid_path_label}"}}')
         return formatted
@@ -4181,20 +4353,15 @@ class KnowledgeOrchestrator:
 
         Balances relevance (score) vs diversity (dissimilarity to already selected docs).
         lambda=1.0 = pure relevance, lambda=0.0 = pure diversity, default 0.7 = relevance-heavy.
+        A candidate with the same words as a selected result is outside that
+        balance: it is taken only when no distinct candidate is left.
+
+        ``results`` arrive ordered by relevance. MMR decides which of them are
+        returned; the ones it keeps stay in that order, so the list a caller
+        receives is ordered by score as it always was.
         """
         if len(results) <= top_k:
             return results
-
-        # Use content text for similarity (simple Jaccard on token sets)
-        def jaccard_sim(a: str, b: str) -> float:
-            tokens_a = set(a.lower().split())
-            tokens_b = set(b.lower().split())
-            if not tokens_a or not tokens_b:
-                return 0.0
-            return len(tokens_a & tokens_b) / len(tokens_a | tokens_b)
-
-        selected = [results[0]]  # First result always selected (highest score)
-        remaining = list(results[1:])
 
         # Min-max normalize relevance over the candidate pool so cross-encoder
         # scores (~[-10, 10]) and Jaccard similarity ([0, 1]) share a scale;
@@ -4203,28 +4370,38 @@ class KnowledgeOrchestrator:
         score_lo = min(raw_scores)
         score_span = max(raw_scores) - score_lo
 
+        # Similarity is Jaccard on token sets, tokenized once per candidate.
+        tokens = [set(data.get("document", "").lower().split()) for _, data in results]
+
+        selected = [0]  # First result always selected (highest score)
+        remaining = list(range(1, len(results)))
+        # Highest similarity of each candidate to anything selected so far.
+        max_sim = dict.fromkeys(remaining, 0.0)
+
         while len(selected) < top_k and remaining:
-            best_idx = 0
+            newest = tokens[selected[-1]]
+            best_idx = remaining[0]
             best_mmr = float("-inf")
 
-            for i, (chunk_id, data) in enumerate(remaining):
-                # Relevance score (normalized)
-                relevance = data.get("reranker_score", data.get("rrf_score", 0))
-                relevance = (relevance - score_lo) / score_span if score_span > 0 else 1.0
-
-                # Max similarity to any already-selected doc
-                doc_text = data.get("document", "")
-                max_sim = max(jaccard_sim(doc_text, sel_data.get("document", "")) for _, sel_data in selected)
-
-                mmr_score = lambda_param * relevance - (1 - lambda_param) * max_sim
+            for i in remaining:
+                if tokens[i] and newest:
+                    similarity = len(tokens[i] & newest) / len(tokens[i] | newest)
+                    max_sim[i] = max(max_sim[i], similarity)
+                relevance = (raw_scores[i] - score_lo) / score_span if score_span > 0 else 1.0
+                mmr_score = lambda_param * relevance - (1 - lambda_param) * max_sim[i]
+                if max_sim[i] >= 1.0:
+                    # The same text as a result already selected tells the reader
+                    # nothing new: it takes a slot only when no other is left.
+                    mmr_score = float("-inf")
 
                 if mmr_score > best_mmr:
                     best_mmr = mmr_score
                     best_idx = i
 
-            selected.append(remaining.pop(best_idx))
+            selected.append(best_idx)
+            remaining.remove(best_idx)
 
-        return selected
+        return [results[i] for i in sorted(selected)]
 
     # =========================================================================
     # Document Retrieval & Management
