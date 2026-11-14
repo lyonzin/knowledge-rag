@@ -1567,6 +1567,19 @@ class DocumentWatcher(FileSystemEventHandler):
             return False
         return p.suffix.lower() in config.supported_formats or p.name in config.supported_formats
 
+    @staticmethod
+    def _is_excluded(path: str) -> bool:
+        """Whether config.exclude_patterns covers this path (GH #295)."""
+        return DocumentParser._should_exclude(Path(path), config.documents_dir, config.exclude_patterns)
+
+    def _is_indexed(self, src_path: str) -> bool:
+        """Whether the path belongs to the current index."""
+        try:
+            orch = self._get_orchestrator()
+        except Exception:
+            return False
+        return str(Path(src_path).resolve()) in orch._source_to_docid
+
     def _is_real_change(self, src_path: str) -> bool:
         """Drop ATTRIB-only events by comparing on-disk (mtime, size) to last-indexed state.
 
@@ -1603,11 +1616,14 @@ class DocumentWatcher(FileSystemEventHandler):
         return meta.get("file_mtime") != current_mtime or meta.get("file_size") != st.st_size
 
     def on_created(self, event):
-        if not event.is_directory and self._is_supported(event.src_path):
+        if not event.is_directory and self._is_supported(event.src_path) and not self._is_excluded(event.src_path):
             self._schedule_reindex(event.src_path)
 
     def on_modified(self, event):
         if event.is_directory or not self._is_supported(event.src_path):
+            return
+        # GH #295: files in excluded folders must never trigger a reindex.
+        if self._is_excluded(event.src_path):
             return
         # GH #214: drop ATTRIB-only chatter (chmod, xattr, utime-same-mtime).
         # on_created / on_deleted / on_moved always signal real change and skip
@@ -1617,13 +1633,23 @@ class DocumentWatcher(FileSystemEventHandler):
         self._schedule_reindex(event.src_path)
 
     def on_deleted(self, event):
-        if not event.is_directory and self._is_supported(event.src_path):
+        # An indexed file deleted from inside an excluded folder still needs a
+        # reindex so the stale chunks get pruned (GH #295).
+        if (
+            not event.is_directory
+            and self._is_supported(event.src_path)
+            and (not self._is_excluded(event.src_path) or self._is_indexed(event.src_path))
+        ):
             self._schedule_reindex(event.src_path)
 
     def on_moved(self, event):
         if event.is_directory:
             return
-        if self._is_supported(event.src_path) or self._is_supported(event.dest_path):
+        # Schedule when the destination is indexable, or when the source was
+        # indexed (a move INTO an excluded folder must prune the old chunks).
+        if (self._is_supported(event.dest_path) and not self._is_excluded(event.dest_path)) or self._is_indexed(
+            event.src_path
+        ):
             self._schedule_reindex(event.dest_path)
 
 

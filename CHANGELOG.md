@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 **Fixed:**
 
 - MMR diversification now actually runs when the cross-encoder reranker is enabled. The reranker truncated its input to `max_results`, which left the MMR guard (`len > max_results`) permanently false — near-duplicate chunks filled the top results while distinct candidates never surfaced. The reranker now receives the full candidate pool, MMR runs before score normalization (so normalized scores span the final result set), and `_apply_mmr` min-max-normalizes relevance into the same [0, 1] scale as Jaccard similarity before combining them, with the best-MMR sentinel starting at `-inf` instead of `-1.0` (#294).
+- The file watcher now applies `exclude_patterns` before scheduling a reindex. Before, every supported file created, modified or deleted inside an excluded folder (TEMP dirs, tool output, venvs) triggered a full `index_all()` pass whose only outcome was `0 new, N skipped`. An indexed file deleted from inside an excluded folder, and a move whose source was indexed, still schedule a reindex so stale chunks get pruned (#295).
 
 ---
 
