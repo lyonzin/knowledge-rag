@@ -440,6 +440,22 @@ class FastEmbedEmbeddings:
             print(f"[INFO] CUDA DLL paths added for: {', '.join(dict.fromkeys(added))}", file=sys.stderr)
 
     @staticmethod
+    def _build_nvidia_smi_env() -> Optional[Dict[str, str]]:
+        """Build the environment for the nvidia-smi probe, or None to inherit.
+
+        On Windows nvidia-smi cannot initialize NVML without ProgramFiles (or
+        ProgramW6432) and exits 255. MCP clients that forward a reduced
+        environment, such as the MCP Python SDK's stdio client, pass neither,
+        so the probe gets a ProgramFiles value when the process has none (GH #311).
+        """
+        if platform.system() != "Windows" or os.environ.get("PROGRAMFILES"):
+            return None
+        system_drive = os.environ.get("SYSTEMDRIVE") or "C:"
+        program_files = os.environ.get("PROGRAMW6432") or f"{system_drive}\\Program Files"
+        # Upper case like every os.environ key on Windows, so an empty entry is replaced, not duplicated.
+        return {**os.environ, "PROGRAMFILES": program_files}
+
+    @staticmethod
     def verify_gpu_readiness() -> GPUStatus:
         """Verify GPU readiness for ONNX inference before model load.
 
@@ -544,6 +560,7 @@ class FastEmbedEmbeddings:
                 capture_output=True,
                 text=True,
                 timeout=10,
+                env=FastEmbedEmbeddings._build_nvidia_smi_env(),
             )
             if result.returncode == 0 and result.stdout.strip():
                 line = result.stdout.strip().splitlines()[0]

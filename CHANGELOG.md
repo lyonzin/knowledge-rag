@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+### Unreleased
+
+**Fixed:**
+
+- On Windows, the embedding model no longer loads on CPU with `models.embedding.gpu` set to `"auto"` or `"true"` when the MCP client starts the server with a reduced environment. Before, the readiness probe ran `nvidia-smi` in the server's own environment, and `nvidia-smi` cannot initialize NVML without `ProgramFiles` (or `ProgramW6432`): it exited 255, the probe reported `nvidia-smi failed or returned no GPU`, and the embeddings fell back to CPU while the reranker, which skips the probe, ran on CUDA in the same process. The probe now gives `nvidia-smi` a `ProgramFiles` value when the server's environment has none: `ProgramW6432` if it is set, otherwise `%SystemDrive%\Program Files`. This affected servers started by the MCP Python SDK's stdio client, which mcp-proxy and other clients are built on and which forwards neither variable; in the report, indexing 606 chunks on an RTX 3080 Ti took 8.9 s on CPU instead of 0.7 s on CUDA. Clients that pass their whole environment, such as Claude Code, were not affected (#311).
+
+---
+
 ### v5.1.0 (2026-11-14) — Path-level watcher, non-blocking BM25 and orphan cleanup
 
 Minor release. Ships the fixes for six reports from one large installation (a whole drive as `documents_dir`, about 610,000 chunks): the file watcher applies `exclude_patterns` and reindexes only what changed, scans prune excluded folders, a document write or a restart no longer makes the next search on a large index wait minutes for BM25, MMR runs with the reranker enabled, and a reindex removes orphan chunks. Also new: `get_reindex_status` lists the files that failed, `search.ef_search`, and the `self_recall` probe in `get_index_stats`. Nothing breaking on upgrade, and existing indexes need no reindex. `evaluate_retrieval` now measures at `hybrid_alpha=0.3`, so a baseline recorded with an earlier version has to be recorded again.
