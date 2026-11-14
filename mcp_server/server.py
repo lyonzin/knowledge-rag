@@ -1992,7 +1992,8 @@ class KnowledgeOrchestrator:
         the search does not wait: one background thread builds or refreshes
         BM25 while searches read the published generation, or the semantic
         channel alone right after a start. A keyword-only search has no other
-        channel, so it still waits for the first build.
+        channel: without a generation it waits for the build, its own or one
+        already on its way.
         """
         # Bare test doubles stub _ensure_bm25_index and carry neither attribute.
         stale = getattr(self, "_bm25_stale", None)
@@ -2005,15 +2006,19 @@ class KnowledgeOrchestrator:
         except Exception as exc:
             print(f"[WARN] BM25 left as it is, the collection could not be counted: {exc}", file=sys.stderr)
             return
-        if cold and (keyword_only or not large):
+        if cold and keyword_only:
+            with self._bm25_refresh_lock:  # a build already on its way finishes first
+                self._ensure_bm25_index()
+        elif cold and not large:
             self._ensure_bm25_index()
         elif not large:
             self._ensure_bm25_index(refresh=True)
         elif self._bm25_refresh_lock.acquire(blocking=False):
             try:
                 threading.Thread(target=self._refresh_bm25_in_background, daemon=True, name="bm25-refresh").start()
-            except RuntimeError:  # no thread could be started; a later search tries again
+            except RuntimeError as exc:  # a later search tries again
                 self._bm25_refresh_lock.release()
+                print(f"[WARN] BM25 background build could not start: {exc}", file=sys.stderr)
 
     def _refresh_bm25_in_background(self) -> None:
         """Build or refresh the BM25 of a large index while searches go on."""
@@ -2060,6 +2065,9 @@ class KnowledgeOrchestrator:
                     self.bm25_index.clear()
                     self._bm25_initialized = False
                     return
+                if count > self._BM25_INLINE_REFRESH_CHUNKS:
+                    # Minutes of work that searches no longer wait for: say it started.
+                    print(f"[INFO] Building BM25 index from {count} chunks...", file=sys.stderr)
 
                 # Batch to avoid SQLite "too many SQL variables" (chromadb 1.x
                 # rebuilds IN(?, ?, ...) per row; single get(limit=count) blows
@@ -4022,6 +4030,9 @@ class KnowledgeOrchestrator:
 
         if hybrid_alpha < 1.0:
             self._ensure_bm25_index_or_refresh(keyword_only=hybrid_alpha <= 0)
+        # An answer computed without a BM25 generation lacks its keyword matches;
+        # from the cache it would still be served after the build is published.
+        is_cacheable = hybrid_alpha >= 1.0 or getattr(self, "_bm25_initialized", True)
 
         # Keyword routing — informational only.
         # `routed_category` is surfaced via the `routed_by` field for telemetry,
@@ -4206,16 +4217,17 @@ class KnowledgeOrchestrator:
         # Adjacent Chunk Retrieval — expand content with surrounding chunks for context
         formatted = self._expand_with_adjacent_chunks(formatted)
 
-        self.query_cache.put(
-            query_text,
-            max_results,
-            category_filter,
-            hybrid_alpha,
-            formatted,
-            search_method=search_method,
-            expected_generation=cache_generation,
-            folder_scope=scope_key,
-        )
+        if is_cacheable:
+            self.query_cache.put(
+                query_text,
+                max_results,
+                category_filter,
+                hybrid_alpha,
+                formatted,
+                search_method=search_method,
+                expected_generation=cache_generation,
+                folder_scope=scope_key,
+            )
         if config.fts5_enabled:
             get_metrics().inc(FAST_PATH_HITS_TOTAL, f'{{path="{hybrid_path_label}"}}')
         return formatted
