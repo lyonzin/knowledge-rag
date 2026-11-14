@@ -137,8 +137,8 @@ client configuration:
 "env": { "ProgramFiles": "C:\\Program Files" }
 ```
 
-A client that builds `StdioServerParameters` itself can instead forward either
-variable from its own environment:
+A client that builds `StdioServerParameters` itself can instead forward
+`PROGRAMW6432` from its own environment:
 
 ```python
 import os

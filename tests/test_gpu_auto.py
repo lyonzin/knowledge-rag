@@ -242,6 +242,13 @@ class TestNvidiaSmiProbeEnv:
         assert probe_env["PROGRAMFILES"] == "D:\\Program Files"
 
     @patch("mcp_server.server.platform.system", lambda: "Windows")
+    @patch("mcp_server.server.os.environ", {"SYSTEMDRIVE": ""})
+    def test_windows_with_empty_system_drive_falls_back_to_c_drive(self):
+        probe_env = FastEmbedEmbeddings._build_nvidia_smi_env()
+
+        assert probe_env["PROGRAMFILES"] == "C:\\Program Files"
+
+    @patch("mcp_server.server.platform.system", lambda: "Windows")
     @patch("mcp_server.server.os.environ", {"PROGRAMFILES": "C:\\Program Files"})
     def test_windows_with_program_files_inherits_the_environment(self):
         # None makes subprocess.run inherit the process environment unchanged
