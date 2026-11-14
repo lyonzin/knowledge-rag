@@ -47,29 +47,81 @@ def _stats(**kwargs) -> dict:
     return base
 
 
+class _RecordingOrchestrator:
+    """Records which reindex entrypoint the watcher chose."""
+
+    def __init__(self, busy: bool = False):
+        self.calls: list = []
+        self.busy = busy
+
+    def _result(self) -> dict:
+        return _stats(skipped_reason="reindex_already_running") if self.busy else _stats(indexed=1)
+
+    def index_paths(self, paths):
+        self.calls.append(("paths", set(paths)))
+        return self._result()
+
+    def index_all(self, force=False):
+        self.calls.append(("all", force))
+        return self._result()
+
+
+def _run_pass(watcher: DocumentWatcher, *paths: str) -> None:
+    """One debounced pass, without waiting for the timer."""
+    watcher._pending_paths.update(paths)
+    watcher._do_reindex()
+    if watcher._timer is not None:
+        watcher._timer.cancel()
+
+
 class TestWatcherDispatchesPaths:
-    def test_do_reindex_calls_index_paths_not_index_all(self, monkeypatch) -> None:
-        """given pending paths, when the debounce fires, then the watcher calls
-        index_paths(pending) and never a full index_all."""
-        calls: dict = {}
+    def test_changed_paths_are_dispatched_after_the_first_pass(self) -> None:
+        """given the session already had its full scan, when files change, then
+        the watcher reindexes those paths and runs no full scan."""
+        orch = _RecordingOrchestrator()
+        watcher = DocumentWatcher(lambda: orch)
+        watcher._full_scan_due = False
 
-        class FakeOrch:
-            def index_paths(self, paths):
-                calls["paths"] = set(paths)
-                return _stats(indexed=1)
+        _run_pass(watcher, "a.md", "b.md")
 
-            def index_all(self, force=False):
-                calls["index_all"] = True
-                return _stats()
+        assert orch.calls == [("paths", {"a.md", "b.md"})]
 
-        orch = FakeOrch()
-        watcher = DocumentWatcher(lambda: orch, debounce_seconds=0.05)
-        watcher._schedule_reindex(str(Path("a.md")))
-        watcher._schedule_reindex(str(Path("b.md")))
-        time.sleep(0.3)
+    def test_first_pass_of_a_session_is_a_full_scan(self) -> None:
+        """given a server that just started, when the first change arrives,
+        then the pass is a full scan — it also picks up what changed while the
+        server was down — and the passes after it are path-level."""
+        orch = _RecordingOrchestrator()
+        watcher = DocumentWatcher(lambda: orch)
 
-        assert calls.get("paths") == {str(Path("a.md")), str(Path("b.md"))}
-        assert "index_all" not in calls, "watcher must not run a full scan for file events"
+        _run_pass(watcher, "a.md")
+        _run_pass(watcher, "b.md")
+
+        assert orch.calls == [("all", False), ("paths", {"b.md"})]
+
+    def test_full_scan_that_could_not_run_stays_due(self) -> None:
+        """given the first pass found a reindex already running, when the next
+        pass comes, then it is still a full scan."""
+        orch = _RecordingOrchestrator(busy=True)
+        watcher = DocumentWatcher(lambda: orch)
+
+        _run_pass(watcher, "a.md")
+        orch.busy = False
+        _run_pass(watcher)
+
+        assert orch.calls == [("all", False), ("all", False)]
+
+    def test_large_batch_is_a_full_scan(self) -> None:
+        """given more changed paths than a burst the observer reliably reports,
+        when the pass runs, then it is a full scan, which does not depend on
+        every event having arrived."""
+        orch = _RecordingOrchestrator()
+        watcher = DocumentWatcher(lambda: orch)
+        watcher._full_scan_due = False
+
+        _run_pass(watcher, *(f"f{i}.md" for i in range(DocumentWatcher._FULL_SCAN_BATCH + 1)))
+        _run_pass(watcher, "a.md")
+
+        assert orch.calls == [("all", False), ("paths", {"a.md"})]
 
 
 class TestIndexPaths:
@@ -325,6 +377,7 @@ class TestWatcherPathsE2E:
         orch.index_paths = spy_index_paths  # type: ignore[method-assign]
 
         watcher = DocumentWatcher(lambda: orch, debounce_seconds=0.3)
+        watcher._full_scan_due = False  # the session's full scan already ran
         observer = PollingObserver(timeout=0.2)
         observer.schedule(watcher, str(docs_dir), recursive=True)
         observer.start()
@@ -361,6 +414,7 @@ class TestWatcherPathsE2E:
         assert len(orch._source_to_docid) == 3
 
         watcher = DocumentWatcher(lambda: orch, debounce_seconds=0.3)
+        watcher._full_scan_due = False  # the session's full scan already ran
         observer = PollingObserver(timeout=0.2)
         observer.schedule(watcher, str(docs_dir), recursive=True)
         observer.start()
@@ -370,6 +424,42 @@ class TestWatcherPathsE2E:
                 f"documents of the deleted folder must be pruned, left {list(orch._source_to_docid)}"
             )
             assert orch.collection.count() == 1
+        finally:
+            observer.stop()
+            observer.join(timeout=2)
+
+    def test_first_event_also_indexes_what_changed_while_the_server_was_down(
+        self, isolated_orchestrator, monkeypatch
+    ) -> None:
+        """given a file edited while no server was watching, when the server
+        is back and any other file changes, then the offline edit is indexed
+        too — the first pass of a session is a full scan."""
+        from watchdog.observers.polling import PollingObserver
+
+        monkeypatch.setattr(srv.config, "supported_formats", {".md"})
+        docs_dir = Path(srv.config.documents_dir)
+        touched = docs_dir / "touched.md"
+        offline = docs_dir / "offline.md"
+        touched.write_text("# touched\n", encoding="utf-8")
+        offline.write_text("# offline\n", encoding="utf-8")
+        orch = isolated_orchestrator
+        orch.index_all(force=True)
+        offline.write_text("# offline, edited while the server was down\n", encoding="utf-8")
+
+        def indexed_size(path: Path):
+            doc_id = orch._source_to_docid.get(str(path.resolve()))
+            return orch._indexed_docs.get(doc_id, {}).get("file_size")
+
+        watcher = DocumentWatcher(lambda: orch, debounce_seconds=0.3)
+        observer = PollingObserver(timeout=0.2)
+        observer.schedule(watcher, str(docs_dir), recursive=True)
+        observer.start()
+        try:
+            touched.write_text("# touched, with the server running\n", encoding="utf-8")
+            assert _wait_until(lambda: indexed_size(offline) == offline.stat().st_size), (
+                "the edit made while the server was down must be indexed by the first pass"
+            )
+            assert indexed_size(touched) == touched.stat().st_size
         finally:
             observer.stop()
             observer.join(timeout=2)

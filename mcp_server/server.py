@@ -1496,6 +1496,10 @@ class DocumentWatcher(FileSystemEventHandler):
     bulk file copies (1000+ files) from starving the reindex trigger.
     """
 
+    # An observer can drop events when its buffer overflows (a bulk copy), so
+    # a batch this large is reindexed by a full scan, which needs none of them.
+    _FULL_SCAN_BATCH = 500
+
     def __init__(self, orchestrator_getter, debounce_seconds: float = 10.0):
         self._get_orchestrator = orchestrator_getter
         self._debounce = debounce_seconds
@@ -1503,6 +1507,10 @@ class DocumentWatcher(FileSystemEventHandler):
         self._pending_paths: set = set()
         self._timer = None
         self._reindex_lock = threading.Lock()
+        # The first pass of a session is a full scan: it also picks up what
+        # changed while the server was not running. Later passes reindex only
+        # the paths that changed (GH #297).
+        self._full_scan_due = True
 
     def _schedule_reindex(self, path: str):
         """Accumulate-mode debounce: collect paths, fire once after silence."""
@@ -1532,10 +1540,13 @@ class DocumentWatcher(FileSystemEventHandler):
                 return
             print(f"[WATCHER] {count} file(s) changed, starting incremental reindex...", file=sys.stderr)
             orch = self._get_orchestrator()
-            stats = orch.index_paths(paths)
+            full_scan = self._full_scan_due or count > self._FULL_SCAN_BATCH
+            stats = orch.index_all(force=False) if full_scan else orch.index_paths(paths)
             if stats.get("skipped_reason") == "reindex_already_running":
                 with self._lock:
                     self._pending_paths.update(paths)
+            elif full_scan:
+                self._full_scan_due = False
             changed = stats.get("indexed", 0) + stats.get("updated", 0) + stats.get("deleted", 0)
             if changed > 0:
                 print(
