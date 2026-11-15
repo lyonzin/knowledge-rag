@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Unreleased
 
+**Added:**
+
+- Chunks that the vector index cannot reach, which no semantic search returns, are linked again after indexing. Every operation that writes chunks now queries the chunks it wrote by their own stored vector and updates the ones that do not come back, in place, with the vector they hold. On a 70,752-chunk index of a real corpus, a pass of the server went from 3,303 unreachable chunks (4.7%) to 73 (0.10%), and a new process found 109 and 146 (0.15% and 0.21%) after two full rebuilds. A check of all those chunks took 11 to 13 s, and an operation runs up to three. Only chunks the operation wrote are checked, and none on an index with fewer than 1,000 chunks. `search.repair_unreachable_chunks: false` switches the check off (#313).
+
 **Fixed:**
 
 - On Windows, the embedding model no longer loads on CPU with `models.embedding.gpu` set to `"auto"` or `"true"` when the MCP client starts the server with a reduced environment. Before, the readiness probe ran `nvidia-smi` in the server's own environment, and `nvidia-smi` cannot initialize NVML without `ProgramFiles` (or `ProgramW6432`): it exited 255, the probe reported `nvidia-smi failed or returned no GPU`, and the embeddings fell back to CPU while the reranker, which skips the probe, ran on CUDA in the same process. The probe now gives `nvidia-smi` a `ProgramFiles` value when the server's environment has none: `ProgramW6432` if it is set, otherwise `%SystemDrive%\Program Files`. This affected servers started by the MCP Python SDK's stdio client, which mcp-proxy and other clients are built on and which forwards neither variable; in the report, indexing 606 chunks on an RTX 3080 Ti took 8.9 s on CPU instead of 0.7 s on CUDA. Clients that pass their whole environment, such as Claude Code, were not affected (#311).

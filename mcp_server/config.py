@@ -850,8 +850,8 @@ class Config:
         )
     )
 
-    # GH #287: last field on purpose — the api-surface gate treats dataclass
-    # fields as positional constructor args, so new fields go at the end.
+    # New fields go at the end: the api-surface gate treats dataclass fields as
+    # positional constructor args (GH #287).
     # HNSW ef_search: search-time exploration depth for the ChromaDB HNSW
     # index. Default 100 = ChromaDB's built-in default. Higher values raise
     # self-recall of isolated vectors at a linear latency cost, but the value
@@ -859,6 +859,11 @@ class Config:
     # ignores configuration updates on existing indexes (verified empirically,
     # see docs/reindex-operations.md), so apply it and reindex.
     ef_search: int = field(default_factory=lambda: _get("search", "ef_search", DEFAULT_EF_SEARCH))
+
+    # GH #313: after an indexing operation, check the chunks it wrote by their
+    # own stored vector and update the ones the HNSW index does not return
+    # with that same vector, which links them again (nothing is embedded).
+    repair_unreachable_chunks: bool = field(default_factory=lambda: _get("search", "repair_unreachable_chunks", True))
 
     def __post_init__(self):
         """Validate config values and ensure directories exist."""
@@ -875,7 +880,7 @@ class Config:
         self._ensure_directories()
 
     def _validate_chunking(self) -> None:
-        """Bound-check chunk_size / chunk_overlap / default_results / max_results / ef_search."""
+        """Check chunk_size / chunk_overlap / default_results / max_results / ef_search / repair_unreachable_chunks."""
         if not isinstance(self.chunk_size, int) or self.chunk_size < 100:
             print(f"[WARN] chunk_size={self.chunk_size} invalid, using 1000", file=sys.stderr)
             self.chunk_size = 1000
@@ -898,6 +903,12 @@ class Config:
         if type(self.ef_search) is not int or self.ef_search < 1:
             print(f"[WARN] ef_search={self.ef_search!r} invalid, using {DEFAULT_EF_SEARCH}", file=sys.stderr)
             self.ef_search = DEFAULT_EF_SEARCH
+        if not isinstance(self.repair_unreachable_chunks, bool):
+            print(
+                f"[WARN] repair_unreachable_chunks={self.repair_unreachable_chunks!r} invalid, using True",
+                file=sys.stderr,
+            )
+            self.repair_unreachable_chunks = True
 
     def _validate_indexing(self) -> None:
         """v4.8.0 Fase 3 — clamp batch_size [1,5000] and parallel_workers [1,16].

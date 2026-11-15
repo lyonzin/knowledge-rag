@@ -312,6 +312,25 @@ search:
   # (preserves prior behavior).
   ef_search: 100
 
+  # Repair chunks the vector index cannot reach (GH #313). A query for a
+  # chunk's own stored vector does not always return the chunk, and then no
+  # semantic search finds it (self_recall in get_index_stats() below 1.0).
+  # After each indexing operation — a reindex pass, a watcher pass,
+  # add_document, update_document, add_from_url — the chunks it wrote are
+  # checked that way, and the unreachable ones are updated in place with the
+  # vector they already hold, which makes the index link them again. The
+  # chunk stays in the collection and nothing is embedded again. Linking one
+  # chunk again can cost another its links, so the chunks are checked up to
+  # 3 times; the reindex stats report unreachable_chunks_repaired and
+  # unreachable_chunks_remaining. On a 70,752-chunk index of a real corpus,
+  # the three checks of a full pass took the unreachable chunks from 4.7% to
+  # 0.1%, and one check of all chunks took 11 to 13 s. Only chunks the
+  # operation wrote are checked, and indexes with fewer than 1,000 chunks
+  # are not checked at all. A check that cannot run is a warning on stderr
+  # and never fails the operation. Set to false to switch the check off.
+  # Default: true.
+  repair_unreachable_chunks: true
+
   # -----------------------------------------------------------------------
   # FTS5 Lexical Fast-Path (v4.8.2+, opt-in — default OFF pending v4.9.0)
   # -----------------------------------------------------------------------

@@ -187,6 +187,76 @@ Do not delete the data directory to resolve a generic opening error. Collection
 initialization now preserves stored data and reports the failure so permissions,
 model mismatches and storage errors can be investigated.
 
+## Repair of unreachable chunks (GH #313)
+
+A query for a chunk's own stored vector does not always return the chunk: the
+HNSW graph can leave a vector that no search path leads to, and then no semantic
+search finds that chunk. `self_recall` in `get_index_stats()` reports the
+symptom. How many chunks end up like that depends on the order in which the
+documents are written. A pass of the server writes them in the order of its
+folder scan, and on a 70,752-chunk index of a real corpus that left 4.4% of the
+chunks unreachable; the same vectors written in random order left 0.59%.
+
+Every operation that writes chunks ends by checking the chunks it wrote: a
+reindex pass, a watcher pass, the staging pass of a full rebuild (before
+validation and swap), `add_document`, `update_document` and `add_from_url`. A
+chunk counts as reachable when a query by its own stored vector returns its id
+among the 10 nearest, or returns a first result at distance zero: another id
+then holds the same vector, and the `self_recall` probe counts that the same
+way. An unreachable chunk is updated in place with the vector it already holds,
+which makes ChromaDB compute its links in the graph again. The chunk never
+leaves the collection, nothing is embedded again, and BM25 and FTS5 are left as
+they are: ids and texts do not change.
+
+Linking a chunk again can cost other chunks their links, so every chunk of the
+operation is checked again after a round of updates, up to three checks and two
+rounds per operation. Unreachable chunks at each check, on collections built
+straight on ChromaDB 1.5.9 from the vectors of that index (default HNSW
+parameters, one upsert per document) and checked by another process:
+
+| Documents written | Check 1 | Check 2 | Check 3 | A new process afterwards |
+| --- | --- | --- | --- | --- |
+| In the order of the server's folder scan | 3,109 (4.39%) | 272 (0.38%) | 63 (0.09%) | 108 (0.15%) |
+| In random order | 418 (0.59%) | 88 (0.12%) | 34 (0.05%) | 51 (0.07%) |
+
+A pass of the server itself over that corpus found 3,303, 311 and 73
+unreachable chunks at its three checks. Two runs through the MCP tools, an
+initial pass and a full rebuild each, reported 3,015 to 3,960 chunks repaired
+and 55 to 72 remaining per pass, and a new process then found 109 and 146
+unreachable chunks (0.15% and 0.21%).
+
+One check of all 70,752 chunks took 11 to 13 seconds, about 0.17 ms per chunk
+and check; the updates took under a second. The counts move from one build of
+the same vectors to the next: five builds in random order ended their third
+check between 34 and 88 chunks. The last column is the same check from a new
+process: ChromaDB saves the graph after every 1,000 records written and applies
+the later ones again when it opens the collection, so a restart does not load
+exactly the graph the running process had.
+
+The checks run after the last document of a pass, with the index lock held:
+writes wait until they end, searches do not, and `get_reindex_status()` can
+show every file as processed while the pass is still active. An operation that
+checks more than 500 chunks writes an `[INDEX] Checking ...` line to stderr
+before the first check.
+
+`last_result` of `get_reindex_status()` reports `unreachable_chunks_repaired`
+and `unreachable_chunks_remaining`. The second is what the last check still
+found, or `null` when no check completed: the switch is off, the index has
+fewer than 1,000 chunks, the operation wrote nothing, or a check could not run.
+An operation whose checks found any and completed writes one
+`[INDEX] Repaired ...` line to stderr. A check or an update that cannot run is
+one `[WARN]` line on stderr, which names the error; it does not fail the
+operation, which keeps every chunk it wrote.
+
+- Only the chunks an operation wrote are checked. Chunks indexed by an earlier
+  version, or by a pass that was interrupted, are checked when they are written
+  again: `reindex_documents(force=True)` or `reindex_documents(full_rebuild=True)`.
+- An update can cost a chunk the operation did not write its links, and such a
+  chunk is not checked. `self_recall` in `get_index_stats()` measures the index
+  as a whole.
+- An index with fewer than 1,000 chunks is not checked.
+- `search.repair_unreachable_chunks: false` switches the check off.
+
 ## Changing `search.ef_search` requires a rebuild (GH #287)
 
 `search.ef_search` sets the HNSW search-time exploration depth when a collection
