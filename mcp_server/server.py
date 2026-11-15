@@ -2196,6 +2196,9 @@ class KnowledgeOrchestrator:
             "chunks_removed": 0,
             "dedup_skipped": 0,
             "orphan_chunks_removed": 0,
+            "unreachable_chunks_repaired": 0,
+            # GH #313: None until a reachability check of this run has completed.
+            "unreachable_chunks_remaining": None,
             "categories": {},
         }
 
@@ -2393,6 +2396,8 @@ class KnowledgeOrchestrator:
             "chunks_processed": chunks_processed,
             "throughput_window": deque(maxlen=100),
             "chunks_total_estimate": chunks_total_estimate,
+            # GH #313: ids this run wrote, checked for reachability when it ends.
+            "written_chunk_ids": [],
         }
 
     def _seed_chunks_total_estimate(self, stats: Dict[str, Any]) -> int:
@@ -2455,6 +2460,8 @@ class KnowledgeOrchestrator:
             if repair_ids is not None:
                 self._remove_repair_chunks(source, [value for value in repair_ids if value != existing_doc_id])
             chunks_added, dedup_skipped, removed = self._replace_document_chunks(doc, existing_doc_id)
+            if config.repair_unreachable_chunks:
+                tracking["written_chunk_ids"].extend(self._dedup_chunks(doc)[0])
             stats["chunks_removed"] += removed
             if existing_doc_id:
                 stats["updated"] += 1
@@ -2675,7 +2682,7 @@ class KnowledgeOrchestrator:
             )
 
     def _finalize_reindex(self, stats: Dict[str, Any], tracking: Dict[str, Any]) -> Dict[str, Any]:
-        """Flush metadata, clear checkpoint (if applicable), invalidate query cache."""
+        """Flush metadata, settle the checkpoint, repair unreachable chunks, invalidate query cache."""
         self._save_metadata()
         self._finish_document_repairs(tracking.get("repaired_sources", set()))
 
@@ -2691,6 +2698,10 @@ class KnowledgeOrchestrator:
                 )
             else:
                 self._clear_checkpoint()
+
+        # GH #313: after the checkpoint, which the checks do not change. A process
+        # that dies during them must not leave the checkpoint of a finished run.
+        stats.update(self._repair_unreachable_chunks(tracking["written_chunk_ids"]))
 
         if stats["indexed"] > 0 or stats["updated"] > 0 or stats["deleted"] > 0 or stats["orphan_chunks_removed"] > 0:
             self._invalidate_caches()
@@ -3009,6 +3020,103 @@ class KnowledgeOrchestrator:
             self._fts5_sync_remove_ids(results["ids"])
             return len(results["ids"])
         return 0
+
+    # GH #313: a chunk is reachable when a query by its own stored vector
+    # returns it among this many nearest neighbors.
+    _REACHABILITY_NEIGHBORS = 10
+    # Linking a chunk again can cost other chunks their links, so every chunk
+    # is checked again after a round. The last check only reports.
+    _REACHABILITY_MAX_CHECKS = 3
+    # shortcut: no check below 1,000 catalogued chunks, revisit if an index
+    # that small reports self_recall below 1.0 in get_index_stats
+    _REACHABILITY_MIN_CHUNKS = 1000
+
+    def _repair_unreachable_chunks(self, chunk_ids: List[str]) -> Dict[str, Optional[int]]:
+        """Check the chunks an operation wrote and link the unreachable ones again (GH #313).
+
+        The HNSW index can leave a vector that no search path leads to: a
+        query by the chunk's own vector does not return it, and neither does
+        any semantic search. Such a chunk is updated with the vector it holds,
+        see ``_relink_chunks``. Ids and texts stay as they are, and BM25 and
+        FTS5 hold nothing else, so neither is touched. The caller holds the
+        index lock.
+
+        Returns the two reindex stats, or nothing when no check is due. Never
+        raises: the operation has written its chunks by now, so a check or an
+        update that cannot run is a warning, not a failure of the operation.
+        The count of remaining chunks is then None: no completed check stands
+        behind a number.
+        """
+        if not chunk_ids or not config.repair_unreachable_chunks:
+            return {}
+        if sum(info.get("chunks", 0) for info in self._indexed_docs.values()) < self._REACHABILITY_MIN_CHUNKS:
+            return {}
+        # One repeated id makes ChromaDB reject the whole get() or update().
+        chunk_ids = list(dict.fromkeys(chunk_ids))
+        if len(chunk_ids) > self._CHROMA_BATCH_SIZE:
+            # Minutes on a large pass, after its last document: say what it is doing.
+            print(f"[INDEX] Checking {len(chunk_ids)} chunks for reachability...", file=sys.stderr)
+        found: set[str] = set()
+        unreachable: List[str] = []
+        remaining: Optional[int] = None
+        try:
+            for check in range(1, self._REACHABILITY_MAX_CHECKS + 1):
+                unreachable = self._find_unreachable_chunks(chunk_ids)
+                found.update(unreachable)
+                if not unreachable or check == self._REACHABILITY_MAX_CHECKS:
+                    break
+                self._relink_chunks(unreachable)
+            remaining = len(unreachable)
+        except Exception as exc:
+            print(
+                "[WARN] Repair of unreachable chunks (search.repair_unreachable_chunks) did not finish, "
+                f"the operation itself is complete: {self._failure_reason(exc)}",
+                file=sys.stderr,
+            )
+        # After a failure, ``unreachable`` is the answer of the last check that returned.
+        repaired = len(found) - len(unreachable)
+        if found:
+            self._invalidate_caches()
+        if found and remaining is not None:
+            print(f"[INDEX] Repaired {repaired} unreachable chunks, {remaining} remaining", file=sys.stderr)
+        return {"unreachable_chunks_repaired": repaired, "unreachable_chunks_remaining": remaining}
+
+    def _find_unreachable_chunks(self, chunk_ids: List[str]) -> List[str]:
+        """Chunks that a query by their own stored vector does not return.
+
+        A first result at distance zero counts as found: another id holds the
+        same vector, and the self_recall probe counts it the same way. Ids the
+        collection does not hold are skipped.
+        """
+        target = self._write_collection
+        unreachable: List[str] = []
+        for start in range(0, len(chunk_ids), self._CHROMA_BATCH_SIZE):
+            held = target.get(ids=chunk_ids[start : start + self._CHROMA_BATCH_SIZE], include=["embeddings"])
+            if not held["ids"]:
+                continue
+            nearest = target.query(
+                query_embeddings=held["embeddings"],
+                n_results=self._REACHABILITY_NEIGHBORS,
+                include=["distances"],
+            )
+            for chunk_id, row, distances in zip(held["ids"], nearest["ids"], nearest["distances"]):
+                if chunk_id not in row and not (distances and distances[0] <= _SELF_RECALL_TIE_EPSILON):
+                    unreachable.append(chunk_id)
+        return unreachable
+
+    def _relink_chunks(self, chunk_ids: List[str]) -> None:
+        """Update chunks with the vector they already hold, so that the index links them again.
+
+        ChromaDB applies the update of a known id by adding its label to the
+        HNSW graph once more, which recomputes its links. The chunk never
+        leaves the collection, so there is nothing to put back when a call
+        fails. Only ids and vectors are sent, and nothing is embedded.
+        """
+        target = self._write_collection
+        for start in range(0, len(chunk_ids), self._CHROMA_BATCH_SIZE):
+            held = target.get(ids=chunk_ids[start : start + self._CHROMA_BATCH_SIZE], include=["embeddings"])
+            if held["ids"]:
+                target.update(ids=held["ids"], embeddings=held["embeddings"])
 
     def start_reindex_background(
         self,
@@ -4614,6 +4722,7 @@ class KnowledgeOrchestrator:
                 self._rollback_content_document(doc, old_id, old_info, previous)
                 raise
             staged.committed = True
+        self._repair_unreachable_chunks(self._dedup_chunks(doc)[0])
         self._invalidate_caches()
         return {
             "new_chunks_added": added,

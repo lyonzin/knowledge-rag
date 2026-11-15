@@ -146,6 +146,8 @@ Get the current status of a background reindex operation. Lightweight — does n
 }
 ```
 
+`last_result` also reports `unreachable_chunks_repaired` and `unreachable_chunks_remaining` (GH #313). Both count chunks the run wrote that a query by their own stored vector did not return: the first those that became reachable after being updated in place with the vector they hold, the second those the last check still did not find. `unreachable_chunks_remaining` is `null` when no check completed: the switch is off, the index has fewer than 1,000 chunks, the run wrote nothing, or a check could not run (the server's stderr then has a `[WARN]` line). See [Repair of unreachable chunks](reindex-operations.md#repair-of-unreachable-chunks-gh-313).
+
 ---
 
 #### `list_categories`
@@ -231,7 +233,10 @@ below 1.0 means some chunks cannot find themselves: raise `search.ef_search` in
 empty index, a reindex in progress (the `reindex.active` field in the same payload
 disambiguates; the probe is skipped while a reindex runs), or a probe failure, which
 adds an `error` field. The probe is cached for 300 seconds and recomputed after every
-index mutation.
+index mutation. An indexing operation queries the chunks it wrote by their own stored
+vector too, and updates in place the ones that are not returned
+(`search.repair_unreachable_chunks`, GH #313); chunks written before that stay as they
+are until they are written again.
 
 `hnsw_ef_search` is the value ChromaDB actually applies to the live collection. It only
 changes when a collection is created, so it can lag behind `search.ef_search` in
