@@ -1032,6 +1032,15 @@ class CrossEncoderReranker:
             print(f"[INFO] Loading reranker model: {self.model_name}...", file=sys.stderr)
             try:
                 providers = self._providers()
+                # GH #317: register NVIDIA CUDA 12 pip-package DLL paths before
+                # the first ORT session is built. The embedding model does this
+                # inside _load_model, but when the first search is keyword-only
+                # the reranker is created first and cudnn64_9.dll is not yet on
+                # PATH, which breaks every subsequent cuDNN call with
+                # RequireCudnnHandle until the process restarts. Idempotent —
+                # skips dirs already on PATH.
+                if _CUDA_PROVIDER in providers:
+                    FastEmbedEmbeddings._setup_cuda_dll_paths()
                 model = TextCrossEncoder(
                     model_name=self.model_name, cache_dir=str(config.models_cache_dir), providers=providers
                 )
