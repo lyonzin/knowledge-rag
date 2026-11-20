@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 
 def test_reranker_registers_cuda_dll_paths_before_session(monkeypatch):
-    from mcp_server.server import CrossEncoderReranker, _CUDA_PROVIDER
+    from mcp_server.server import _CUDA_PROVIDER, CrossEncoderReranker
 
     monkeypatch.setattr("mcp_server.server.config.reranker_enabled", True)
 
