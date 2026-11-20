@@ -1835,6 +1835,12 @@ class KnowledgeOrchestrator:
         # admits one background refresh at a time.
         self._bm25_stale = threading.Event()
         self._bm25_refresh_lock = threading.Lock()
+        # GH #316: observable status for get_index_stats and silent-degradation
+        # detection. _bm25_last_built_at is epoch seconds of the last publish,
+        # _bm25_last_error carries the last failure reason truncated to 200
+        # chars; both None until the first attempt completes.
+        self._bm25_last_built_at: Optional[float] = None
+        self._bm25_last_error: Optional[str] = None
 
         # Cross-encoder reranker (lazy-loaded on first query)
         self.reranker = CrossEncoderReranker()
@@ -2076,6 +2082,44 @@ class KnowledgeOrchestrator:
         if stale is not None:
             stale.clear()
 
+    def _get_bm25_status(self) -> Dict[str, Any]:
+        """Observable BM25 state for get_index_stats (GH #316).
+
+        ``status`` reflects the last attempt:
+          - ``ready``    — a generation is published and not marked stale.
+          - ``stale``    — a generation is published but writes left it behind;
+                           queries use it while a refresh runs.
+          - ``building`` — the build lock is held right now.
+          - ``empty``    — collection has no chunks yet.
+          - ``failed``   — last attempt raised, ``error`` carries the reason.
+          - ``pending``  — no attempt yet, no error.
+        Callers reading this never block on the build lock.
+        """
+        acquired = self._bm25_build_lock.acquire(blocking=False)
+        try:
+            if not acquired:
+                status = "building"
+            elif self._bm25_last_error is not None and not self._bm25_initialized:
+                status = "failed"
+            elif self._bm25_initialized:
+                status = "stale" if self._bm25_stale.is_set() else "ready"
+            elif self.collection.count() == 0:
+                status = "empty"
+            else:
+                status = "pending"
+        except Exception:
+            status = "pending"
+        finally:
+            if acquired:
+                self._bm25_build_lock.release()
+        return {
+            "status": status,
+            "chunk_count": len(self.bm25_index),
+            "last_built_at": self._bm25_last_built_at,
+            "stale": self._bm25_stale.is_set(),
+            "error": self._bm25_last_error,
+        }
+
     def _rebuild_bm25_from_collection(self, refresh: bool = False) -> None:
         """Read stable Chroma pages while holding the mutation lock, then publish.
 
@@ -2094,6 +2138,7 @@ class KnowledgeOrchestrator:
                     # call retries once documents become available.
                     self.bm25_index.clear()
                     self._bm25_initialized = False
+                    self._bm25_last_error = None
                     return
                 if count > self._BM25_INLINE_REFRESH_CHUNKS:
                     # Minutes of work that searches no longer wait for: say it started.
@@ -2108,19 +2153,57 @@ class KnowledgeOrchestrator:
                 for offset in range(0, count, batch_size):
                     batch = self.collection.get(include=["documents"], limit=batch_size, offset=offset)
                     if not batch.get("ids"):
+                        # GH #316: an empty page mid-build used to return silently,
+                        # leaving ``_bm25_initialized=False`` with no log. The whole
+                        # multi-minute rebuild then ran again on the next search and
+                        # nothing explained why. Two legitimate causes: the watcher
+                        # shrank the collection concurrently, or a transient Chroma
+                        # read. Re-query the size; if it legitimately shrank below
+                        # ``offset`` publish the partial so searches get keyword
+                        # matches for the chunks that still exist, otherwise log
+                        # and abandon the attempt — the next query retries.
+                        try:
+                            current = self.collection.count()
+                        except Exception as exc:
+                            print(
+                                f"[WARN] BM25 build: empty page at offset {offset} and count re-read failed ({exc}); "
+                                "abandoning this attempt, next query retries.",
+                                file=sys.stderr,
+                            )
+                            self._bm25_last_error = f"empty page at offset {offset}: {exc}"
+                            self._bm25_initialized = False
+                            return
+                        if current <= offset:
+                            print(
+                                f"[INFO] BM25 build: collection shrank from {count} to {current} during build; "
+                                f"publishing {len(self.bm25_index.corpus)} chunks seen so far.",
+                                file=sys.stderr,
+                            )
+                            break
+                        print(
+                            f"[WARN] BM25 build: empty page at offset {offset} (collection still has {current} chunks); "
+                            "abandoning this attempt, next query retries.",
+                            file=sys.stderr,
+                        )
+                        self._bm25_last_error = f"empty page at offset {offset}, expected≈{current}"
+                        self._bm25_initialized = False
                         return
                     self.bm25_index.add_documents(batch["ids"], batch["documents"] or [])
                 if not self.bm25_index.corpus:
+                    self._bm25_initialized = False
                     return
 
                 self.bm25_index.build_index()
                 print(f"[INFO] BM25 index built with {len(self.bm25_index)} documents", file=sys.stderr)
                 self._bm25_initialized = True
+                self._bm25_last_built_at = time.time()
+                self._bm25_last_error = None
                 # The caller holds the index lock, so no write can land between
                 # the pages read above and this point.
                 self._clear_bm25_stale()
             except Exception as e:
                 print(f"[WARN] Failed to build BM25 index: {e}", file=sys.stderr)
+                self._bm25_last_error = str(e)[:200]
                 # Do not mark initialized; retry allowed on next call.
 
     # =========================================================================
@@ -5065,6 +5148,7 @@ class KnowledgeOrchestrator:
             "query_cache": self.query_cache.stats(),
             "self_recall": self._get_self_recall_cached(),
             "hnsw_ef_search": self._effective_ef_search(),
+            "bm25": self._get_bm25_status(),
         }
 
         progress = self._reindex_progress
@@ -6491,6 +6575,19 @@ def main():
                     "[INFO] Initial indexing runs in background. Track progress with get_reindex_status.",
                     file=sys.stderr,
                 )
+            else:
+                # GH #316: pre-warm BM25 on a background thread so a hybrid
+                # search landing seconds after startup on a large index does
+                # not silently degrade to semantic-only while the first
+                # keyword query waits for the multi-minute inline or
+                # background build. Daemon thread — the stdio `initialize`
+                # handshake is never blocked. Idempotent against the first
+                # search's _ensure_bm25_index_or_refresh via _bm25_initialized.
+                threading.Thread(
+                    target=orchestrator._ensure_bm25_index,
+                    name="bm25-prewarm",
+                    daemon=True,
+                ).start()
 
             # Start file watcher for auto-reindex on document changes
             if os.environ.get("KNOWLEDGE_RAG_WATCHER_DISABLED", "").strip() == "1":
