@@ -78,6 +78,11 @@ def isolated_orchestrator(tmp_path, monkeypatch):
     orch.parser = DocumentParser()
     orch.bm25_index = server.BM25Index()
     orch._bm25_initialized = False
+    # GH #316: status fields consumed by _rebuild_bm25_from_collection and
+    # _get_bm25_status. The real __init__ sets these; fixtures that bypass
+    # __init__ via object.__new__ must mirror that.
+    orch._bm25_last_built_at = None
+    orch._bm25_last_error = None
     orch._indexed_docs = {}
     orch._source_to_docid = {}
     orch.query_cache = server.QueryCache()

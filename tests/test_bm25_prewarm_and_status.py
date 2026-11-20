@@ -19,14 +19,6 @@ import time
 from unittest.mock import patch
 
 
-def _prime_bm25_fields(orch):
-    """Add the status fields the fix introduces when the fixture skipped __init__."""
-    if not hasattr(orch, "_bm25_last_built_at"):
-        orch._bm25_last_built_at = None
-    if not hasattr(orch, "_bm25_last_error"):
-        orch._bm25_last_error = None
-
-
 def _seed_chunks(orch, ids_and_text):
     """Add synthetic chunks directly to the fixture collection and corpus."""
     ids = [cid for cid, _ in ids_and_text]
@@ -38,7 +30,6 @@ def _seed_chunks(orch, ids_and_text):
 def test_rebuild_logs_when_empty_page_with_chunks_remaining(isolated_orchestrator, capsys):
     """count says N but a page returns no ids: must log and abandon loudly."""
     orch = isolated_orchestrator
-    _prime_bm25_fields(orch)
     _seed_chunks(orch, [("c1", "alpha payload"), ("c2", "beta payload")])
 
     real_get = orch.collection.get
@@ -63,7 +54,6 @@ def test_rebuild_logs_when_empty_page_with_chunks_remaining(isolated_orchestrato
 def test_rebuild_publishes_partial_when_collection_shrank(isolated_orchestrator, capsys):
     """Watcher deleted docs mid-build: publish what we already read, logged."""
     orch = isolated_orchestrator
-    _prime_bm25_fields(orch)
     _seed_chunks(orch, [("c1", "alpha payload")])
 
     count_calls = {"n": 0}
@@ -93,7 +83,6 @@ def test_rebuild_publishes_partial_when_collection_shrank(isolated_orchestrator,
 
 def test_get_stats_exposes_bm25_status_on_empty(isolated_orchestrator):
     orch = isolated_orchestrator
-    _prime_bm25_fields(orch)
     stats = orch.get_stats()
     assert "bm25" in stats
     bm25 = stats["bm25"]
@@ -106,7 +95,6 @@ def test_get_stats_exposes_bm25_status_on_empty(isolated_orchestrator):
 
 def test_get_stats_bm25_ready_after_build(isolated_orchestrator):
     orch = isolated_orchestrator
-    _prime_bm25_fields(orch)
     _seed_chunks(orch, [("c1", "hello world payload")])
     orch._ensure_bm25_index()
     bm25 = orch.get_stats()["bm25"]
