@@ -116,9 +116,10 @@ constant-memory. BM25 retains corpus data in memory, while ChromaDB and FTS5
 also use native/database caches. Process RSS therefore includes more than Python
 allocations tracked by `tracemalloc`.
 
-Mutating operations are coordinated within one orchestrator. The optional
-single-instance lock addresses multiple server processes sharing a data
-directory. It is a different boundary from threads inside one process.
+Mutating operations are coordinated within one orchestrator. The single-owner
+lock ([single-instance.md](single-instance.md)) addresses multiple server
+processes sharing a data directory: only one of them opens the index. It is a
+different boundary from threads inside one process.
 Read queries during mutation may observe an earlier or later published state;
 clients should not assume a transaction across separate MCP calls.
 

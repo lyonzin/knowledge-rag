@@ -40,7 +40,7 @@ from copy import copy, deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 # ChromaDB
 import chromadb
@@ -63,7 +63,8 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 # Local imports
-from . import __version__
+from . import __version__, _index_access, _writer_role
+from ._writer_role import index_tool
 from .config import config
 from .file_transaction import replace_with_retry, staged_text_file
 from .filesystem import io_path, resolve_path
@@ -1993,42 +1994,13 @@ class KnowledgeOrchestrator:
         return True
 
     def _check_dimension_mismatch(self) -> bool:
-        """Check if stored embeddings have different dimension than current config.
-
-        Prefers cached metadata (``self._indexed_docs[*]["embedding_dim"]``) to
-        avoid triggering an embed on cold start — the previous behavior fired
-        ``collection.query(query_texts=[...])`` which force-loads the model
-        (bge-small ~1s CPU, but with GPU probe + CUDA init on v4.8.0 easily
-        pushes the MCP handshake past its 30s timeout). Falls back to the
-        query path only for legacy chunks indexed before this field existed;
-        those chunks get ``embedding_dim`` backfilled on their next re-index.
-        """
+        """Read one stored vector, not the catalog or a freshly computed embedding. By Lyon."""
         if self.collection.count() == 0:
             return False
-        # Fast path: check cached metadata (no embed, no model load)
-        for entry in self._indexed_docs.values():
-            cached_dim = entry.get("embedding_dim")
-            if cached_dim is not None:
-                if cached_dim != config.embedding_dim:
-                    print(
-                        f"[MIGRATION] Embedding dim mismatch (cached): "
-                        f"stored={cached_dim} config={config.embedding_dim}",
-                        file=sys.stderr,
-                    )
-                    print("[MIGRATION] Nuclear rebuild required.", file=sys.stderr)
-                    return True
-                return False  # first cached hit is authoritative
-        # Legacy fallback: no cached dim → query the collection (embeds once)
-        try:
-            self.collection.query(query_texts=["dimension check"], n_results=1, include=["documents"])
-            return False
-        except Exception as e:
-            if "dimension" in str(e).lower():
-                print(f"[MIGRATION] Embedding dimension mismatch detected: {e}", file=sys.stderr)
-                print("[MIGRATION] Nuclear rebuild required.", file=sys.stderr)
-                return True
-            print(f"[WARN] Dimension check query failed (non-dimension error): {e}", file=sys.stderr)
-            return False
+        embeddings = self.collection.get(limit=1, include=["embeddings"])["embeddings"]
+        if embeddings is None or len(embeddings) != 1 or len(embeddings[0]) == 0:
+            raise RuntimeError("Could not read the stored embedding dimension from a populated collection.")
+        return len(embeddings[0]) != config.embedding_dim
 
     _bm25_build_lock = threading.Lock()
 
@@ -2764,7 +2736,7 @@ class KnowledgeOrchestrator:
             "indexed_at": datetime.now().isoformat(),
             "file_mtime": file_mtime,
             "file_size": file_size,
-            "embedding_dim": config.embedding_dim,  # avoids cold-start embed in _check_dimension_mismatch
+            "embedding_dim": config.embedding_dim,
         }
         self._source_to_docid[str(doc.source.resolve())] = doc.id
 
@@ -5762,12 +5734,24 @@ _orchestrator_lock = threading.Lock()
 
 
 def get_orchestrator() -> KnowledgeOrchestrator:
-    """Get or create the orchestrator instance"""
+    """The open index, for tools, probes and the watcher: it never opens it during the startup.
+
+    Raises ``_writer_role.IndexNotReady`` until the owner's startup has opened
+    and prepared the index, after that startup failed, and always in a
+    follower, which never opens it; the tool decorator turns that into a
+    "repairing" or "error" answer. Code that never runs main() (the library,
+    tests) sees the index as ready and opens it on first use.
+    """
+    _writer_role.raise_unless_index_ready()
+    return _orchestrator if _orchestrator is not None else _open_orchestrator()
+
+
+def _open_orchestrator() -> KnowledgeOrchestrator:
+    """Build the one orchestrator, past the readiness gate: the owner's startup and main()-less use. By Lyon."""
     global _orchestrator
-    if _orchestrator is None:
-        with _orchestrator_lock:
-            if _orchestrator is None:
-                _orchestrator = KnowledgeOrchestrator()
+    with _orchestrator_lock:
+        if _orchestrator is None:
+            _orchestrator = KnowledgeOrchestrator()
     return _orchestrator
 
 
@@ -5803,6 +5787,7 @@ def _make_snippet(content: str, max_chars: int = 500) -> str:
 @mcp.tool()
 @rate_limited
 @instrument("search_knowledge")
+@index_tool
 def search_knowledge(
     query: str,
     max_results: int = 5,
@@ -5954,6 +5939,7 @@ def search_knowledge(
 @mcp.tool()
 @rate_limited
 @instrument("get_document")
+@index_tool
 def get_document(filepath: str) -> str:
     """
     Get the full content of a specific document by filepath.
@@ -6050,6 +6036,7 @@ def _format_reindex_response(mode: str, result: Dict[str, Any]) -> str:
 @mcp.tool()
 @rate_limited
 @instrument("reindex_documents")
+@index_tool
 def reindex_documents(
     force: bool = False,
     full_rebuild: bool = False,
@@ -6087,6 +6074,7 @@ def reindex_documents(
 @mcp.tool()
 @rate_limited
 @instrument("get_reindex_status")
+@index_tool
 def get_reindex_status() -> str:
     """
     Get the current status of a background reindex operation.
@@ -6114,6 +6102,7 @@ def get_reindex_status() -> str:
 @mcp.tool()
 @rate_limited
 @instrument("list_categories")
+@index_tool
 def list_categories() -> str:
     """
     List all document categories with their document counts.
@@ -6142,6 +6131,7 @@ _LIST_DOCUMENTS_MAX_LIMIT = 200  # ~75 KB of JSON: stays under common MCP client
 @mcp.tool()
 @rate_limited
 @instrument("list_documents")
+@index_tool
 def list_documents(category: Optional[str] = None, limit: int = 100, offset: int = 0) -> str:
     """
     List indexed documents one page at a time, optionally filtered by category.
@@ -6191,6 +6181,7 @@ def list_documents(category: Optional[str] = None, limit: int = 100, offset: int
 @mcp.tool()
 @rate_limited
 @instrument("get_index_stats")
+@index_tool
 def get_index_stats() -> str:
     """
     Get statistics and health metrics for the knowledge base index.
@@ -6224,6 +6215,7 @@ def get_index_stats() -> str:
 @mcp.tool()
 @rate_limited
 @instrument("add_document")
+@index_tool
 def add_document(content: str, filepath: str, category: str = "general") -> str:
     """
     Add a new document to the knowledge base from raw text content.
@@ -6263,6 +6255,7 @@ def add_document(content: str, filepath: str, category: str = "general") -> str:
 @mcp.tool()
 @rate_limited
 @instrument("update_document")
+@index_tool
 def update_document(filepath: str, content: str) -> str:
     """
     Update the content of an existing document in the knowledge base.
@@ -6301,6 +6294,7 @@ def update_document(filepath: str, content: str) -> str:
 @mcp.tool()
 @rate_limited
 @instrument("remove_document")
+@index_tool
 def remove_document(filepath: str, delete_file: bool = False) -> str:
     """
     Remove a document from the knowledge base index.
@@ -6337,6 +6331,7 @@ def remove_document(filepath: str, delete_file: bool = False) -> str:
 @mcp.tool()
 @rate_limited
 @instrument("add_from_url")
+@index_tool
 def add_from_url(url: str, category: str = "general", title: Optional[str] = None) -> str:
     """
     Fetch content from a URL, convert to markdown, and add to the knowledge base.
@@ -6380,6 +6375,7 @@ def add_from_url(url: str, category: str = "general", title: Optional[str] = Non
 @mcp.tool()
 @rate_limited
 @instrument("search_similar")
+@index_tool
 def search_similar(filepath: str, max_results: int = 5) -> str:
     """
     Find documents semantically similar to a given reference document.
@@ -6448,6 +6444,7 @@ def _validate_retrieval_cases(test_cases: Any) -> None:
 @mcp.tool()
 @rate_limited
 @instrument("evaluate_retrieval")
+@index_tool
 def evaluate_retrieval(test_cases: str) -> str:
     """
     Evaluate search quality by testing whether search_knowledge() retrieves expected documents.
@@ -6594,7 +6591,7 @@ def _run_transport(transport: str) -> None:
         served = HealthMiddleware(app, get_orchestrator)
     else:
         guarded = BearerAuthMiddleware(app, token)
-        # HealthMiddleware wraps the bearer app so /health probes bypass auth
+        # HealthMiddleware wraps the bearer app so /health, /healthz and /readyz bypass auth
         # (matches BearerAuthMiddleware.exempt_paths). Order matters: health
         # first, then bearer — a probe never reaches the auth layer.
         served = HealthMiddleware(guarded, get_orchestrator)
@@ -6604,7 +6601,8 @@ def _run_transport(transport: str) -> None:
         )
 
     print(
-        f"[HEALTH] Probe endpoint at http://{config.server_host}:{config.server_port}/health",
+        f"[HEALTH] Liveness at http://{config.server_host}:{config.server_port}/health, "
+        f"readiness at http://{config.server_host}:{config.server_port}/readyz",
         file=sys.stderr,
     )
     uvicorn.run(served, host=config.server_host, port=config.server_port)
@@ -6625,6 +6623,139 @@ def _resolve_transport(arguments: Sequence[str]) -> str:
     return transport
 
 
+#: The owner's background startup (see _start_writer_startup); tests join it.
+_startup_thread: Optional[threading.Thread] = None
+
+
+def _start_writer_startup(run_preflight: Callable[[], bool]) -> None:
+    """Check and open the index on a thread, so the transport answers first.
+
+    A stdio client kills a server that has not answered ``initialize`` within
+    about 30 s, long before a damaged index is repaired. Tools answer
+    "repairing" until the check passes. By Lyon.
+    """
+    global _startup_thread
+    _writer_role.STATE.ready.clear()
+    _startup_thread = threading.Thread(
+        target=_writer_startup, args=(run_preflight,), name="writer-startup", daemon=True
+    )
+    _startup_thread.start()
+
+
+def _writer_startup(run_preflight: Callable[[], bool]) -> None:
+    """The owner's startup that used to delay the handshake: check, open, prepare, then ready.
+
+    Runs at start or when a follower takes over; only this process holds
+    data_dir, and its index access guard keeps any probe out while it opens.
+    Tools answer "repairing" until the index is open and prepared, embedding
+    migration included; the initial indexing and the BM25 pre-warm go on in
+    the background. A failure ends in STATE.failure, never through ready. By Lyon.
+    """
+    try:
+        if not _writer_role.run_startup_check(run_preflight):
+            return
+        orchestrator = _open_index_or_log()
+        if orchestrator is None:
+            return
+        _prepare_index(orchestrator)
+        _writer_role.STATE.ready.set()
+        _start_watcher()
+    except BaseException as exc:  # a SystemExit or native PanicException ends only this thread
+        _writer_role.record_failure(f"Index startup failed: {exc!r}", exc)
+
+
+def _open_index_or_log() -> Optional[KnowledgeOrchestrator]:
+    """Open the owner's index under its access guard; a failure becomes every tool's "error". By Lyon."""
+    try:
+        _index_access.hold()  # already held after the real preflight
+        return _open_orchestrator()
+    except Exception as exc:
+        _writer_role.record_failure(f"Could not open the index in {config.data_dir}: {exc}", exc)
+        return None
+
+
+def _prepare_index(orchestrator: KnowledgeOrchestrator) -> None:
+    """Migrate the embedding, start the initial indexing or pre-warm BM25."""
+    # Migration: check dimension mismatch AFTER full init (avoids segfault during __init__)
+    orchestrator._needs_rebuild = orchestrator._check_dimension_mismatch()
+    if orchestrator._needs_rebuild:
+        _rebuild_for_new_embedding(orchestrator)
+    elif orchestrator.collection.count() == 0:
+        # GH #216: initial indexing runs in a background thread so it
+        # does not block the MCP `initialize` handshake. Blocking here
+        # for a large corpus (~150k chunks takes minutes) caused stdio
+        # clients to timeout, kill the process, and restart into an
+        # empty index — an endless full-reindex loop. Users poll
+        # get_reindex_status() to track progress.
+        print("[INFO] No documents indexed. Starting initial indexing in background...", file=sys.stderr)
+        orchestrator.start_reindex_background("incremental")
+        print(
+            "[INFO] Initial indexing runs in background. Track progress with get_reindex_status.",
+            file=sys.stderr,
+        )
+    else:
+        # GH #316: pre-warm BM25 on a background thread so a hybrid
+        # search landing seconds after startup on a large index does
+        # not silently degrade to semantic-only while the first
+        # keyword query waits for the multi-minute inline or
+        # background build. Daemon thread — the stdio `initialize`
+        # handshake is never blocked. GH #321: it takes the lock of
+        # any background build, so a keyword-only search arriving
+        # mid-build waits for it instead of reading an empty BM25.
+        orchestrator._start_bm25_background_build("bm25-prewarm")
+
+
+def _rebuild_for_new_embedding(orchestrator: KnowledgeOrchestrator) -> None:
+    """Rebuild after an embedding-model change; fall back to a forced index pass."""
+    print("[MIGRATION] Running nuclear rebuild for embedding model change...", file=sys.stderr)
+    try:
+        stats = orchestrator.nuclear_rebuild()
+    except Exception as exc:
+        print(f"[ERROR] Migration failed: {exc}", file=sys.stderr)
+        print("[FALLBACK] Attempting regular index instead...", file=sys.stderr)
+        stats = orchestrator.index_all(force=True)
+    if stats.get("errors") != 0 or stats.get("skipped_reason"):
+        raise RuntimeError(
+            f"Embedding migration incomplete: errors={stats.get('errors')}, skipped={stats.get('skipped_reason')}"
+        )
+    if orchestrator.collection.count() == 0 or orchestrator._check_dimension_mismatch():
+        raise RuntimeError(f"Embedding migration did not produce stored vectors of dimension {config.embedding_dim}.")
+    print(f"[MIGRATION] Rebuild complete: {stats['indexed']} docs, {stats['chunks_added']} chunks", file=sys.stderr)
+
+
+def _start_watcher() -> None:
+    """Start file watcher for auto-reindex on document changes (the owner only)."""
+    if os.environ.get("KNOWLEDGE_RAG_WATCHER_DISABLED", "").strip() == "1":
+        print("[WATCHER] Disabled via KNOWLEDGE_RAG_WATCHER_DISABLED=1", file=sys.stderr)
+        return
+    try:
+        watcher = DocumentWatcher(get_orchestrator, debounce_seconds=10.0)
+        observer = Observer()
+        observer.schedule(watcher, str(config.documents_dir), recursive=True)
+        observer.daemon = True
+        observer.start()
+        print(f"[WATCHER] Monitoring {config.documents_dir} for changes", file=sys.stderr)
+    except Exception as e:
+        print(f"[WARN] Failed to start file watcher: {e}", file=sys.stderr)
+        print("[WARN] Auto-reindexing disabled. Use reindex_documents tool manually.", file=sys.stderr)
+
+
+def _serve(transport: str) -> None:
+    """Start the optional metrics server, then block in the MCP transport."""
+    if config.metrics_enabled and config.transport != "stdio":
+        from .metrics import start_metrics_server
+
+        start_metrics_server(config.metrics_port)
+
+    if transport != "stdio":
+        print(
+            f"[SERVER] Starting {transport} server on {config.server_host}:{config.server_port}",
+            file=sys.stderr,
+        )
+
+    _run_transport(transport)
+
+
 def main():
     """Run the MCP server"""
     if len(sys.argv) > 1 and sys.argv[1] == "init":
@@ -6636,13 +6767,11 @@ def main():
         # SystemExit, not a return value: `python -m mcp_server.server` (the npx path) ignores main()'s result.
         raise SystemExit(skills_main(sys.argv[2:]))
 
-    from .instance_lock import (
-        ALREADY_RUNNING_EXIT_CODE,
-        AlreadyRunningError,
-        single_instance_lock,
-    )
+    from functools import partial
+
+    from .instance_lock import ALREADY_RUNNING_EXIT_CODE, AlreadyRunningError
     from .logging_config import setup_logging
-    from .preflight import run_preflight
+    from .preflight import _check_cloud_sync, _probe_and_repair
 
     # Opt-in JSON logging. Default ("text") is a no-op — existing print()
     # sites remain the source of stderr output. When operators set
@@ -6652,84 +6781,26 @@ def main():
     setup_logging(fmt=config.log_format, level=config.log_level)
 
     try:
-        # SSE/HTTP mode: auto-enable single-instance lock (port collision prevention)
+        # SSE/HTTP mode: auto-enable single-instance lock (port collision
+        # prevention), so an HTTP server never follows: it exits 75 instead.
         transport = _resolve_transport(sys.argv[1:])
         config.transport = transport
         if transport != "stdio":
             os.environ["KNOWLEDGE_RAG_SINGLE_INSTANCE"] = "1"
 
-        with single_instance_lock():
-            run_preflight()
-
-            orchestrator = get_orchestrator()
-
-            # Migration: check dimension mismatch AFTER full init (avoids segfault during __init__)
-            orchestrator._needs_rebuild = orchestrator._check_dimension_mismatch()
-            if orchestrator._needs_rebuild:
-                print("[MIGRATION] Running nuclear rebuild for embedding model change...", file=sys.stderr)
-                try:
-                    stats = orchestrator.nuclear_rebuild()
-                    print(
-                        f"[MIGRATION] Rebuild complete: {stats['indexed']} docs, "
-                        f"{stats['chunks_added']} chunks in {stats.get('elapsed_seconds', '?')}s",
-                        file=sys.stderr,
-                    )
-                except Exception as e:
-                    print(f"[ERROR] Migration failed: {e}", file=sys.stderr)
-                    print("[FALLBACK] Attempting regular index instead...", file=sys.stderr)
-                    stats = orchestrator.index_all(force=True)
-            elif orchestrator.collection.count() == 0:
-                # GH #216: initial indexing runs in a background thread so it
-                # does not block the MCP `initialize` handshake. Blocking here
-                # for a large corpus (~150k chunks takes minutes) caused stdio
-                # clients to timeout, kill the process, and restart into an
-                # empty index — an endless full-reindex loop. Users poll
-                # get_reindex_status() to track progress.
-                print("[INFO] No documents indexed. Starting initial indexing in background...", file=sys.stderr)
-                orchestrator.start_reindex_background("incremental")
-                print(
-                    "[INFO] Initial indexing runs in background. Track progress with get_reindex_status.",
-                    file=sys.stderr,
-                )
-            else:
-                # GH #316: pre-warm BM25 on a background thread so a hybrid
-                # search landing seconds after startup on a large index does
-                # not silently degrade to semantic-only while the first
-                # keyword query waits for the multi-minute inline or
-                # background build. Daemon thread — the stdio `initialize`
-                # handshake is never blocked. GH #321: it takes the lock of
-                # any background build, so a keyword-only search arriving
-                # mid-build waits for it instead of reading an empty BM25.
-                orchestrator._start_bm25_background_build("bm25-prewarm")
-
-            # Start file watcher for auto-reindex on document changes
-            if os.environ.get("KNOWLEDGE_RAG_WATCHER_DISABLED", "").strip() == "1":
-                print("[WATCHER] Disabled via KNOWLEDGE_RAG_WATCHER_DISABLED=1", file=sys.stderr)
-            else:
-                try:
-                    watcher = DocumentWatcher(get_orchestrator, debounce_seconds=10.0)
-                    observer = Observer()
-                    observer.schedule(watcher, str(config.documents_dir), recursive=True)
-                    observer.daemon = True
-                    observer.start()
-                    print(f"[WATCHER] Monitoring {config.documents_dir} for changes", file=sys.stderr)
-                except Exception as e:
-                    print(f"[WARN] Failed to start file watcher: {e}", file=sys.stderr)
-                    print("[WARN] Auto-reindexing disabled. Use reindex_documents tool manually.", file=sys.stderr)
-
-            # Start optional metrics server
-            if config.metrics_enabled and config.transport != "stdio":
-                from .metrics import start_metrics_server
-
-                start_metrics_server(config.metrics_port)
-
-            if transport != "stdio":
-                print(
-                    f"[SERVER] Starting {transport} server on {config.server_host}:{config.server_port}",
-                    file=sys.stderr,
-                )
-
-            _run_transport(transport)
+        # Exit 78 before either role touches data_dir; the owner's probe below skips it.
+        _check_cloud_sync()
+        # Only the owner opens the index, and it keeps data_dir until its process
+        # dies; a follower takes over on the first call after that (_writer_role).
+        start_owner = partial(_start_writer_startup, _probe_and_repair)
+        if _writer_role.claim_writes():
+            start_owner()
+        else:
+            _writer_role.become_follower(start_owner)
+        try:
+            _serve(transport)
+        finally:
+            _writer_role.close_startup_repair()
     except AlreadyRunningError as e:
         print(f"[ERROR] {e}", file=sys.stderr)
         raise SystemExit(ALREADY_RUNNING_EXIT_CODE) from e

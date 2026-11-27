@@ -5,29 +5,28 @@ The previous single-attempt quarantine turned any transient failure
 (file locks after client restart, slow disk, cold GPU init) into a
 full-corpus reindex loop on Windows stdio MCP clients. The reporter's
 forensic analysis on issue #216 documented the failure mode and the
-fixes below were validated on their environment before merging.
+fixes below were validated on their environment before merging. The probe
+holds the access guard of ``_index_access`` while it reads; the repair half
+lives in ``_preflight_repair``.
 """
 
 from __future__ import annotations
 
-import contextlib
-import os
 import re
-import shutil
 import subprocess
 import sys
 import time
-from datetime import datetime
+from contextlib import ExitStack
 from pathlib import Path
 
-from .config import BASE_DIR, _get, config
+from . import _index_access, _preflight_probe, _writer_role, instance_lock
+from ._preflight_probe import _classify, _index_id, _Outcome, _Target
+from ._preflight_repair import _log, move_index_aside
+from .config import _get, config
 
 PROBE_ATTEMPTS = 3
 PROBE_RETRY_DELAY_SECONDS = 5
 PROBE_TIMEOUT_SECONDS = 30
-AUTO_REPAIR_BACKUPS_KEPT = 3  # GH #267: unbounded auto-repair backups once filled a disk (197 copies, 76 GB)
-_AUTO_REPAIR_DIR_NAME = re.compile(r"auto-repair-[0-9]{8}-[0-9]{6}")  # what _backup_active_index creates
-
 # Cloud-sync folders break ChromaDB (HNSW mmap) and SQLite WAL/SHM:
 # the provider opens handles on live files to upload them, racing with
 # the engine's own mmap/WAL writes → native access violation (0xC0000005
@@ -79,7 +78,8 @@ def _check_cloud_sync() -> None:
     if allow:
         _log(
             f"[PREFLIGHT] WARNING: data_dir is under cloud sync ({provider}): {config.data_dir}. "
-            f"Index corruption is likely. Running anyway because paths.allow_cloud_sync=true."
+            f"Index corruption is likely. Running anyway because paths.allow_cloud_sync=true.",
+            config.data_dir,
         )
         return
     _log(
@@ -89,212 +89,155 @@ def _check_cloud_sync() -> None:
         f"  the index.\n"
         f"  Fix: move paths.data_dir to a local path (e.g. %LOCALAPPDATA%\\knowledge-rag\\data on\n"
         f"  Windows, ~/.local/share/knowledge-rag/data on Linux/macOS), or set paths.allow_cloud_sync=true\n"
-        f"  to acknowledge the risk and continue."
+        f"  to acknowledge the risk and continue.",
+        config.data_dir,
     )
     raise SystemExit(78)  # EX_CONFIG
 
 
-def _log(msg: str) -> None:
-    """Emit preflight message to stderr and append to data/preflight.log.
+# -I ignores cwd and PYTHONPATH. Verify the exact sibling module before importing anything that can read the index.
+_PROBE_MODULE = Path(_preflight_probe.__file__).resolve()
+_PROBE_PROLOGUE = r"""
+import sys
+from importlib.util import find_spec
+from pathlib import Path
 
-    Persisting to a file matters because stdio MCP clients hide the server's
-    stderr in their own logs — without the file, users could only ever see
-    the truncated exit code, not the actual Chroma stack trace.
-    """
-    line = f"[{datetime.now().isoformat(timespec='seconds')}] {msg}"
-    print(line, file=sys.stderr)
-    try:
-        log_file = config.data_dir / "preflight.log"
-        log_file.parent.mkdir(parents=True, exist_ok=True)
-        with log_file.open("a", encoding="utf-8") as f:
-            f.write(line + "\n")
-    except OSError:
-        pass
+origin = Path(sys.argv[1])
+sys.path.insert(0, str(origin.parent.parent))
+spec = find_spec("mcp_server._preflight_probe")
+if spec is None or not spec.origin or Path(spec.origin).resolve() != origin:
+    raise ImportError(f"preflight module is not from {origin}")
+from mcp_server._preflight_probe import _enter, _read_index
 
-
-def _backup_active_index(reason: str) -> Path:
-    """Atomically move active ChromaDB state aside so the server can rebuild.
-
-    Uses os.rename (atomic on same volume) instead of shutil.move — the
-    fallback copy+rmtree path in shutil.move leaks a partial copy in
-    backups/ AND a partially deleted live chroma_db/ when another process
-    holds a segment file open (WinError 32).
-
-    The two moves (metadata JSON + chroma_db dir) must be all-or-nothing.
-    If we moved chroma_db first and metadata failed (antivirus scanning
-    the JSON, brief file lock), restart would find `chroma_db` gone but
-    `index_metadata.json` still live — incremental reindex would then
-    read the orphan metadata, mark every doc as "already indexed", and
-    silently produce an empty collection. To prevent that, metadata is
-    moved first (small file, low lock probability) and chroma_db is
-    wrapped in try/except that rolls the metadata rename back before
-    re-raising. Restart then sees the pristine pre-quarantine state
-    and re-runs preflight cleanly.
-    """
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    backup_dir = config.data_dir / "backups" / f"auto-repair-{stamp}"
-    backup_dir.mkdir(parents=True, exist_ok=False)
-
-    metadata_file = config.data_dir / "index_metadata.json"
-    metadata_backup = backup_dir / f"index_metadata.{reason}.json"
-    metadata_moved = False
-    try:
-        if metadata_file.exists():
-            os.rename(str(metadata_file), str(metadata_backup))
-            metadata_moved = True
-        if config.chroma_dir.exists():
-            os.rename(str(config.chroma_dir), str(backup_dir / f"chroma_db.{reason}"))
-    except OSError:
-        if metadata_moved:
-            # Rollback the metadata move so the two files stay consistent.
-            # If the rollback itself fails (unlikely — dst dir is fresh)
-            # we still re-raise the original OSError so the caller can
-            # exit cleanly instead of leaving the system in a wedged state.
-            with contextlib.suppress(OSError):
-                os.rename(str(metadata_backup), str(metadata_file))
-        raise
-    finally:
-        with contextlib.suppress(OSError):
-            backup_dir.rmdir()  # GH #267: an empty folder would take a kept slot; rmdir spares any holding data
-
-    return backup_dir
-
-
-def _prune_auto_repair_backups(new_backup: Path) -> None:
-    """Keep only the newest AUTO_REPAIR_BACKUPS_KEPT auto-repair backups, ``new_backup`` included."""
-    with os.scandir(new_backup.parent) as entries:
-        # Symlinks are skipped here; rmtree refuses Windows junctions, so no link is ever followed.
-        other_dirs = {entry.name for entry in entries if entry.is_dir(follow_symlinks=False)} - {new_backup.name}
-    older = sorted((name for name in other_dirs if _AUTO_REPAIR_DIR_NAME.fullmatch(name)), reverse=True)
-    removed = 0
-    # new_backup takes one kept slot even when a clock change made its stamp sort below the others.
-    for name in older[AUTO_REPAIR_BACKUPS_KEPT - 1 :]:
-        try:
-            shutil.rmtree(new_backup.parent / name)
-            removed += 1
-        except OSError as exc:  # e.g. a file still held open on Windows
-            _log(f"[RECOVERY] could not delete old backup {new_backup.parent / name} ({exc}); will retry next repair")
-    _log(f"[RECOVERY] removed {removed} old auto-repair backup(s)")
-
-
-def _probe_chroma(timeout_seconds: int = PROBE_TIMEOUT_SECONDS) -> subprocess.CompletedProcess[str]:
-    """Check Chroma in a child process so native crashes do not kill MCP startup."""
-    code = r"""
-import chromadb
-from chromadb.errors import NotFoundError
-
-from mcp_server.config import config
-
-if not config.chroma_dir.exists():
-    print("missing")
-    raise SystemExit(0)
-
-client = chromadb.PersistentClient(path=str(config.chroma_dir))
-try:
-    # GH #248/#252: read only. Creating it here persisted Chroma's default
-    # embedding function, which the server then refused to open.
-    collection = client.get_collection(name=config.collection_name, embedding_function=None)
-except NotFoundError:
-    print("missing")
-    raise SystemExit(0)
-print(collection.count())
+target = _enter(sys.argv[2])
 """
-    env = os.environ.copy()
-    env["KNOWLEDGE_RAG_DIR"] = str(BASE_DIR.resolve())
+_PROBE_BODY = "_read_index(target)\n"
+
+
+def _capture_target() -> _Target:
+    """One parent snapshot, shared by every child, the final guard and both renames."""
+    configured_data = config.data_dir.absolute()
+    data_dir = configured_data.resolve()  # a data_dir alias is safe: the guard follows it too
+    chroma_dir = config.chroma_dir.absolute()
+    if chroma_dir.is_relative_to(configured_data):
+        chroma_dir = data_dir / chroma_dir.relative_to(configured_data)
+    return _Target(data_dir, chroma_dir, config.collection_name, _index_id(chroma_dir))
+
+
+def _probe_command(target: _Target) -> list[str]:
+    return [sys.executable, "-I", "-c", _PROBE_PROLOGUE + _PROBE_BODY, str(_PROBE_MODULE), target.wire()]
+
+
+def _probe_chroma(target: _Target, timeout_seconds: int = PROBE_TIMEOUT_SECONDS) -> subprocess.CompletedProcess[str]:
+    """Isolate native crashes and never let a probe consume the stdio client's requests."""
+    if _index_access.is_held():
+        raise RuntimeError("this process holds the index access guard, so its probe would find the index busy")
     return subprocess.run(
-        [sys.executable, "-c", code],
-        cwd=str(BASE_DIR.resolve()),
-        env=env,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        _probe_command(target),
+        cwd=_PROBE_MODULE.parent,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=timeout_seconds,
         check=False,
     )
 
 
 def run_preflight(timeout_seconds: int = PROBE_TIMEOUT_SECONDS) -> bool:
-    """Return True when active Chroma state was moved aside for repair.
+    """Return True only for a confirmed repair. Timeout keeps the index (#216).
 
-    Runs the probe up to PROBE_ATTEMPTS times so transient failures
-    (file locks lingering from a previous PID, slow disk, cold GPU init)
-    do not trigger a destructive quarantine. TimeoutExpired is treated
-    as inconclusive — the index is kept and the user can debug from
-    preflight.log without losing the corpus. Only PROBE_ATTEMPTS
-    consecutive non-zero exits quarantine.
-
-    If os.rename fails while quarantining (e.g. another process still
-    holds a segment file open on Windows) the index is left untouched
-    and the process exits with EX_TEMPFAIL (75) instead of crashing
-    halfway with a partial move.
+    An unverifiable probe raises, not a healthy result. Exit 75 means a busy guard or
+    a blocked move; exit 78 rejects a cloud-sync directory. Borrow an eligible caller's
+    writer guard without releasing it, or hold our own for this call only.
     """
     _check_cloud_sync()
+    target = _capture_target()
+    if _index_access.is_held():
+        _log("[PREFLIGHT] this process serves the index; the standalone check did not run", target.data_dir)
+        raise SystemExit(_index_access.BUSY_EXIT_CODE)
+    target.data_dir.mkdir(parents=True, exist_ok=True)
+    with ExitStack() as owned:
+        try:
+            owned.enter_context(instance_lock.standalone_guard(target.data_dir / instance_lock.LOCK_FILENAME))
+        except instance_lock.AlreadyRunningError as exc:
+            _log(f"[PREFLIGHT] a knowledge-rag server owns {target.data_dir}; the check did not run", target.data_dir)
+            raise SystemExit(_index_access.BUSY_EXIT_CODE) from exc
+        return _probe_and_repair_for_call(target, timeout_seconds)
 
-    last_result: subprocess.CompletedProcess[str] | None = None
+
+def _probe_and_repair_for_call(target: _Target, timeout_seconds: int) -> bool:
+    """The standalone caller holds the writer guard until this decision has finished."""
+    try:
+        failure = _probe_until_conclusive(target, timeout_seconds)
+        with _index_access.held_for_call(target.access_path):
+            return _repair_if_damaged(target, failure)
+    except _index_access.IndexAccessBusy as exc:
+        _log(f"[PREFLIGHT] {exc}", target.data_dir)
+        raise SystemExit(_index_access.BUSY_EXIT_CODE) from exc
+
+
+def _probe_until_conclusive(target: _Target, timeout_seconds: int) -> _Outcome | None:
+    """Require independent, matching read failures. Neither bootstrap nor stderr is evidence."""
+    failures: list[_Outcome] = []
     for attempt in range(1, PROBE_ATTEMPTS + 1):
         try:
-            result = _probe_chroma(timeout_seconds=timeout_seconds)
+            outcome = _probe_inside(target, timeout_seconds)
         except subprocess.TimeoutExpired:
-            _log(
-                f"[PREFLIGHT] attempt {attempt}/{PROBE_ATTEMPTS}: probe timed out "
-                f"after {timeout_seconds}s — inconclusive, keeping index"
-            )
-            return False
-        if result.returncode == 0:
-            if attempt > 1:
-                _log(f"[PREFLIGHT] attempt {attempt}: OK (recovered from transient failure)")
-            return False
-        stderr_tail = (result.stderr or "").strip()[-1500:]
-        _log(
-            f"[PREFLIGHT] attempt {attempt}/{PROBE_ATTEMPTS}: probe failed with code {result.returncode}\n{stderr_tail}"
-        )
-        last_result = result
+            _log(f"[PREFLIGHT] probe timed out after {timeout_seconds}s — inconclusive, keeping index", target.data_dir)
+            return None
+        if outcome is _Outcome.VERIFIED:
+            if failures:
+                _log(f"[PREFLIGHT] attempt {attempt}: OK (recovered from transient failure)", target.data_dir)
+            return None
+        failures.append(outcome)
         if attempt < PROBE_ATTEMPTS:
             time.sleep(PROBE_RETRY_DELAY_SECONDS)
+    if len(failures) >= 2 and len(set(failures)) == 1 and failures[0] in (_Outcome.HNSW, _Outcome.NATIVE):
+        return failures[0]
+    raise RuntimeError(
+        f"Could not verify collection {target.collection_name!r} in {target.chroma_dir}; "
+        "index left in place (see preflight.log)."
+    )
 
-    assert last_result is not None
-    reason = "segfault" if last_result.returncode in (-11, 139) else "failed"
-    _log(f"[RECOVERY] preflight failed {PROBE_ATTEMPTS}x (last exit code {last_result.returncode}); moving index aside")
-    try:
-        backup_dir = _backup_active_index(reason)
-    except OSError as exc:
+
+def _probe_inside(target: _Target, timeout_seconds: int) -> _Outcome:
+    """A busy child never entered; wait separately so it cannot confirm or disprove a read failure."""
+    deadline = time.monotonic() + _index_access.WAIT_SECONDS
+    while True:
+        done = _probe_chroma(target, timeout_seconds=timeout_seconds)
+        outcome = _classify(target, done)
+        if outcome is not _Outcome.BUSY:
+            if outcome is not _Outcome.VERIFIED:
+                _log(
+                    f"[PREFLIGHT] probe {outcome.value}, exit {done.returncode}: {(done.stderr or '').strip()[-1500:]}",
+                    target.data_dir,
+                )
+            return outcome
+        if time.monotonic() >= deadline:
+            raise _index_access.busy(_index_access.WAIT_SECONDS)
         _log(
-            f"[PREFLIGHT] could not move index aside ({exc}); leaving it untouched "
-            f"to avoid partial corruption. Retry after freeing file handles."
+            f"[PREFLIGHT] another process is inside the index; probing again in {PROBE_RETRY_DELAY_SECONDS}s",
+            target.data_dir,
         )
-        raise SystemExit(75) from exc
-    try:
-        if backup_dir.exists():  # GH #267: the empty folder is dropped when there was nothing to move
-            _log(f"[RECOVERY] moved active index to {backup_dir}")
-            _prune_auto_repair_backups(backup_dir)
-    except OSError as exc:  # best effort: old backups never fail the repair
-        _log(f"[RECOVERY] could not prune old backups in {backup_dir.parent} ({exc})")
+        time.sleep(PROBE_RETRY_DELAY_SECONDS)
+
+
+def _probe_and_repair(timeout_seconds: int = PROBE_TIMEOUT_SECONDS) -> bool:
+    """Server path: retain access for the subsequent opening; refuse unverifiable startup."""
+    target = _capture_target()
+    failure = _probe_until_conclusive(target, timeout_seconds)
+    _index_access.hold(path=target.access_path)
+    with _writer_role.startup_repair_guard():
+        return _repair_if_damaged(target, failure)
+
+
+def _repair_if_damaged(target: _Target, failure: _Outcome | None) -> bool:
+    target.check_identity()  # held by the parent, after all children have exited
+    if failure is None:
+        return False
+    if failure not in (_Outcome.HNSW, _Outcome.NATIVE) or None in target.index_id:
+        raise RuntimeError("Index repair requires confirmed damage")
+    _log(f"[RECOVERY] repeated {failure.value} during collection.count(); moving index aside", target.data_dir)
+    move_index_aside(target, failure.value)
     return True
-
-
-if __name__ == "__main__":
-    # ponytail: runnable self-check for _detect_cloud_sync_provider. No framework.
-    cases = [
-        (r"C:\Users\x\OneDrive\Documentos\knowledge-rag\data", "OneDrive"),
-        (r"C:\Users\x\OneDrive - Contoso\knowledge-rag\data", "OneDrive - Contoso"),
-        (r"/Users/x/Library/Mobile Documents/com~apple~CloudDocs/kr", "com~apple~CloudDocs"),
-        (r"/Users/x/iCloud Drive/kr", "iCloud Drive"),
-        (r"/home/x/Dropbox/kr/data", "Dropbox"),
-        (r"C:\Users\x\Google Drive\kr", "Google Drive"),
-        (r"/home/x/GoogleDrive/kr", "GoogleDrive"),
-        (r"C:\Users\x\pCloudDrive\kr", "pCloudDrive"),
-        (r"/home/x/MEGAsync/kr", "MEGAsync"),
-        (r"/home/x/Nextcloud/kr", "Nextcloud"),
-        (r"C:\knowledge-rag\data", None),
-        (r"/var/lib/knowledge-rag/data", None),
-        (r"C:\Users\x\AppData\Local\knowledge-rag\data", None),
-    ]
-    failed = 0
-    for raw, expected in cases:
-        got = _detect_cloud_sync_provider(Path(raw))
-        status = "OK" if got == expected else "FAIL"
-        if got != expected:
-            failed += 1
-        print(f"[{status}] {raw} → {got!r} (expected {expected!r})")
-    assert failed == 0, f"{failed} case(s) failed"
-    print(f"\nAll {len(cases)} cloud-sync detection cases passed.")

@@ -28,6 +28,22 @@ if sys.platform == "win32":
         )
 
 
+@pytest.fixture(autouse=True)
+def _release_writer_claim():
+    """A test that claims data_dir or its index access (main() does) must not leave them to the next one.
+
+    Both last for the process's life by design, and a test process runs many
+    cases; only release them when their module is already loaded.
+    """
+    yield
+    writer_role = sys.modules.get("mcp_server._writer_role")
+    if writer_role is not None:
+        writer_role._release_claim()
+    index_access = sys.modules.get("mcp_server._index_access")
+    if index_access is not None:
+        index_access._release()
+
+
 @pytest.fixture
 def isolated_orchestrator(tmp_path, monkeypatch):
     """Real Chroma mutations with deterministic vectors and isolated corpus files."""

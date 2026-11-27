@@ -107,7 +107,7 @@ flowchart TB
     end
 
     subgraph MIDDLEWARE["ASGI middleware (HTTP transports)"]
-        M1[HealthMiddleware<br/>/health · /healthz]
+        M1[HealthMiddleware<br/>/health · /healthz · /readyz]
         M2[BearerAuthMiddleware<br/>constant-time compare]
     end
 
@@ -300,7 +300,8 @@ server:
 
 ```bash
 KNOWLEDGE_RAG_DIR=~/knowledge-rag knowledge-rag     # run from the venv where you installed it
-curl http://127.0.0.1:8179/health                  # {"status":"ok","version":"5.0.0",...}
+curl http://127.0.0.1:8179/health                  # {"status":"ok","version":"5.0.0","uptime_seconds":12,"index":"ready",...}
+curl -i http://127.0.0.1:8179/readyz               # 200 once the index serves; 503 while it is checked or repaired
 claude mcp add --transport http knowledge-rag http://127.0.0.1:8179/mcp \
   # if server.auth.bearer_token is set, add the token as a Bearer auth header
 ```
@@ -347,7 +348,7 @@ Any client that starts a stdio MCP server from a command, or connects to a Strea
 ```
 
 > [!WARNING]
-> **One writer per data directory.** Over stdio, each MCP client starts and owns its own knowledge-rag process. Do not run a second writer against the same `data_dir` while that client is open: on Windows, two writers corrupted the ChromaDB HNSW segment ([#216](https://github.com/lyonzin/knowledge-rag/issues/216)). Add `"KNOWLEDGE_RAG_SINGLE_INSTANCE": "1"` to the client's `env` block as a safety net, or share one HTTP server. Running CLI commands safely: [docs/single-instance.md](docs/single-instance.md).
+> **One owner per data directory.** Over stdio, each MCP client starts its own knowledge-rag process, and only the first one for a `data_dir` opens the index: two writers, or a reader during writes, corrupted the ChromaDB HNSW segment ([#216](https://github.com/lyonzin/knowledge-rag/issues/216)). The other processes stay up and answer every tool with a refusal that names the owner; the first call after the owner exits takes over. To use one index from several clients at once, share one HTTP server. Running CLI commands safely: [docs/single-instance.md](docs/single-instance.md).
 
 > [!WARNING]
 > **Keep `data_dir` out of cloud-sync folders.** OneDrive (including `OneDrive - <tenant>`), iCloud Drive, Dropbox, Google Drive, Box, pCloud, MEGAsync, Nextcloud/ownCloud and Sync hold handles on the live index while they upload it. That races with ChromaDB's HNSW memory maps and SQLite WAL writes and can crash the process (`0xC0000005` on Windows, `SIGBUS` elsewhere); startup auto-repair then moves the index to `data/backups/auto-repair-*` and you reindex from scratch. Since v4.11.0, startup stops with exit code 78 (`EX_CONFIG`) when `data_dir` resolves under one of these providers. Use a local path such as `%LOCALAPPDATA%\knowledge-rag\data` on Windows or `~/.local/share/knowledge-rag/data` on Linux and macOS, or set `paths.allow_cloud_sync: true` to accept the risk.
@@ -513,7 +514,7 @@ Each capability says whether it is on by default and links to the test, document
 
 | Capability | Default | Enable / tune | Proof |
 | --- | --- | --- | --- |
-| `/health` and `/healthz`, no token needed | On (HTTP) | — | [test](tests/test_health_endpoint.py) |
+| `/health` and `/healthz` (liveness), `/readyz` (readiness), no token needed | On (HTTP) | — | [test](tests/test_health_readiness.py) |
 | Prometheus metrics on a separate port | Opt-in (HTTP) | `server.metrics` | [test](tests/test_metrics.py) |
 | Structured JSON logs | Opt-in | `server.logging.format` | [test](tests/test_logging_json.py) |
 | Public benchmark dashboard | Every push to master | — | [dashboard](https://lyonzin.github.io/knowledge-rag/) |
@@ -538,7 +539,7 @@ Each capability says whether it is on by default and links to the test, document
 
 | Capability | Default | Enable / tune | Proof |
 | --- | --- | --- | --- |
-| Single-instance lock | Auto (HTTP) | `KNOWLEDGE_RAG_SINGLE_INSTANCE` | [test](tests/test_instance_lock.py) |
+| One owner per data directory; other processes refuse every tool | On | `KNOWLEDGE_RAG_SINGLE_INSTANCE` (exit 75 instead) | [test](tests/test_single_writer_processes.py) |
 | Startup probe, auto-repair, 3 backups kept | On | — | [test](tests/test_preflight_backup_retention.py) |
 | Index kept if `documents_dir` is empty or missing | On | — | [test](tests/test_indexing_integrity.py) |
 | File watcher, 10 s quiet period | On | `KNOWLEDGE_RAG_WATCHER_DISABLED` | [test](tests/test_watcher_attrib_loop.py) |
@@ -563,9 +564,9 @@ Compliance: the project holds no LGPD, GDPR or HIPAA certification. Local indexi
 - **Paths:** the six tools that accept a path resolve it inside `documents_dir` and reject traversal, escaping symlinks, NUL bytes and NTFS alternate data streams (CWE-22, CWE-59).
 - **Fetched content:** `add_from_url` neutralizes known model control tokens and stores a provenance marker with the page. That limits prompt injection; it does not prevent it, so treat retrieved text as untrusted ([SECURITY.md](SECURITY.md)). The tool fetches whatever http(s) URL it receives, private network addresses included, and follows redirects; on a shared server, decide who may call it.
 - **Network use:** the first model download contacts Hugging Face; set `HF_HUB_OFFLINE=1` once the models are cached.
-- **Health payload:** `GET /health` returns `status`, `version`, `uptime_seconds` and query-cache statistics on the MCP port.
-- **Single instance:** HTTP transports turn the lock on automatically; for stdio clients, add `KNOWLEDGE_RAG_SINGLE_INSTANCE=1` to the client's `env` block. A second process on the same `data_dir` then exits with code 75.
-- **Index safety:** a full rebuild fills a staging collection and swaps it in after validation; handled failures roll back. Startup retries a failing probe 3 times before moving the index to `data/backups/auto-repair-*`, keeping the 3 newest. Recovery steps: [docs/reindex-operations.md](docs/reindex-operations.md).
+- **Health probes:** on the MCP port, `GET /health` (or `/healthz`) answers 200 while the process runs, with `status`, `version`, `uptime_seconds`, `index` (`ready`, `repairing` or `error`) and query-cache statistics; `GET /readyz` answers 200 only when tools can be served and 503 otherwise, with `Retry-After` while the index is repaired. Use `/readyz`, not the status of `/health`, as the readiness check ([details](docs/single-instance.md#http-health-probes)).
+- **One owner per data directory:** over stdio, a second process on the same `data_dir` stays up and refuses every tool until the owner exits, then takes over. With `KNOWLEDGE_RAG_SINGLE_INSTANCE=1` in the client's `env` block it exits with code 75 instead, as HTTP transports always do.
+- **Index safety:** a full rebuild fills a staging collection and swaps it in after validation; handled failures roll back. Startup moves an index to `data/backups/auto-repair-*` only after independent probes confirm damage while reading that specific index. An import failure, a busy index, a timeout or an unexpected probe result does not authorize a move. The three most recent auto-repair backups are kept. [Recovery steps](docs/reindex-operations.md).
 - **Dependencies:** `requirements.txt` and `pyproject.toml` declare version ranges, not pins. For a reproducible deployment, resolve once and record the tested environment.
 - **CI gates:** every pull request runs 34 GitHub Actions checks. The performance gate fails a benchmark only when every branch run is more than 10% slower than every master run. Nightly jobs open issues instead of blocking merges; mutation testing is exploratory and never fails the run.
 - **Disclosure:** private [security advisories](https://github.com/lyonzin/knowledge-rag/security/advisories/new), acknowledged within 48 hours, initial assessment within 5 business days, 90-day coordinated disclosure ([SECURITY.md](SECURITY.md)).

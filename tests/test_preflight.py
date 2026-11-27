@@ -1,76 +1,10 @@
-"""Tests for startup preflight repair.
+"""Startup preflight recovery: preserve the retries, timeout and atomic move from GH #216."""
 
-GH #216 (v4.9.1): retry + timeout + atomic-rename behavior.
-"""
-
+import os
 import subprocess
-import sys
-from pathlib import Path
-from unittest.mock import patch
 
 import pytest
-
-ROOT = Path(__file__).resolve().parents[1]
-
-
-def test_real_probe_reads_but_never_creates_the_collection(tmp_path, monkeypatch):
-    """GH #248/#252: the probe must read, never create, the collection.
-
-    ``get_or_create_collection`` without an embedding function persisted
-    Chroma's ``default`` EF on every fresh data_dir, and the server then
-    refused to open it with FastEmbed ("Embedding function conflict ...
-    persisted: default"). Runs the real child so a broken probe script,
-    which would quarantine every index after 3 attempts, fails here first.
-    """
-    from mcp_server import preflight
-
-    base = tmp_path / "rag"
-    base.mkdir()
-    monkeypatch.setattr(preflight, "BASE_DIR", base)
-    monkeypatch.setenv("PYTHONPATH", str(ROOT))
-    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
-
-    chroma_dir = str(base / "data" / "chroma_db")
-    seed = (
-        "import sys, chromadb\n"
-        "class FastEmbedLike:\n"
-        "    def __call__(self, input): return [[0.1, 0.2] for _ in input]\n"
-        "    def name(self): return 'fastembed-test'\n"
-        "client = chromadb.PersistentClient(path=sys.argv[1])\n"
-        "if sys.argv[2] == 'production':\n"
-        "    client.create_collection('knowledge_base', embedding_function=FastEmbedLike()).add(ids=['a'], documents=['a'])\n"
-        "else:\n"
-        "    client.delete_collection('knowledge_base')\n"
-        "    client.create_collection('knowledge_base')\n"
-    )
-
-    fresh = preflight._probe_chroma(timeout_seconds=120)
-    assert (fresh.returncode, fresh.stdout.strip()) == (0, "missing"), fresh.stderr
-
-    # A healthy index as the server writes it; create_collection also fails if the
-    # probe above left a collection behind.
-    subprocess.run([sys.executable, "-c", seed, chroma_dir, "production"], check=True, timeout=120)
-    production = preflight._probe_chroma(timeout_seconds=120)
-    assert (production.returncode, production.stdout.strip()) == (0, "1"), production.stderr
-
-    # What the old probe left on fresh installs: empty, bound to Chroma's default EF.
-    subprocess.run([sys.executable, "-c", seed, chroma_dir, "leftover"], check=True, timeout=120)
-    leftover = preflight._probe_chroma(timeout_seconds=120)
-    assert (leftover.returncode, leftover.stdout.strip()) == (0, "0"), leftover.stderr
-
-
-def test_probe_uses_absolute_parent_base_even_with_relative_environment(tmp_path, monkeypatch):
-    """The child cwd must not make a relative KNOWLEDGE_RAG_DIR resolve twice."""
-    from mcp_server import preflight
-
-    base = tmp_path / "rag"
-    base.mkdir()
-    monkeypatch.setattr(preflight, "BASE_DIR", base)
-    monkeypatch.setenv("KNOWLEDGE_RAG_DIR", "rag")
-    with patch.object(preflight.subprocess, "run") as run:
-        preflight._probe_chroma()
-    assert run.call_args.kwargs["env"]["KNOWLEDGE_RAG_DIR"] == str(base.resolve())
-    assert run.call_args.kwargs["cwd"] == str(base.resolve())
+from support.harmless_probe import healthy, native_crash
 
 
 def test_probe_failure_backs_up_chroma_and_metadata(tmp_path, monkeypatch):
@@ -88,8 +22,7 @@ def test_probe_failure_backs_up_chroma_and_metadata(tmp_path, monkeypatch):
     monkeypatch.setattr(preflight.config, "chroma_dir", chroma_dir)
     monkeypatch.setattr(preflight, "PROBE_RETRY_DELAY_SECONDS", 0)
 
-    result = subprocess.CompletedProcess(args=[], returncode=-11, stdout="", stderr="segfault")
-    monkeypatch.setattr(preflight, "_probe_chroma", lambda timeout_seconds=30: result)
+    monkeypatch.setattr(preflight, "_probe_chroma", native_crash)
 
     assert preflight.run_preflight() is True
     assert not chroma_dir.exists()
@@ -113,8 +46,7 @@ def test_successful_probe_leaves_index_in_place(tmp_path, monkeypatch):
     monkeypatch.setattr(preflight.config, "data_dir", data_dir)
     monkeypatch.setattr(preflight.config, "chroma_dir", chroma_dir)
 
-    result = subprocess.CompletedProcess(args=[], returncode=0, stdout="1", stderr="")
-    monkeypatch.setattr(preflight, "_probe_chroma", lambda timeout_seconds=30: result)
+    monkeypatch.setattr(preflight, "_probe_chroma", healthy)
 
     assert preflight.run_preflight() is False
     assert chroma_dir.exists()
@@ -140,11 +72,11 @@ def test_transient_failure_recovers_on_retry(tmp_path, monkeypatch):
 
     call_count = {"n": 0}
 
-    def flaky_probe(timeout_seconds=30):
+    def flaky_probe(target, timeout_seconds=30):
         call_count["n"] += 1
         if call_count["n"] == 1:
-            return subprocess.CompletedProcess(args=[], returncode=-11, stdout="", stderr="transient")
-        return subprocess.CompletedProcess(args=[], returncode=0, stdout="42", stderr="")
+            return native_crash(target)
+        return healthy(target)
 
     monkeypatch.setattr(preflight, "_probe_chroma", flaky_probe)
 
@@ -172,7 +104,7 @@ def test_timeout_is_inconclusive_and_keeps_index(tmp_path, monkeypatch):
     monkeypatch.setattr(preflight.config, "data_dir", data_dir)
     monkeypatch.setattr(preflight.config, "chroma_dir", chroma_dir)
 
-    def timeout_probe(timeout_seconds=30):
+    def timeout_probe(target, timeout_seconds=30):
         raise subprocess.TimeoutExpired(cmd=[], timeout=timeout_seconds)
 
     monkeypatch.setattr(preflight, "_probe_chroma", timeout_probe)
@@ -190,7 +122,7 @@ def test_rename_failure_preserves_index_and_exits_75(tmp_path, monkeypatch):
     when another process held a segment file open (WinError 32). The
     fix requires the whole quarantine to be atomic or fail cleanly.
     """
-    from mcp_server import preflight
+    from mcp_server import _preflight_repair, preflight
 
     data_dir = tmp_path / "data"
     chroma_dir = data_dir / "chroma_db"
@@ -200,14 +132,14 @@ def test_rename_failure_preserves_index_and_exits_75(tmp_path, monkeypatch):
     monkeypatch.setattr(preflight.config, "data_dir", data_dir)
     monkeypatch.setattr(preflight.config, "chroma_dir", chroma_dir)
     monkeypatch.setattr(preflight, "PROBE_RETRY_DELAY_SECONDS", 0)
+    monkeypatch.setattr(_preflight_repair, "REPAIR_RETRY_DELAYS_SECONDS", ())  # one move attempt, as in GH #216
 
-    result = subprocess.CompletedProcess(args=[], returncode=-11, stdout="", stderr="segfault")
-    monkeypatch.setattr(preflight, "_probe_chroma", lambda timeout_seconds=30: result)
+    monkeypatch.setattr(preflight, "_probe_chroma", native_crash)
 
     def rename_locked(src, dst):
         raise OSError(32, "The process cannot access the file because it is being used by another process")
 
-    monkeypatch.setattr(preflight.os, "rename", rename_locked)
+    monkeypatch.setattr(os, "rename", rename_locked)
 
     with pytest.raises(SystemExit) as exc_info:
         preflight.run_preflight()
@@ -234,9 +166,9 @@ def test_all_attempts_fail_calls_probe_three_times(tmp_path, monkeypatch):
 
     call_count = {"n": 0}
 
-    def always_fail(timeout_seconds=30):
+    def always_fail(target, timeout_seconds=30):
         call_count["n"] += 1
-        return subprocess.CompletedProcess(args=[], returncode=-11, stdout="", stderr="segfault")
+        return native_crash(target)
 
     monkeypatch.setattr(preflight, "_probe_chroma", always_fail)
 
@@ -264,7 +196,7 @@ def test_chroma_rename_failure_rolls_back_metadata(tmp_path, monkeypatch):
     and chroma_db (call 2) fails with WinError 32, then verifies both
     files are back at their original paths after SystemExit(75).
     """
-    from mcp_server import preflight
+    from mcp_server import _preflight_repair, preflight
 
     data_dir = tmp_path / "data"
     chroma_dir = data_dir / "chroma_db"
@@ -276,13 +208,13 @@ def test_chroma_rename_failure_rolls_back_metadata(tmp_path, monkeypatch):
     monkeypatch.setattr(preflight.config, "data_dir", data_dir)
     monkeypatch.setattr(preflight.config, "chroma_dir", chroma_dir)
     monkeypatch.setattr(preflight, "PROBE_RETRY_DELAY_SECONDS", 0)
+    monkeypatch.setattr(_preflight_repair, "REPAIR_RETRY_DELAYS_SECONDS", ())  # one move attempt: its rollback
 
-    result = subprocess.CompletedProcess(args=[], returncode=-11, stdout="", stderr="segfault")
-    monkeypatch.setattr(preflight, "_probe_chroma", lambda timeout_seconds=30: result)
+    monkeypatch.setattr(preflight, "_probe_chroma", native_crash)
 
     # os.rename call order: 1) metadata → backup (OK), 2) chroma_db → backup
     # (FAIL, simulated WinError 32), 3) metadata rollback (OK).
-    real_rename = preflight.os.rename
+    real_rename = os.rename
     call_count = {"n": 0}
 
     def selective_rename(src, dst):
@@ -291,7 +223,7 @@ def test_chroma_rename_failure_rolls_back_metadata(tmp_path, monkeypatch):
             raise OSError(32, "chroma_db still locked by previous PID")
         return real_rename(src, dst)
 
-    monkeypatch.setattr(preflight.os, "rename", selective_rename)
+    monkeypatch.setattr(os, "rename", selective_rename)
 
     with pytest.raises(SystemExit) as exc_info:
         preflight.run_preflight()

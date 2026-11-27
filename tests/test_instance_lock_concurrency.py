@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from mcp_server import instance_lock
+from mcp_server import _writer_role, instance_lock
 
 
 def _contender(data_dir, events, messages, crash=False):
@@ -30,6 +30,34 @@ def _contender(data_dir, events, messages, crash=False):
                 os._exit(17)
     except instance_lock.AlreadyRunningError:
         messages.put(("rejected", os.getpid()))
+
+
+def _writer_contender(data_dir, events, messages, crash=False):
+    """Enter writer_lock without the opt-in, report the role, keep it until released."""
+    os.environ[instance_lock.ENV_VAR] = "0"
+    instance_lock.config.data_dir = Path(data_dir)
+    start, release = events
+    messages.put(("ready", os.getpid()))
+    assert start.wait(timeout=15)
+    with instance_lock.writer_lock() as owns_writes:
+        messages.put(("owner" if owns_writes else "follower", os.getpid()))
+        if crash:
+            # Queue uses a feeder thread: publish the role before abrupt exit.
+            messages.close()
+            messages.join_thread()
+        assert release.wait(timeout=15)
+        if crash:
+            os._exit(17)
+
+
+def _claimer(data_dir, events, messages):
+    """Claim writes for the process's life, finish the work, then live on until released."""
+    os.environ[instance_lock.ENV_VAR] = "0"
+    instance_lock.config.data_dir = Path(data_dir)
+    worked, release = events
+    messages.put(("claimed", _writer_role.claim_writes(), os.getpid()))
+    worked.set()  # what is left is a process shutting down, daemon threads and all
+    assert release.wait(timeout=15)
 
 
 def _stop_processes(processes):
@@ -153,3 +181,79 @@ def test_live_legacy_pid_rejects_acquisition_without_removing_metadata(tmp_path,
     lock_path.unlink()
     with instance_lock.single_instance_lock():
         assert instance_lock._read_lock_pid(lock_path) == os.getpid()
+
+
+def test_given_two_processes_racing_when_both_enter_writer_lock_then_exactly_one_owns_writes(tmp_path, monkeypatch):
+    monkeypatch.setenv("KNOWLEDGE_RAG_DIR", str(tmp_path))
+    context = multiprocessing.get_context("spawn")
+    start, release, messages = context.Event(), context.Event(), context.Queue()
+    processes = [
+        context.Process(target=_writer_contender, args=(str(tmp_path), (start, release), messages)) for _ in range(2)
+    ]
+    try:
+        for process in processes:
+            process.start()
+        assert [messages.get(timeout=15)[0] for _ in processes] == ["ready", "ready"]
+        start.set()
+        roles = dict(messages.get(timeout=15) for _ in processes)
+        recorded = instance_lock._read_lock_pid(tmp_path / instance_lock.LOCK_FILENAME)
+    finally:
+        start.set()
+        release.set()
+        _stop_processes(processes)
+        messages.close()
+        messages.join_thread()
+    assert (sorted(roles), recorded) == (["follower", "owner"], roles.get("owner"))
+
+
+def test_given_the_owner_process_crashes_when_another_enters_writer_lock_then_it_owns_writes(tmp_path, monkeypatch):
+    monkeypatch.setenv("KNOWLEDGE_RAG_DIR", str(tmp_path))
+    monkeypatch.delenv(instance_lock.ENV_VAR, raising=False)
+    monkeypatch.setattr(instance_lock.config, "data_dir", tmp_path)
+    context = multiprocessing.get_context("spawn")
+    start, release, messages = context.Event(), context.Event(), context.Queue()
+    process = context.Process(target=_writer_contender, args=(str(tmp_path), (start, release), messages, True))
+    process.start()
+    try:
+        assert messages.get(timeout=15)[0] == "ready"
+        start.set()
+        assert messages.get(timeout=15) == ("owner", process.pid)
+        with instance_lock.writer_lock() as owns_while_the_owner_lives:
+            assert owns_while_the_owner_lives is False
+    finally:
+        start.set()
+        release.set()
+        _stop_processes([process])
+        messages.close()
+        messages.join_thread()
+    assert process.exitcode == 17
+    with instance_lock.writer_lock() as owns_after_the_crash:
+        recorded = instance_lock._read_lock_pid(tmp_path / instance_lock.LOCK_FILENAME)
+    assert (owns_after_the_crash, recorded) == (True, os.getpid())
+
+
+def test_given_a_process_that_claimed_writes_when_its_work_ends_then_the_guard_stays_held_until_it_exits(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("KNOWLEDGE_RAG_DIR", str(tmp_path))
+    monkeypatch.delenv(instance_lock.ENV_VAR, raising=False)
+    monkeypatch.setattr(instance_lock.config, "data_dir", tmp_path)
+    context = multiprocessing.get_context("spawn")
+    worked, release, messages = context.Event(), context.Event(), context.Queue()
+    process = context.Process(target=_claimer, args=(str(tmp_path), (worked, release), messages))
+    process.start()
+    try:
+        claimed = messages.get(timeout=15)[:2]
+        assert worked.wait(timeout=15)
+        with instance_lock.writer_lock() as owned_while_it_lived:
+            pass
+    finally:
+        release.set()
+        _stop_processes([process])
+        messages.close()
+        messages.join_thread()
+    pid_file_left = (tmp_path / instance_lock.LOCK_FILENAME).exists()
+    with instance_lock.writer_lock() as owned_after_it_exited:
+        pass
+    observed = (claimed, owned_while_it_lived, process.exitcode, pid_file_left, owned_after_it_exited)
+    assert observed == (("claimed", True), False, 0, False, True)
