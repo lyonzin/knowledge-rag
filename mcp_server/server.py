@@ -1127,6 +1127,36 @@ class _BM25Snapshot:
     avgdl: float
 
 
+class Bm25NotReadyError(RuntimeError):
+    """Raised when a keyword-only search finds no BM25 generation to read.
+
+    Keyword-only search has no other channel, so an empty answer would claim
+    that nothing matches. The message says why the keyword index is not built:
+    another operation holds the index, or its last build failed. The MCP
+    wrapper returns it as a structured error with a suggestion.
+    """
+
+
+def _describe_missing_keyword_index(is_index_busy: bool, last_error: Optional[str]) -> str:
+    """Say why a non-empty collection has no BM25 generation, from what is true right now.
+
+    The index lock is held by a reindex or indexing pass, a document write or
+    the lexical (FTS5) index migration, any of which can last hours, so the
+    text promises no time. ``last_error`` is tested against None: a failure
+    recorded with an empty message is still a failure.
+
+    By Lyon.
+    """
+    reasons: List[str] = []
+    if is_index_busy:
+        reasons.append("another operation holds the index (a reindex, a document write or the lexical index migration)")
+    if last_error is not None:
+        reasons.append(f"its last build failed ({last_error})")
+    if not reasons:
+        reasons.append("its build has not published a generation yet")
+    return f"The keyword index is not built: {', and '.join(reasons)}."
+
+
 class BM25Index:
     """
     BM25 keyword index with inverted-index acceleration for hybrid search.
@@ -1378,6 +1408,14 @@ class BM25Index:
 
     def __len__(self) -> int:
         return len(self.corpus)
+
+    @property
+    def has_published_generation(self) -> bool:
+        """True once a build published a generation, which a rebuild keeps serving until it is replaced.
+
+        By Lyon.
+        """
+        return self._snapshot is not None
 
 
 # =============================================================================
@@ -2029,7 +2067,10 @@ class KnowledgeOrchestrator:
         BM25 while searches read the published generation, or the semantic
         channel alone right after a start. A keyword-only search has no other
         channel: without a generation it waits for the build, its own or one
-        already on its way.
+        already on its way, including one that another search or a writer runs
+        behind the index lock. It never waits for the index lock itself, which
+        a writer can hold for hours: ``query`` reports the keyword index as not
+        ready instead.
         """
         # Bare test doubles stub _ensure_bm25_index and carry neither attribute.
         stale = getattr(self, "_bm25_stale", None)
@@ -2045,19 +2086,42 @@ class KnowledgeOrchestrator:
         if cold and keyword_only:
             with self._bm25_refresh_lock:  # a build already on its way finishes first
                 self._ensure_bm25_index()
+            if not self.bm25_index.has_published_generation:
+                # Another search or a writer may be building behind the index lock:
+                # wait for that build to end. Safe because whoever holds the build
+                # lock only reads Chroma and fills BM25: it never asks for a
+                # publication lease or for a lock a search can hold.
+                with self._bm25_build_lock:
+                    pass
         elif cold and not large:
             self._ensure_bm25_index()
         elif not large:
             self._ensure_bm25_index(refresh=True)
-        elif self._bm25_refresh_lock.acquire(blocking=False):
-            try:
-                threading.Thread(target=self._refresh_bm25_in_background, daemon=True, name="bm25-refresh").start()
-            except RuntimeError as exc:  # a later search tries again
-                self._bm25_refresh_lock.release()
-                print(f"[WARN] BM25 background build could not start: {exc}", file=sys.stderr)
+        else:
+            self._start_bm25_background_build("bm25-refresh")
+
+    def _start_bm25_background_build(self, thread_name: str) -> None:
+        """Start one background BM25 build or refresh, unless one is on its way.
+
+        The thread holds ``_bm25_refresh_lock`` until it ends, and that lock is
+        what a keyword-only search on a cold index waits on: a background build
+        that skipped it left such a search reading an empty BM25 (GH #321).
+        When the lock is already taken, a build is on its way, from a search
+        or from the startup prewarm: no second one starts and the caller does
+        not wait. A thread that cannot start frees the lock for a later search.
+
+        By Lyon.
+        """
+        if not self._bm25_refresh_lock.acquire(blocking=False):
+            return
+        try:
+            threading.Thread(target=self._refresh_bm25_in_background, daemon=True, name=thread_name).start()
+        except RuntimeError as exc:  # a later search tries again
+            self._bm25_refresh_lock.release()
+            print(f"[WARN] BM25 background build could not start: {exc}", file=sys.stderr)
 
     def _refresh_bm25_in_background(self) -> None:
-        """Build or refresh the BM25 of a large index while searches go on."""
+        """Build or refresh BM25 while searches go on: a large index, or any index right after a start."""
         try:
             self._ensure_bm25_index(refresh=True)
             if self._bm25_initialized and not self._bm25_stale.is_set():
@@ -2065,6 +2129,36 @@ class KnowledgeOrchestrator:
                 self._invalidate_caches()
         finally:
             self._bm25_refresh_lock.release()
+
+    def _raise_if_keyword_index_missing(self) -> None:
+        """Refuse a keyword-only answer read from a BM25 that was never built.
+
+        Keyword-only search has no other channel, so an empty answer says that
+        nothing matches, which holds only for an empty collection. The
+        generation is checked again after the count, since a build can publish
+        meanwhile, and the reason comes from the index lock and the recorded
+        error as they are now. A rebuild in progress still serves the previous
+        generation and passes, as do bare test doubles that carry no
+        ``_bm25_initialized``. Nothing is logged: another operation can hold
+        the index for hours, and every search would log.
+
+        By Lyon.
+        """
+        if getattr(self, "_bm25_initialized", True) or self.bm25_index.has_published_generation:
+            return
+        try:
+            count = self.collection.count()
+        except Exception as exc:
+            raise Bm25NotReadyError(
+                f"The keyword index is not built, and the collection could not be counted: {exc}"
+            ) from exc
+        if count == 0 or self._bm25_initialized or self.bm25_index.has_published_generation:
+            return
+        # An RLock has no locked() before Python 3.14: probe it, and give it back if taken.
+        is_index_busy = not self._index_lock.acquire(blocking=False)
+        if not is_index_busy:
+            self._index_lock.release()
+        raise Bm25NotReadyError(_describe_missing_keyword_index(is_index_busy, self._bm25_last_error))
 
     def _mark_bm25_stale(self) -> None:
         """Note that the published BM25 generation no longer matches Chroma.
@@ -2203,7 +2297,8 @@ class KnowledgeOrchestrator:
                 self._clear_bm25_stale()
             except Exception as e:
                 print(f"[WARN] Failed to build BM25 index: {e}", file=sys.stderr)
-                self._bm25_last_error = str(e)[:200]
+                # The type name keeps an exception without a message from recording "".
+                self._bm25_last_error = f"{type(e).__name__}: {e}"[:200]
                 # Do not mark initialized; retry allowed on next call.
 
     # =========================================================================
@@ -4284,6 +4379,13 @@ class KnowledgeOrchestrator:
           ``Fts5NotReadyError`` when the feature is disabled or the index is
           not ready — the MCP wrapper surfaces the error to the caller.
 
+        A keyword-only search (``hybrid_alpha <= 0``) waits for a BM25 build
+        already running, and raises ``Bm25NotReadyError`` when a non-empty
+        collection still has no published generation. The message names the
+        cause as it stands: another operation holds the index, the last build
+        failed, the build has not published yet, or the collection could not
+        be counted.
+
         ``include_folders`` and ``exclude_folders`` are recursive directories
         relative to documents_dir. Every backend selects only eligible chunks
         before top-k ranking; exclusions win. Empty lists preserve global search.
@@ -4342,6 +4444,8 @@ class KnowledgeOrchestrator:
 
         if hybrid_alpha < 1.0:
             self._ensure_bm25_index_or_refresh(keyword_only=hybrid_alpha <= 0)
+        if hybrid_alpha <= 0:
+            self._raise_if_keyword_index_missing()
         # An answer computed without a BM25 generation lacks its keyword matches;
         # from the cache it would still be served after the build is published.
         is_cacheable = hybrid_alpha >= 1.0 or getattr(self, "_bm25_initialized", True)
@@ -5725,7 +5829,10 @@ def search_knowledge(
             how many.
         hybrid_alpha: Balance between semantic and keyword search. 0.0 = keyword-only (best for exact
             technical terms like CVE IDs or tool names), 0.3 = balanced default, 1.0 = semantic-only
-            (best for conceptual or natural-language queries).
+            (best for conceptual or natural-language queries). While the keyword index is not built
+            (a reindex, a document write or the lexical index migration holds the index, or its build
+            failed), a keyword-only search returns an error that says why, with a suggestion, instead
+            of reporting no results.
         min_score: Minimum score (0.0–1.0) a result needs to be returned; default 0.0 returns all
             results. Scores are min-max normalized per query over its candidates: the best scores 1.0
             and the weakest 0.0, while a single candidate or candidates that all tie score 1.0. On the
@@ -5800,6 +5907,15 @@ def search_knowledge(
                 "status": "error",
                 "error": str(exc),
                 "suggestion": "search_method='auto' fallback gracefully",
+            }
+        )
+    except Bm25NotReadyError as exc:
+        # Keyword-only has no other channel: say why instead of a false no_results.
+        return json.dumps(
+            {
+                "status": "error",
+                "error": str(exc),
+                "suggestion": "search with hybrid_alpha > 0 to use the semantic channel meanwhile, or retry later",
             }
         )
 
@@ -6581,13 +6697,10 @@ def main():
                 # not silently degrade to semantic-only while the first
                 # keyword query waits for the multi-minute inline or
                 # background build. Daemon thread — the stdio `initialize`
-                # handshake is never blocked. Idempotent against the first
-                # search's _ensure_bm25_index_or_refresh via _bm25_initialized.
-                threading.Thread(
-                    target=orchestrator._ensure_bm25_index,
-                    name="bm25-prewarm",
-                    daemon=True,
-                ).start()
+                # handshake is never blocked. GH #321: it takes the lock of
+                # any background build, so a keyword-only search arriving
+                # mid-build waits for it instead of reading an empty BM25.
+                orchestrator._start_bm25_background_build("bm25-prewarm")
 
             # Start file watcher for auto-reindex on document changes
             if os.environ.get("KNOWLEDGE_RAG_WATCHER_DISABLED", "").strip() == "1":

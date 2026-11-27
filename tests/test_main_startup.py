@@ -1,9 +1,10 @@
-"""Startup regression guards for GH #216.
+"""Startup regression guards for GH #216 and GH #321.
 
 Ensure `main()` never blocks the MCP `initialize` handshake on initial
 indexing. If a future refactor swaps the background call back to
 `orchestrator.index_all()` (or any synchronous variant), these tests
-fail before the change ships.
+fail before the change ships. The BM25 prewarm must start through the
+background build, whose lock a keyword-only search waits on (GH #321).
 """
 
 from __future__ import annotations
@@ -87,6 +88,7 @@ def test_empty_collection_starts_background_not_sync(monkeypatch):
 
     mock_orch.start_reindex_background.assert_called_once_with("incremental")
     mock_orch.index_all.assert_not_called()
+    mock_orch._start_bm25_background_build.assert_not_called()
 
 
 def test_populated_collection_triggers_no_indexing(monkeypatch):
@@ -100,6 +102,18 @@ def test_populated_collection_triggers_no_indexing(monkeypatch):
     mock_orch.start_reindex_background.assert_not_called()
     mock_orch.index_all.assert_not_called()
     mock_orch.nuclear_rebuild.assert_not_called()
+
+
+def test_given_a_populated_collection_when_main_starts_then_the_bm25_prewarm_goes_through_the_background_build(
+    monkeypatch,
+):
+    _patch_startup_side_effects(monkeypatch)
+    mock_orch = _mock_orchestrator_populated()
+    monkeypatch.setattr(server, "get_orchestrator", lambda: mock_orch)
+
+    server.main()
+
+    mock_orch._start_bm25_background_build.assert_called_once_with("bm25-prewarm")
 
 
 def test_start_reindex_background_returns_before_transport(monkeypatch):
