@@ -22,6 +22,7 @@ def isolated_env(base_dir, **extra):
     return {
         **os.environ,
         "KNOWLEDGE_RAG_DIR": str(base_dir),
+        "KNOWLEDGE_RAG_SINGLE_INSTANCE": "0",
         "KNOWLEDGE_RAG_WATCHER_DISABLED": "1",
         "HF_HUB_OFFLINE": "1",
         "PYTHONPATH": str(ROOT),
