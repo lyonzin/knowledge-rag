@@ -1,60 +1,47 @@
-"""Optional single-instance guard for the MCP server process.
+"""One owner per data directory for the MCP server process.
 
-Background
-----------
-MCP stdio servers are 1-process-per-client by protocol design. Multiple
-Claude Code windows, Claude Desktop + IDE running simultaneously, or clients
-that open extra internal connections during approval/review flows will all
-spawn additional `knowledge-rag` processes. Each process holds its own
-embedding model, ChromaDB client, BM25 state, and file watcher.
+Every MCP stdio client spawns its own ``knowledge-rag`` process. Only one of
+them may open ChromaDB: a second writer, and even a reader opening it during
+writes, left HNSW segments unloadable. The owner holds a nonblocking OS lock
+on the stable ``knowledge-rag.lock.guard`` sidecar until it dies (claimed in
+``mcp_server._writer_role``); the others follow. That lock decides: the PID on
+line 1 of ``knowledge-rag.lock`` serves diagnostics and older servers, which
+lock nothing else, and line 2 (GUARDED_MARK) tells their files from ours.
 
-Lazy-loading the embedding model (v3.8.0) reduces idle cost dramatically,
-but some users still want a hard cap of one process per data directory.
-This module provides that cap as an OPT-IN, never as a default.
+``KNOWLEDGE_RAG_SINGLE_INSTANCE=1`` (also true/yes/on; HTTP transports set
+it) makes a later process exit instead. ``single_instance_lock()`` keeps its
+opt-in contract and ``writer_lock()`` scopes ownership for tests and scripts.
+The sidecar is never unlinked: a new inode would split the guard. A crash
+releases the lock and the next owner replaces the stale PID file.
 
-Activation
-----------
-Set the environment variable in your MCP client config:
-
-    KNOWLEDGE_RAG_SINGLE_INSTANCE=1     # also accepts: true, yes, on (case-insensitive)
-
-When unset (default), `single_instance_lock()` is a no-op and the server
-behaves exactly as it did before this module existed.
-
-When enabled, an OS lock on the stable `knowledge-rag.lock.guard` sidecar
-serializes acquisition and protects the entire context. The PID file
-`knowledge-rag.lock` remains readable for diagnostics and legacy servers.
-The sidecar is never unlinked: replacing its inode would split the guard.
-
-Normal exit removes our PID and closes the guarded descriptor. SIGINT and
-SIGTERM preserve prior handlers; ignored or handled signals retain ownership
-until the context exits. Crash / SIGKILL releases the OS lock automatically;
-the next owner recovers the stale PID file while holding the same OS lock.
-
-Authors
--------
-- Concept and original guard: Sergey Khokhlov (@Hohlas) in PR #31
-- Reworked as opt-in + signal handlers + tests: Lyon. (knowledge-rag maintainer)
+Authors: Sergey Khokhlov (@Hohlas) wrote the original guard (PR #31); Lyon.
+made it opt-in with signal handling and tests, then the single-writer lock.
 """
 
 from __future__ import annotations
 
-import errno
+import codecs
 import os
 import signal
-import sys
-from contextlib import contextmanager
+import threading
+import time
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from types import FrameType
 from typing import Callable, Iterator, Optional
 
+from ._sidecar_lock import lock_sidecar as _lock_sidecar
 from .config import config
 
 LOCK_FILENAME = "knowledge-rag.lock"
 GUARD_FILENAME = f"{LOCK_FILENAME}.guard"
 ALREADY_RUNNING_EXIT_CODE = 75  # EX_TEMPFAIL from sysexits.h
 ENV_VAR = "KNOWLEDGE_RAG_SINGLE_INSTANCE"
+GUARDED_MARK = "guarded"  # line 2 of a PID file written under the OS guard (see _write_pid)
 _TRUTHY = {"1", "true", "yes", "on"}
+_SHARING_RETRY_DELAYS = (0.01, 0.02, 0.04, 0.08)  # transient Windows PID readers that deny delete sharing
+_ERROR_SHARING_VIOLATION = 32
+_standalone = threading.local()
 SignalHandler = Optional[Callable[[int, Optional[FrameType]], object] | int]
 
 
@@ -119,11 +106,26 @@ def _windows_pid_is_running(pid: int) -> bool:
         kernel.CloseHandle(handle)
 
 
-def _read_lock_pid(lock_path: Path) -> Optional[int]:
+def _lock_record(lock_path: Path) -> tuple[Optional[int], bool]:
+    """Read one snapshot; damaged trailing bytes must not hide an identifiable legacy PID."""
     try:
-        raw = lock_path.read_text(encoding="utf-8").strip().splitlines()[0]
-        return int(raw)
-    except (IndexError, OSError, ValueError):
+        raw = lock_path.read_bytes()
+    except FileNotFoundError:
+        return None, False
+    encoding = "utf-16" if raw.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)) else "utf-8-sig"
+    lines = raw.decode(encoding, errors="replace").splitlines()
+    try:
+        pid = int(lines[0])
+    except (ValueError, IndexError):
+        return None, False
+    return pid, lines[1:2] == [GUARDED_MARK]
+
+
+def _read_lock_pid(lock_path: Path) -> Optional[int]:
+    """Best-effort PID for diagnostics and cleanup; admission uses _lock_record directly."""
+    try:
+        return _lock_record(lock_path)[0]
+    except OSError:
         return None
 
 
@@ -148,59 +150,44 @@ def _already_running(lock_path: Path) -> AlreadyRunningError:
     owner = f"pid {pid}" if pid is not None else "OS lock held"
     return AlreadyRunningError(
         f"knowledge-rag MCP server is already running ({owner}). "
-        f"Refusing to start a second instance because {ENV_VAR} is enabled."
+        f"Refusing to start a second instance because {ENV_VAR} is enabled (HTTP transports enable it). "
+        "Close the other knowledge-rag sessions on this data directory, stdio clients included, and retry."
     )
 
 
-def _acquire_os_lock(fd: int) -> None:
-    """Lock the stable sidecar without blocking, including beyond EOF on Windows."""
-    if sys.platform == "win32":
-        import msvcrt
-
-        os.lseek(fd, 0, os.SEEK_SET)
-        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-    else:
-        import fcntl
-
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-
-
-@contextmanager
-def _process_guard(lock_path: Path) -> Iterator[None]:
-    """Keep one kernel-owned descriptor open, leaving the sidecar inode intact."""
-    fd = os.open(lock_path.with_name(GUARD_FILENAME), os.O_CREAT | os.O_RDWR, 0o644)
-    try:
-        try:
-            _acquire_os_lock(fd)
-        except OSError as exc:
-            if exc.errno in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
-                raise _already_running(lock_path) from exc
-            raise
-        yield
-    finally:
-        # Closing releases flock/byte-range locks, even if Python cleanup fails.
-        os.close(fd)
+def _lock_guard(lock_path: Path) -> int:
+    """The writer guard's descriptor, locked without blocking; AlreadyRunningError when busy. By Lyon."""
+    fd = _lock_sidecar(lock_path.with_name(GUARD_FILENAME))
+    if fd is None:
+        raise _already_running(lock_path)
+    return fd
 
 
 def _write_pid(lock_path: Path) -> None:
-    """Preserve the PID-file protocol for an already-running legacy server."""
+    """Write our PID file under the OS guard; a live older server's PID file is respected."""
+    retries = iter(_SHARING_RETRY_DELAYS)
     while True:
         try:
             fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
         except FileExistsError:
-            pid = _read_lock_pid(lock_path)
-            if pid is not None and _pid_is_running(pid):
+            pid, guarded = _lock_record(lock_path)
+            if not guarded and pid is not None and _pid_is_running(pid):
                 raise _already_running(lock_path)
             try:
                 lock_path.unlink()
             except FileNotFoundError:
                 pass
             except OSError as exc:
-                raise AlreadyRunningError(f"Failed to clear stale lock {lock_path}: {exc}") from exc
+                if os.name != "nt" or getattr(exc, "winerror", None) != _ERROR_SHARING_VIOLATION:
+                    raise
+                delay = next(retries, None)
+                if delay is None:
+                    raise
+                time.sleep(delay)  # recheck the record under the same guard before every retry
             continue
 
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(f"{os.getpid()}\n")
+            f.write(f"{os.getpid()}\n{GUARDED_MARK}\n")
         return
 
 
@@ -251,10 +238,59 @@ def single_instance_lock() -> Iterator[Optional[Path]]:
 
     config.data_dir.mkdir(parents=True, exist_ok=True)
     lock_path = _lock_path()
-    with _process_guard(lock_path):
+    with _owned(lock_path.parent.resolve() / lock_path.name) as held_path:
+        previous = getattr(_standalone, "owner", None)
+        _standalone.owner = (os.getpid(), held_path)
+        try:
+            yield lock_path
+        finally:
+            _standalone.owner = previous
+
+
+@contextmanager
+def standalone_guard(lock_path: Path) -> Iterator[None]:
+    """Borrow only this thread's opt-in standalone lease, never a running server's claim. By Lyon."""
+    lock_path = lock_path.parent.resolve() / lock_path.name
+    if getattr(_standalone, "owner", None) == (os.getpid(), lock_path):
+        yield
+    else:
+        with _owned(lock_path):
+            yield
+
+
+@contextmanager
+def writer_lock() -> Iterator[bool]:
+    """Yield True when this process owns writes to data_dir, False for a read-only follower.
+
+    With the opt-in variable set (HTTP transports set it), a busy lock raises
+    AlreadyRunningError as single_instance_lock() does. By Lyon.
+    """
+    config.data_dir.mkdir(parents=True, exist_ok=True)
+    with ExitStack() as stack:
+        yield _enter_owned(stack, _lock_path())  # outside any except: a body error propagates unchanged
+
+
+def _enter_owned(stack: ExitStack, lock_path: Path) -> bool:
+    """Push ownership onto ``stack``; False when another process owns data_dir. By Lyon."""
+    try:
+        stack.enter_context(_owned(lock_path))
+    except AlreadyRunningError:
+        if single_instance_enabled():
+            raise
+        return False
+    return True
+
+
+@contextmanager
+def _owned(lock_path: Path) -> Iterator[Path]:
+    """Hold the OS guard and our PID file until the context exits; the sidecar inode stays. By Lyon."""
+    fd = _lock_guard(lock_path)
+    try:
         _write_pid(lock_path)
         try:
             with _signal_handlers():
                 yield lock_path
         finally:
             _remove_if_ours(lock_path)
+    finally:
+        os.close(fd)  # closing releases flock/byte-range locks, even if Python cleanup fails

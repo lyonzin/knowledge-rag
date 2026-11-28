@@ -41,13 +41,14 @@ Anything requiring the attacker to already own the local filesystem is **out of 
 
 | Version | Status |
 |---|---|
-| Latest published 5.1.x release | Current maintenance line; check release notes for the fixes actually included |
+| Latest published 5.2.x release | Current maintenance line; check release notes for the fixes actually included |
 | Unreleased branches / pull requests | Under review; not a released security guarantee |
-| Previous release line (5.0.x since 5.1.0) | Security patch window of 30 days after the next minor or major release, under the policy below |
-| 4.11.x | In the 30-day security patch window that started with 5.0.0; it ends on 2026-12-05 |
+| 5.1.x | Security patches for 30 days after the [v5.2.0 release](https://github.com/lyonzin/knowledge-rag/releases/tag/v5.2.0) is published |
+| 5.0.x | Its existing security patch window ends on 2026-12-14 |
+| 4.11.x | Its existing security patch window ends on 2026-12-05 |
 | Older releases | Unsupported; upgrade to the maintained release |
 
-When a new minor or major version ships, the previous release line gets a final 30-day security patch window and is then unsupported; with 5.1.0, that is 5.0.x, whose window ends on 2026-12-14. The version embedded in a development branch does not prove that its fixes have been published. Consult [releases](https://github.com/lyonzin/knowledge-rag/releases) and the associated changelog.
+When a new minor or major version ships, the previous release line gets a final 30-day security patch window and is then unsupported. A subsequent release does not shorten a window already announced. The version embedded in a development branch does not prove that its fixes have been published. Consult [releases](https://github.com/lyonzin/knowledge-rag/releases) and the associated changelog.
 
 ---
 

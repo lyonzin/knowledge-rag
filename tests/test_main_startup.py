@@ -1,136 +1,105 @@
-"""Startup regression guards for GH #216.
+"""Startup regression guards for GH #216 and GH #321.
 
-Ensure `main()` never blocks the MCP `initialize` handshake on initial
-indexing. If a future refactor swaps the background call back to
-`orchestrator.index_all()` (or any synchronous variant), these tests
-fail before the change ships.
+Ensure `main()` never blocks the MCP `initialize` handshake on checking,
+repairing or indexing the index: the process that owns writes runs that work
+on a background thread (tests/test_main_writer_role.py covers the roles). If
+a future refactor swaps the background call back to `orchestrator.index_all()`
+(or any synchronous variant), these tests fail before the change ships. The
+BM25 prewarm must start through the background build, whose lock a
+keyword-only search waits on (GH #321).
 """
 
 from __future__ import annotations
 
 import threading
 import time
-from contextlib import contextmanager
 from unittest.mock import MagicMock
 
 import pytest
+from support.main_startup import (
+    hold_preflight_until,
+    join_startup,
+    mock_orchestrator_empty,
+    mock_orchestrator_populated,
+    patch_startup_side_effects,
+    run_main,
+)
 
-from mcp_server import server
+from mcp_server import preflight, server
 
-
-@contextmanager
-def _noop_lock():
-    yield None
-
-
-def _spawn_daemon_work(mode, resume_state=None):
-    """Simulate the real `start_reindex_background` contract.
-
-    v4.9.1 requires the method to spawn a daemon thread and return
-    immediately. This side_effect matches that contract by spawning
-    a real 2 s thread and returning a status envelope right away. If
-    a future refactor makes the wrapper synchronous (drops the thread
-    launch), the timing assertion in
-    `test_main_reaches_transport_under_deadline` will catch it — main()
-    would then await the 2 s of "indexing work" instead of proceeding
-    to `_run_transport` immediately.
-    """
-    threading.Thread(target=lambda: time.sleep(2.0), daemon=True).start()
-    return {"status": "started", "operation": mode}
-
-
-def _mock_orchestrator_empty() -> MagicMock:
-    """Orchestrator with collection.count()=0, `start_reindex_background`
-    behaves like the real v4.9.1 implementation (spawn daemon, return
-    immediately). Kept as a shared helper so every test in this file
-    exercises the same realistic contract.
-    """
-    mock = MagicMock()
-    mock._check_dimension_mismatch.return_value = False
-    mock.collection.count.return_value = 0
-    mock.start_reindex_background.side_effect = _spawn_daemon_work
-    return mock
-
-
-def _mock_orchestrator_populated() -> MagicMock:
-    """Orchestrator with an existing populated collection."""
-    mock = MagicMock()
-    mock._check_dimension_mismatch.return_value = False
-    mock.collection.count.return_value = 42
-    return mock
-
-
-def _patch_startup_side_effects(monkeypatch):
-    """Neutralize watcher, transport, logging, preflight, and single-instance lock.
-
-    `main()` imports these locally (`from .X import Y`) at call-time, so
-    patches must target the *source* module (`mcp_server.X`), not the
-    server namespace — the local import re-reads the module's current
-    attribute at execution time.
-    """
-    from mcp_server import instance_lock, logging_config, preflight
-
-    monkeypatch.setenv("KNOWLEDGE_RAG_WATCHER_DISABLED", "1")
-    monkeypatch.setattr(instance_lock, "single_instance_lock", _noop_lock)
-    monkeypatch.setattr(preflight, "run_preflight", lambda timeout_seconds=30: False)
-    monkeypatch.setattr(logging_config, "setup_logging", lambda fmt="text", level="INFO": None)
-    monkeypatch.setattr(server, "_run_transport", lambda transport: None)
+HANDSHAKE_DEADLINE_SECONDS = 0.5
 
 
 def test_empty_collection_starts_background_not_sync(monkeypatch):
     """GH #216: initial indexing MUST use start_reindex_background, never index_all sync."""
-    _patch_startup_side_effects(monkeypatch)
-    mock_orch = _mock_orchestrator_empty()
-    monkeypatch.setattr(server, "get_orchestrator", lambda: mock_orch)
+    patch_startup_side_effects(monkeypatch)
+    mock_orch = mock_orchestrator_empty()
+    monkeypatch.setattr(server, "_open_orchestrator", lambda: mock_orch)
 
-    server.main()
+    run_main()
 
     mock_orch.start_reindex_background.assert_called_once_with("incremental")
     mock_orch.index_all.assert_not_called()
+    mock_orch._start_bm25_background_build.assert_not_called()
 
 
 def test_populated_collection_triggers_no_indexing(monkeypatch):
     """When index is already populated, main() must not touch either indexing path."""
-    _patch_startup_side_effects(monkeypatch)
-    mock_orch = _mock_orchestrator_populated()
-    monkeypatch.setattr(server, "get_orchestrator", lambda: mock_orch)
+    patch_startup_side_effects(monkeypatch)
+    mock_orch = mock_orchestrator_populated()
+    monkeypatch.setattr(server, "_open_orchestrator", lambda: mock_orch)
 
-    server.main()
+    run_main()
 
     mock_orch.start_reindex_background.assert_not_called()
     mock_orch.index_all.assert_not_called()
     mock_orch.nuclear_rebuild.assert_not_called()
 
 
-def test_start_reindex_background_returns_before_transport(monkeypatch):
-    """Regression guard: main() must not await indexing completion.
+def test_given_a_populated_collection_when_main_starts_then_the_bm25_prewarm_goes_through_the_background_build(
+    monkeypatch,
+):
+    patch_startup_side_effects(monkeypatch)
+    mock_orch = mock_orchestrator_populated()
+    monkeypatch.setattr(server, "_open_orchestrator", lambda: mock_orch)
 
-    Records the order of `start_reindex_background` and `_run_transport`
-    calls — if a future refactor makes indexing synchronous, transport
-    would fire only after indexing completes, which is exactly the bug
-    that #216 documented.
+    run_main()
+
+    mock_orch._start_bm25_background_build.assert_called_once_with("bm25-prewarm")
+
+
+def test_start_reindex_background_runs_after_the_transport_started(monkeypatch):
+    """Regression guard: main() must not await indexing, nor even start it first.
+
+    The transport now starts before the startup check, and the initial
+    indexing follows that check on the startup thread. A refactor that made
+    the startup synchronous again blocks main() in the held preflight, which
+    fails, instead of passing.
     """
-    _patch_startup_side_effects(monkeypatch)
-    mock_orch = _mock_orchestrator_empty()
+    patch_startup_side_effects(monkeypatch)
+    transport_started = threading.Event()
+    hold_preflight_until(monkeypatch, transport_started)
+    mock_orch = mock_orchestrator_empty()
 
     call_order: list[str] = []
 
     def track_background(mode, resume_state=None):
         call_order.append(f"background:{mode}")
-        # Preserve the realistic spawn behavior from `_spawn_daemon_work`.
+        # Preserve the realistic spawn behavior from `spawn_daemon_work`.
         threading.Thread(target=lambda: time.sleep(2.0), daemon=True).start()
         return {"status": "started", "operation": mode}
 
     def track_transport(transport):
         call_order.append(f"transport:{transport}")
+        transport_started.set()
 
     mock_orch.start_reindex_background.side_effect = track_background
-    monkeypatch.setattr(server, "get_orchestrator", lambda: mock_orch)
+    monkeypatch.setattr(server, "_open_orchestrator", lambda: mock_orch)
     monkeypatch.setattr(server, "_run_transport", track_transport)
 
-    server.main()
+    run_main()
 
-    assert call_order == ["background:incremental", f"transport:{server.config.transport}"]
+    assert call_order == [f"transport:{server.config.transport}", "background:incremental"]
 
 
 def test_main_reaches_transport_under_deadline(monkeypatch):
@@ -139,56 +108,58 @@ def test_main_reaches_transport_under_deadline(monkeypatch):
     The previous handshake-order test mocked `start_reindex_background`
     with a lambda that returned instantly, so a hypothetical refactor
     that made the wrapper synchronous (dropped `threading.Thread`) would
-    still pass the ordering assertion. `_spawn_daemon_work` fixes that by
+    still pass the ordering assertion. `spawn_daemon_work` fixes that by
     spawning a real 2 s daemon thread — main() must therefore complete
     within a tight deadline. If the indexing call ever blocks main() on
     the daemon's work, this assertion catches it.
     """
-    _patch_startup_side_effects(monkeypatch)
-    mock_orch = _mock_orchestrator_empty()
-    monkeypatch.setattr(server, "get_orchestrator", lambda: mock_orch)
+    patch_startup_side_effects(monkeypatch)
+    mock_orch = mock_orchestrator_empty()
+    monkeypatch.setattr(server, "_open_orchestrator", lambda: mock_orch)
 
     start = time.monotonic()
     server.main()
     elapsed = time.monotonic() - start
+    join_startup()
 
-    assert elapsed < 0.5, (
-        f"main() took {elapsed:.2f}s to reach _run_transport — expected < 0.5s. "
+    assert elapsed < HANDSHAKE_DEADLINE_SECONDS, (
+        f"main() took {elapsed:.2f}s to reach _run_transport — expected < {HANDSHAKE_DEADLINE_SECONDS}s. "
         f"start_reindex_background likely became synchronous and blocked the handshake."
     )
 
 
 @pytest.mark.parametrize("args", [["--transport", "streamable-http"], ["--transport=sse"]])
 def test_cli_transport_reaches_config_before_startup_components(monkeypatch, args):
-    from mcp_server import metrics, preflight
+    from mcp_server import metrics
 
-    _patch_startup_side_effects(monkeypatch)
+    patch_startup_side_effects(monkeypatch)
     monkeypatch.setattr(server.sys, "argv", ["knowledge-rag", *args])
     monkeypatch.setattr(server.config, "transport", "stdio")
     monkeypatch.setattr(server.config, "metrics_enabled", True)
-    monkeypatch.delenv("KNOWLEDGE_RAG_SINGLE_INSTANCE", raising=False)
     observed = []
     expected = "sse" if "=" in args[0] else "streamable-http"
-    monkeypatch.setattr(preflight, "run_preflight", lambda: observed.append(("preflight", server.config.transport)))
+    monkeypatch.setattr(preflight, "_probe_and_repair", lambda: observed.append(("preflight", server.config.transport)))
 
-    def get_orchestrator():
+    def open_orchestrator():
         observed.append(("orchestrator", server.config.transport))
-        return _mock_orchestrator_populated()
+        return mock_orchestrator_populated()
 
-    monkeypatch.setattr(server, "get_orchestrator", get_orchestrator)
+    monkeypatch.setattr(server, "_open_orchestrator", open_orchestrator)
     monkeypatch.setattr(
         metrics, "start_metrics_server", lambda port: observed.append(("metrics", server.config.transport))
     )
     monkeypatch.setattr(server, "_run_transport", lambda transport: observed.append(("transport", transport)))
-    server.main()
-    assert observed == [(component, expected) for component in ("preflight", "orchestrator", "metrics", "transport")]
+    run_main()
+    # The startup thread interleaves with the transport, so the order is not compared.
+    components = ("metrics", "orchestrator", "preflight", "transport")
+    assert sorted(observed) == [(component, expected) for component in components]
 
 
 def test_invalid_cli_transport_fails_before_opening_database(monkeypatch):
-    _patch_startup_side_effects(monkeypatch)
+    patch_startup_side_effects(monkeypatch)
     monkeypatch.setattr(server.sys, "argv", ["knowledge-rag", "--transport", "invalid"])
     orchestrator = MagicMock()
-    monkeypatch.setattr(server, "get_orchestrator", orchestrator)
+    monkeypatch.setattr(server, "_open_orchestrator", orchestrator)
     with pytest.raises(ValueError, match="Unknown transport"):
         server.main()
     orchestrator.assert_not_called()

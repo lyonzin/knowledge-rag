@@ -51,7 +51,9 @@ irrelevant results. Its score is not a probability that an answer is correct.
 
 ### ChromaDB index crashes on startup
 
-Native ChromaDB failures can terminate Python before normal exception handling runs. Startup now probes ChromaDB in a child process before initializing the MCP server. If the probe crashes, the active `chroma_db/` and `index_metadata.json` are moved to `data/backups/auto-repair-*`, and the next startup can rebuild a clean index. Only the 3 most recent `auto-repair-*` backups are kept: older ones are deleted after each new repair.
+The server answers the MCP handshake before the index is ready. It checks ChromaDB in a child process so a native failure cannot take down the transport. A probe that cannot import its dependencies did not establish that the index is damaged: inspect `<data_dir>/preflight.log` and fix the installation rather than deleting the index. A busy or timed-out probe does not trigger a move either. When repeated reads confirm damage to the same index, recovery moves `chroma_db/` and `index_metadata.json` to `<data_dir>/backups/auto-repair-*` so the server can rebuild. It keeps the three newest auto-repair backups.
+
+If the log reports `ImportError` or `ModuleNotFoundError`, make sure the launcher and its dependencies are installed in the same virtual environment. The probe runs Python in isolated mode; it does not load dependencies provided only by `PYTHONPATH` or `pip install --user`. This error does not require an index rebuild.
 
 The same guarded behavior is available through either console script:
 
@@ -59,6 +61,20 @@ The same guarded behavior is available through either console script:
 knowledge-rag
 knowledge-rag-guarded
 ```
+
+### Interrupted index repair (`.auto-repair-pending`)
+
+Exit **65** means the repair needs inspection. After a successful move or complete rollback, preflight retries a busy marker removal after 1, 2 and 4 seconds, without moving the files again for that reason. If removal still fails, or the catalog rollback itself failed, the marker blocks the next preflight before it opens Chroma or prunes backups. Its contents name the **intended** backup for inspection; never execute them or treat them as proof of a move.
+
+Stop **all** servers and clients using this store. Make a separate copy of the active index, catalog, marker, `preflight.log` and `<data_dir>/backups/` outside the backup rotation. Inspect the backup for **this attempt** (same timestamp and reason); do not guess from the newest folder.
+
+| What you verify on disk | What to do |
+|---|---|
+| **Pair active:** `<data_dir>/index_metadata.json` and the configured `chroma_dir/chroma.sqlite3` are present; the attempt's backup contains neither moved member (the empty folder may be absent). | Verify both against the separate copy. Leave the active catalog and the entire index directory in place. |
+| **Pair in backup:** `index_metadata.<reason>.json` and `chroma_db.<reason>/chroma.sqlite3` are together in the indicated backup. The live catalog is absent and the active index is absent or an empty directory. | Verify the catalog and the entire backed-up index against the separate copy. Keep them together in the backup; **do not restore just the catalog**. Restarting one server after archiving the marker lets it rebuild. |
+| **Split pair:** `preflight.log` says `Catalog rollback failed`, the original index is active, the live catalog is absent, and the log identifies the matching backed-up catalog. | **Copy**, do not move, that catalog to `<data_dir>/index_metadata.json`. Verify that both catalogs have the same SHA-256 and keep the backup. Never overwrite an existing live catalog. |
+
+For a complete pair, compare SHA-256 of the catalog and the index files at matching relative paths in the separate copy. Only after verifying the appropriate state above, release any handle on the marker and **move only `<data_dir>/.auto-repair-pending`** into the separate copy under a new name. Restart one server. If either member is ambiguous, the catalog is unexpectedly absent or the marker still cannot be moved, keep everything in place; do not bypass the stop.
 
 ### Index is empty
 
@@ -111,17 +127,17 @@ Memory depends on the model, chunk lengths, batch size, corpus, and runtime allo
 
 ### Multiple MCP clients spawn duplicate servers
 
-MCP stdio is one process per client by protocol — multiple Claude Code windows, Claude Desktop + IDE, etc. each spawn their own `knowledge-rag` process. Since v3.8.0 idle processes are cheap (no embedding model loaded until first query). If you've measured and want a hard cap of one server per data directory, opt in:
+MCP stdio is one process per client by protocol — multiple Claude Code windows, Claude Desktop + IDE, etc. each spawn their own `knowledge-rag` process. Only the first one for a `data_dir` opens the index. The others stay up, load no model and open no index, and answer every tool with `"status": "error"` and the owner's PID in `owner_pid`; the first call after the owner exits takes over. To make a second process exit instead, opt in:
 
 ```bash
 export KNOWLEDGE_RAG_SINGLE_INSTANCE=1
 ```
 
-A second instance exits immediately with code 75. Default is OFF (multi-client friendly). Full guide: [docs/single-instance.md](single-instance.md). Sample MCP config: [examples/mcp-config-single-instance.json](../examples/mcp-config-single-instance.json).
+A second instance then exits immediately with code 75. Full guide: [docs/single-instance.md](single-instance.md). Sample MCP config: [examples/mcp-config-single-instance.json](../examples/mcp-config-single-instance.json).
 
-### Second MCP client disconnects / exits with code 75
+### Second MCP client refuses every tool / exits with code 75
 
-If two clients both launch `knowledge-rag` over `stdio` against the same `data_dir`, the single-instance guard (`KNOWLEDGE_RAG_SINGLE_INSTANCE=1`) can reject the second process to prevent ChromaDB index corruption (discussed in [#217](https://github.com/lyonzin/knowledge-rag/pull/217)).
+If two clients both launch `knowledge-rag` over `stdio` against the same `data_dir`, the second process does not open the index, to prevent ChromaDB index corruption (discussed in [#217](https://github.com/lyonzin/knowledge-rag/pull/217)): it refuses every tool, or exits with code 75 when `KNOWLEDGE_RAG_SINGLE_INSTANCE=1` is set.
 
 To share a single index across multiple clients concurrently, run one shared server instead:
 

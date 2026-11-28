@@ -1,16 +1,15 @@
-"""Auto-repair backup retention in startup preflight (GH #267).
+"""Startup recovery and retention: an uncapped 0.6 GB index once left 197 backups (76 GB; GH #267)."""
 
-Every repair moved the whole index into a new ``data/backups/auto-repair-*``
-folder and none was ever deleted: one install piled up 197 backups (76 GB)
-next to a 0.6 GB index.
-"""
-
+import os
 import shutil
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from support.harmless_probe import native_crash
 
 NEW_BACKUP = "auto-repair-20261105-120000"
 OLD_BACKUPS = [
@@ -22,7 +21,7 @@ OLD_BACKUPS = [
 
 
 class _FrozenClock(datetime):
-    """preflight's clock, stopped at ``moment``: a repair creates ``backups/NEW_BACKUP`` unless a test moves it."""
+    """The repair's clock, stopped at ``moment``: a repair creates ``backups/NEW_BACKUP`` unless a test moves it."""
 
     moment = datetime(2026, 11, 5, 12, 0, 0)
 
@@ -32,8 +31,11 @@ class _FrozenClock(datetime):
 
 
 def _crash_probe_with_backups(tmp_path, monkeypatch, *names):
-    """Make every probe crash on a fresh data_dir whose ``backups/`` already holds ``names``."""
-    from mcp_server import preflight
+    """Make every probe crash on a fresh data_dir whose ``backups/`` already holds ``names``.
+
+    One move attempt per repair, as before the retries of _preflight_repair (their own tests cover them).
+    """
+    from mcp_server import _preflight_repair, preflight
 
     data_dir = tmp_path / "data"
     chroma_dir = data_dir / "chroma_db"
@@ -44,20 +46,18 @@ def _crash_probe_with_backups(tmp_path, monkeypatch, *names):
         (backups / name).mkdir(parents=True)
         (backups / name / "chroma.sqlite3").write_text("old", encoding="utf-8")
 
-    monkeypatch.setattr(preflight, "datetime", _FrozenClock)
+    monkeypatch.setattr(_preflight_repair, "datetime", _FrozenClock)
+    monkeypatch.setattr(_preflight_repair, "REPAIR_RETRY_DELAYS_SECONDS", ())
     monkeypatch.setattr(preflight.config, "data_dir", data_dir)
     monkeypatch.setattr(preflight.config, "chroma_dir", chroma_dir)
     monkeypatch.setattr(preflight, "PROBE_RETRY_DELAY_SECONDS", 0)
-    result = subprocess.CompletedProcess(args=[], returncode=-11, stdout="", stderr="segfault")
-    monkeypatch.setattr(preflight, "_probe_chroma", lambda timeout_seconds=30: result)
+    monkeypatch.setattr(preflight, "_probe_chroma", native_crash)
     return backups
 
 
 def _fail_renames(monkeypatch, *failing_calls):
     """Make preflight's ``os.rename`` raise WinError 32 on the given 1-based call numbers."""
-    from mcp_server import preflight
-
-    real_rename = preflight.os.rename
+    real_rename = os.rename
     calls = []
 
     def rename(src, dst):
@@ -66,7 +66,7 @@ def _fail_renames(monkeypatch, *failing_calls):
             raise OSError(32, "The process cannot access the file because it is being used by another process")
         real_rename(src, dst)
 
-    monkeypatch.setattr(preflight.os, "rename", rename)
+    monkeypatch.setattr(os, "rename", rename)
 
 
 @pytest.mark.parametrize("existing", [2, 3, 4])
@@ -111,18 +111,18 @@ def test_backup_that_cannot_be_deleted_does_not_break_the_repair(tmp_path, monke
 
     The locked folder is logged in one line and kept; the other old backups still go.
     """
-    from mcp_server import preflight
+    from mcp_server import _preflight_repair, preflight
 
     backups = _crash_probe_with_backups(tmp_path, monkeypatch, *OLD_BACKUPS)
     locked = backups / OLD_BACKUPS[0]
-    real_rmtree = preflight.shutil.rmtree
+    real_rmtree = _preflight_repair.shutil.rmtree
 
     def rmtree_unless_locked(path, *args, **kwargs):
         if Path(path) == locked:
             raise OSError(32, "The process cannot access the file because it is being used by another process")
         real_rmtree(path, *args, **kwargs)
 
-    monkeypatch.setattr(preflight.shutil, "rmtree", rmtree_unless_locked)
+    monkeypatch.setattr(_preflight_repair.shutil, "rmtree", rmtree_unless_locked)
 
     assert preflight.run_preflight() is True
     assert not (tmp_path / "data" / "chroma_db").exists()
@@ -183,18 +183,46 @@ def test_failed_move_prunes_nothing_and_leaves_no_folder(tmp_path, monkeypatch, 
     assert sorted(path.name for path in backups.iterdir()) == OLD_BACKUPS
 
 
-def test_failed_rollback_keeps_the_folder_holding_the_metadata(tmp_path, monkeypatch):
-    """GH #267: only an empty folder is removed; one holding a stuck metadata file stays as evidence."""
-    from mcp_server import preflight
+@pytest.mark.parametrize("rollback_blocked", [True, False], ids=["incomplete", "restored"])
+def test_later_repair_attempt_requires_a_complete_rollback(tmp_path, monkeypatch, rollback_blocked):
+    """A later timestamp and working renames must not mask a stranded catalog (#325)."""
+    from mcp_server import _preflight_repair, preflight
 
-    backups = _crash_probe_with_backups(tmp_path, monkeypatch)
-    (tmp_path / "data" / "index_metadata.json").write_text("{}", encoding="utf-8")
-    _fail_renames(monkeypatch, 2, 3)  # the chroma_db move and the metadata rollback both fail
-
-    with pytest.raises(SystemExit):
+    # Two later-dated backups evict the only copy of the catalog if an index-only retry is called a success.
+    ahead = ["auto-repair-20990101-000000", "auto-repair-20990102-000000"]
+    backups = _crash_probe_with_backups(tmp_path, monkeypatch, *ahead)
+    catalog = b'{"docs":["original"]}\r\n'
+    (backups.parent / "index_metadata.json").write_bytes(catalog)
+    advance = datetime(2026, 11, 5, 12, 0, 1)
+    monkeypatch.setattr(_preflight_repair, "REPAIR_RETRY_DELAYS_SECONDS", (0,))
+    clock = SimpleNamespace(sleep=lambda _: monkeypatch.setattr(_FrozenClock, "moment", advance))
+    monkeypatch.setattr(_preflight_repair, "time", clock)
+    _fail_renames(monkeypatch, *((2, 3) if rollback_blocked else (2,)))
+    if not rollback_blocked:
+        assert preflight.run_preflight() is True
+        [moved] = backups.glob("auto-repair-*/index_metadata.segfault.json")
+        assert (
+            moved.read_bytes() == catalog
+            and (moved.parent / "chroma_db.segfault" / "chroma.sqlite3").read_bytes() == b"bad"
+        )
+        assert not (backups.parent / ".auto-repair-pending").exists()
+        return
+    with pytest.raises(SystemExit) as stopped:
         preflight.run_preflight()
+    assert stopped.value.code == 65
+    _assert_stopped_after_restart(tmp_path, backups, catalog, ahead)
 
-    assert (backups / NEW_BACKUP / "index_metadata.segfault.json").exists()
+
+def _assert_stopped_after_restart(base, backups, catalog, ahead):
+    stranded = backups / NEW_BACKUP / "index_metadata.segfault.json"
+    assert (backups.parent / ".auto-repair-pending").read_text().strip() == f"{NEW_BACKUP}/{stranded.name}"
+    assert str(stranded) in (backups.parent / "preflight.log").read_text(encoding="utf-8")
+    cmd = [sys.executable, "-c", "from mcp_server.preflight import run_preflight; run_preflight()"]
+    env = {**os.environ, "KNOWLEDGE_RAG_DIR": str(base)}
+    restarted = subprocess.run(cmd, cwd=Path(__file__).resolve().parents[1], env=env, capture_output=True, timeout=20)
+    assert (restarted.returncode, b".auto-repair-pending" in restarted.stderr) == (65, True)
+    assert stranded.read_bytes() == catalog and (backups.parent / "chroma_db" / "chroma.sqlite3").read_bytes() == b"bad"
+    assert sorted(path.name for path in backups.iterdir()) == [NEW_BACKUP, *ahead]
 
 
 def test_failed_attempts_do_not_push_real_backups_out(tmp_path, monkeypatch):
@@ -223,10 +251,11 @@ def test_repairs_with_nothing_to_move_never_push_out_a_real_backup(tmp_path, mon
     backups = _crash_probe_with_backups(tmp_path, monkeypatch, OLD_BACKUPS[0])
     shutil.rmtree(tmp_path / "data" / "chroma_db")  # already moved aside by an earlier repair
     broken = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="No module named 'chromadb'")
-    monkeypatch.setattr(preflight, "_probe_chroma", lambda timeout_seconds=30: broken)
+    monkeypatch.setattr(preflight, "_probe_chroma", lambda target, timeout_seconds=30: broken)
     for minute in (1, 2, 3):
         monkeypatch.setattr(_FrozenClock, "moment", datetime(2026, 11, 5, 12, minute))
-        preflight.run_preflight()
+        with pytest.raises(RuntimeError, match="Could not verify"):
+            preflight.run_preflight()
 
     assert sorted(path.name for path in backups.iterdir()) == [OLD_BACKUPS[0]]
     assert "moved active index" not in (tmp_path / "data" / "preflight.log").read_text(encoding="utf-8")
@@ -242,7 +271,7 @@ def test_unlistable_backups_folder_does_not_break_the_repair(tmp_path, monkeypat
         raise PermissionError(13, "Access is denied", str(path))
 
     with monkeypatch.context() as denied:
-        denied.setattr(preflight.os, "scandir", scandir_denied)
+        denied.setattr(os, "scandir", scandir_denied)
         assert preflight.run_preflight() is True
 
     assert sorted(path.name for path in backups.iterdir()) == [*OLD_BACKUPS, NEW_BACKUP]

@@ -1,6 +1,6 @@
 # Operating Model & Single-Instance Mode
 
-> **TL;DR**: MCP stdio clients (Claude Desktop, Claude Code, Cursor, etc.) **spawn and own the knowledge-rag server process themselves**. You do **NOT** need to run `knowledge-rag` in a terminal separately, and you **must not** run it in a terminal at the same time as your MCP client — that produces two writer processes against the same data directory, which is exactly what causes the HNSW segment corruption documented in [issue #216](https://github.com/lyonzin/knowledge-rag/issues/216). The opt-in `KNOWLEDGE_RAG_SINGLE_INSTANCE=1` flag adds a hard cap of one process per data directory. **Recommended for anyone using knowledge-rag as a writer** (any normal MCP setup with the file watcher enabled).
+> **TL;DR**: MCP stdio clients (Claude Desktop, Claude Code, Cursor, etc.) **spawn and own the knowledge-rag server process themselves**; you do not need to run `knowledge-rag` in a terminal. Only one process per data directory owns the index: the first one claims it and keeps it until that process exits. Every other process started for the same data directory (a second client window, a terminal) stays up, never opens the index and answers all 13 tools with a refusal that names the owner; its first call after the owner exits takes over. To use one index from several clients at the same time, run one HTTP server and connect every client to it. `KNOWLEDGE_RAG_SINGLE_INSTANCE=1` makes a second process exit with code 75 instead of waiting.
 
 ---
 
@@ -21,50 +21,49 @@ Everything is inside that one child process:
 - Cross-encoder reranker (lazy-loaded)
 - **File watcher** — auto-reindexes when you drop / edit / delete a file in `documents/`
 
-You do **not** need to run `knowledge-rag` in a terminal to "keep the watcher alive" or "start the service" — that model is HTTP-server thinking and doesn't apply here. Running `knowledge-rag` from a terminal launches an **additional** process that will fight the MCP-managed one for the same `data_dir`, and the ChromaDB HNSW segment writes are not safe under concurrent writers on Windows.
+You do **not** need to run `knowledge-rag` in a terminal to "keep the watcher alive" or "start the service" — that model is HTTP-server thinking and doesn't apply here. A `knowledge-rag` started from a terminal while a client runs is a second process for the same `data_dir`: it does not open the index and serves no tool (see below).
 
 If you need to run `knowledge-rag` command-line for administrative work (`init`, backup, forced reindex from CLI), see [Administrative commands](#administrative-commands-manual-operations) below.
 
 ---
 
-## When you might want the single-instance flag
+## One owner per data directory
 
-MCP stdio servers are 1-process-per-client by protocol design. Some scenarios spawn more processes than you expected:
+Two processes writing to one ChromaDB directory, and even a process reading it while another writes, left HNSW segments unloadable ([issue #216](https://github.com/lyonzin/knowledge-rag/issues/216)). So exactly one process opens the index:
 
-- Some MCP clients open extra internal connections during approval / review / multi-agent flows
-- Long-running CI jobs accidentally launching parallel server processes
-- A misbehaving wrapper script that re-launches knowledge-rag in a loop
+- The first knowledge-rag process for a `data_dir` takes a nonblocking OS lock on `<data_dir>/knowledge-rag.lock.guard` (`fcntl.flock` on Linux/macOS, a one-byte `msvcrt.locking` range on Windows) and holds it until the process exits. It is the **owner**.
+- The owner answers the MCP `initialize` handshake at once and checks, opens and prepares the index on a background thread. Until the index is open and prepared, embedding-model migration included, every tool answers `{"status": "repairing", "message": "...", "retry_after_seconds": 5}`. If that startup fails, every tool answers `{"status": "error", "message": "..."}` with the reason, until the client restarts the server.
+- Any other process for the same `data_dir` is a **follower**. It never opens the index and answers every one of the 13 tools with:
 
-Each `knowledge-rag` process holds its own:
-- Embedding model (lazy-loaded; queries or indexing trigger loading, and memory depends on model, batch size, and runtime)
-- ChromaDB client + SQLite handles
-- BM25 in-memory index
-- Watchdog file observer
+```json
+{
+  "status": "error",
+  "message": "Another knowledge-rag process (pid 12345) owns this data directory, so this session does not open the index and serves no tool. It takes over on the first call after that process exits.",
+  "owner_pid": 12345,
+  "owner_running": true,
+  "hint": "To use one index from several clients at once, run one shared server (knowledge-rag --transport streamable-http) and connect every client to it; see docs/single-instance.md."
+}
+```
 
-If you've measured and confirmed you really do want a hard cap of one server per data directory, this flag is for you.
+- `owner_pid` is diagnostic. If the OS lock is busy but the PID cannot be read, the follower still refuses the call (`owner_pid: null`, `owner_running: false`). A missing PID is **not** permission to open the index or remove a lock.
+- The first tool call a follower receives after the owner's process exited takes over: that call answers `repairing`, and the follower runs the owner's startup. With several followers, the OS lock picks one; the refusals of the others then name the new owner when its PID is readable.
 
-## When it is safe to leave the flag unset
+## The startup check and the access lock
 
-Leaving the guard off requires coordinating every process accessing the data directory. `KNOWLEDGE_RAG_WATCHER_DISABLED=1` disables filesystem watching; it does not make the server read-only, disable write tools, or prevent initialization/migration writes. For multiple interactive clients, use one HTTP server process and connect clients to it.
+The startup check (preflight) reads the index in a child process so a native crash cannot kill the server. The child uses the parent's installed package, resolved index directory and collection, even if the working directory contains an older checkout or the config file changes before a follower takes over. Only repeated evidence of damage while reading that same index permits moving it to `data/backups/auto-repair-*`. A probe that cannot import or start is a startup error, not a reason to move data. The child is a reader and must not overlap with the owner's own use of the index, even if the owner exits, the child starts late or it runs past its timeout:
 
-If any process can index, receive watcher events, or call an MCP write tool (`add_document`, `add_from_url`, `update_document`, `remove_document`, `reindex_documents`), that process is a writer and **must be the only writer** against the `data_dir`. Enable the flag or manually guarantee no other process touches the directory.
+- The child takes a second OS lock, `<data_dir>/knowledge-rag.lock.access`, before it touches the index, and gives it up only by exiting.
+- The owner takes that lock after its checks, before it moves, repairs or opens the index, and keeps it until it exits. A check still inside, such as one left by a session that ended abruptly, makes the owner wait; tools answer `repairing` meanwhile.
+- A check that finds the lock taken exits without touching the index. That is contention, not damage, and it validates nothing: the owner runs the check again every 5 s, and moves or opens the index only after a check got inside. A check that times out is still inconclusive and keeps the index, as before ([#216](https://github.com/lyonzin/knowledge-rag/issues/216)).
+- If no check gets inside within 120 s, the owner neither opens nor moves the index, and every tool answers an `error` that says so. End the process that stays inside (a Python process started with `-c` that imports `mcp_server`), then restart the client.
+- The probe and owner compare the filesystem identities of the index directory and its SQLite database. If either is replaced, or the filesystem cannot identify it reliably, the owner refuses to move it. Do not point `chroma_db` or its SQLite file through a symlink, junction or hard-linked database file: this could put the data and its guard in different places. To relocate storage, set `paths.data_dir` for the **whole** directory, including its locks.
+- If the index is damaged and another program holds one of its files (an antivirus scan, a backup or sync client, a knowledge-rag older than this lock), moving it aside fails. The owner retries after 1, 2 and 4 s, then leaves the index untouched and answers `error` until the client restarts it. Details go to `<data_dir>/preflight.log`.
 
-> **Windows note.** A native Chroma preflight failure with code `3221225477` is an access violation, not proof of one specific cause. Preserve the database and collect diagnostics; do not delete the index automatically. Keep one writer process per data directory. A shared HTTP deployment is already supported; see below.
+## When to set `KNOWLEDGE_RAG_SINGLE_INSTANCE`
 
-## Administrative commands (manual operations)
+Without the variable, a second stdio process stays up as a follower, which suits clients that start several processes. With it, a second process exits with code `75` (`EX_TEMPFAIL` from `sysexits.h`) instead, which suits wrapper scripts or CI jobs that should fail fast. HTTP transports always set it: an HTTP server never follows, so a second one cannot bind the same data directory.
 
-For operations that open or replace index files, such as an offline FTS5 rebuild, backup, or moving `data_dir`:
-
-1. **Close** your MCP client (Claude Desktop / Code / Cursor). This kills the child process holding the `data_dir`.
-2. Run the documented maintenance command or synchronous Python operation. There is no general `knowledge-rag reindex` CLI subcommand; see [reindex operations](reindex-operations.md).
-3. Wait for the command to finish.
-4. **Reopen** your MCP client. It respawns the server, watcher picks up any new files.
-
-The lock is acquired by the server entry point. Scripts that access Chroma directly must also be coordinated; do not assume they acquire the same guard. `knowledge-rag init` exports configuration templates and presets rather than rebuilding the index.
-
-## Activation
-
-For stdio, set the environment variable in your MCP client config. Accepted truthy values (case-insensitive, surrounding whitespace ignored): `1`, `true`, `yes`, `on`. SSE/streamable-HTTP automatically enables the guard; clearing this variable does not disable it for those transports.
+Accepted truthy values (case-insensitive, surrounding whitespace ignored): `1`, `true`, `yes`, `on`. Clearing the variable does not change SSE/streamable-HTTP, which set it themselves.
 
 ### Claude Code / Claude Desktop (`mcp.json` / `claude_desktop_config.json`)
 
@@ -95,34 +94,71 @@ $env:KNOWLEDGE_RAG_SINGLE_INSTANCE = "1"
 knowledge-rag
 ```
 
-## What you'll see
-
-A second process starting against the same data directory exits immediately with code `75` (`EX_TEMPFAIL` from `sysexits.h`) and writes to stderr:
+With the variable set, a second process writes to stderr and exits with code 75:
 
 ```
-[ERROR] knowledge-rag MCP server is already running (pid 12345). Refusing to start a second instance because KNOWLEDGE_RAG_SINGLE_INSTANCE is enabled.
+[ERROR] knowledge-rag MCP server is already running (pid 12345). Refusing to start a second instance because KNOWLEDGE_RAG_SINGLE_INSTANCE is enabled (HTTP transports enable it). Close the other knowledge-rag sessions on this data directory, stdio clients included, and retry.
 ```
 
-## How it works
+## HTTP health probes
 
-- On startup, the server opens the stable `<data_dir>/knowledge-rag.lock.guard` sidecar and acquires a nonblocking OS lock: `fcntl.flock` on Linux/macOS, or a one-byte `msvcrt.locking` range on Windows. The descriptor stays open for the entire server lifetime. Another owner is rejected before it can change PID metadata.
-- While holding the OS lock, the server creates `<data_dir>/knowledge-rag.lock` with `O_CREAT | O_EXCL` and writes its PID. An existing live PID is respected for compatibility with already-running older servers. A dead or malformed PID file is recovered while the OS lock serializes competing startups.
-- Normal exit removes this process's PID file and closes the guarded descriptor. **The `.guard` sidecar is never removed.** Its presence alone does not mean a server is running. Keeping the same file prevents an unlink/recreate race from producing two independent kernel locks.
-- `SIGINT` / `SIGTERM` delegate to the prior Python handler or default exit behavior. Ignored signals, returning handlers, and exceptions caught by the server keep the lock until the server leaves its context. Windows never sends a termination signal merely to check or clean up a PID.
-- `SIGKILL`, abrupt termination, or a hard crash releases the OS lock automatically. The next process recovers stale PID metadata before starting. PID checks use a read-only process handle on Windows; an inaccessible or inconclusive process is conservatively treated as alive.
+An HTTP server listens as soon as it starts, while the index is still being checked, so liveness and readiness are separate URLs on the MCP port:
 
-The lock is per-data-directory. Two RAGs configured with different `data_dir` values do not collide. Stop older server versions before upgrading: an older executable does not participate in the new OS-lock protocol. Every process using a shared data directory must cooperate with the guard; it does not coordinate remote copies synchronized by a cloud-drive service.
+| URL | Use it for | Answers |
+| --- | --- | --- |
+| `/health`, `/healthz` | Liveness: is the process up | Always `200`, with `status`, `version`, `uptime_seconds`, `index` (`ready`, `repairing` or `error`) and query-cache statistics, the latter only from a ready index |
+| `/readyz` | Readiness: can it serve tools | `200 {"status":"ready"}`; `503 {"status":"repairing"}` with `Retry-After: 5` while the index is checked, opened or repaired; `503 {"status":"error"}` after a startup failure, without `Retry-After` |
+
+None of them needs a bearer token, and none returns paths, exception messages, tokens or PIDs. A liveness probe that restarted the server on `repairing` would cut a long repair short, which is why `/health` stays `200`.
+
+**Migration.** Before this version, the HTTP server started listening only after the index was open, so a `200` from `/health` also meant ready. If you used the status code of `/health` as a readiness check, switch it to `/readyz` and keep `/health` or `/healthz` for liveness:
+
+```yaml
+livenessProbe:
+  httpGet: { path: /healthz, port: 8179 }
+readinessProbe:
+  httpGet: { path: /readyz, port: 8179 }
+```
+
+## How the lock works
+
+- The owner's PID stays on line 1 of `<data_dir>/knowledge-rag.lock`, for diagnostics and for older versions, which read only that line; line 2 is `guarded`. The OS lock decides who owns the directory, never the PID.
+- While holding the OS lock, a new owner replaces a PID file marked `guarded`: its writer held the same lock and no longer does, even if its PID now belongs to a live process (a reused number, or the same number after a container restart). A PID file without the mark comes from an older version that takes no OS lock; if its PID is alive, the new process respects it and follows (or exits 75 with the variable set). A dead or malformed PID is replaced.
+- Normal exit removes this process's PID file; the OS releases both locks when the process ends, however it ends. **The `.guard` and `.access` sidecars are never removed.** Their presence alone does not mean a server is running, and replacing a file that is still locked would create a second, independent lock on Unix.
+- `SIGINT` / `SIGTERM` delegate to the prior Python handler or default exit behavior. Windows never sends a termination signal merely to check a PID; PID checks use a read-only process handle, and an inaccessible or inconclusive process counts as alive.
+
+The lock is per data directory: two RAGs configured with different `data_dir` values do not collide. It does not coordinate copies synchronized by a cloud-drive service, and startup refuses a `data_dir` under one (exit code 78) unless `paths.allow_cloud_sync: true` is set.
+
+## Upgrading from an older version
+
+Stop **every** `knowledge-rag` process using the data directory before upgrading from v5.1.0. Its default stdio launcher takes no writer guard, and even with `KNOWLEDGE_RAG_SINGLE_INSTANCE=1` it does not take the new index-access lock. Closing just one client is not enough when another old process still has the index open.
+
+An older version killed abruptly with the variable set can leave a PID file without the `guarded` mark. If that PID now belongs to an unrelated live process, new sessions keep following it. After checking that no knowledge-rag process runs, delete `<data_dir>/knowledge-rag.lock`, never the `.guard` or `.access` sidecar.
+
+## Administrative commands (manual operations)
+
+For operations that open or replace index files, such as an offline FTS5 rebuild, backup, or moving `data_dir`:
+
+1. **Close** your MCP client (Claude Desktop / Code / Cursor). This kills the child process holding the `data_dir`.
+2. Run the documented maintenance command or synchronous Python operation. There is no general `knowledge-rag reindex` CLI subcommand; see [reindex operations](reindex-operations.md).
+3. Wait for the command to finish.
+4. **Reopen** your MCP client. It respawns the server, watcher picks up any new files.
+
+The server entry point acquires the lock. A maintenance script that already holds `single_instance_lock()` can call `run_preflight()` on the same thread **before it opens the index**; the check leaves the enclosing lock in place. It cannot run against an index the process is already serving or take ownership away from another process. Scripts that open Chroma directly still need coordination. `knowledge-rag init` exports configuration templates and presets rather than rebuilding the index.
 
 ## Troubleshooting
 
-**"It says already running but I just killed the process"**
-The OS releases ownership when the process exits, and the next startup checks the remaining PID. Verify the PID and all processes using the directory if rejection continues; permissions or PID reuse can make liveness inconclusive. Do not delete `.guard` to force startup: on Unix, replacing a file that is still locked creates a second independent lock. Remove stale PID metadata only after confirming that all owners have exited.
+**"Every tool answers that another knowledge-rag process owns this data directory"**
+Another session owns the index, and `owner_pid` names it. Close that session, and this one takes over on its next call; or run one shared HTTP server for all clients (below).
 
-**"I want this off again"**
-For stdio, remove the environment variable or set it to `0` / `false`. HTTP transports continue to enable the guard automatically.
+**"Tools keep answering `repairing`"**
+The owner is checking, opening or repairing the index; an embedding-model migration or a rebuild after a repair can take minutes on a large corpus. See `<data_dir>/preflight.log` and the server's stderr.
+
+**"It says already running but I just killed the process"**
+The OS releases ownership when the process exits. If refusals continue, check `owner_pid` and the processes using the directory; a PID file from an older version can name a reused PID (see [Upgrading](#upgrading-from-an-older-version)). Do not delete `.guard` or `.access` to force startup.
 
 **"Stale lock left after Windows shutdown"**
-A hard shutdown can leave PID metadata behind; the next startup recovers it after acquiring the OS lock. The `.guard` sidecar is intentionally permanent and requires no cleanup.
+A hard shutdown can leave the PID file behind; the next owner replaces it once it holds the OS lock. The sidecars are intentionally permanent and need no cleanup.
 
 ## Sharing one server across clients
 
@@ -133,4 +169,4 @@ Loopback addresses are reachable only on the machine making the connection. A cl
 ## Credits
 
 - Original guard concept and reproduction: [Sergey Khokhlov (@Hohlas)](https://github.com/Hohlas) in [PR #31](https://github.com/lyonzin/knowledge-rag/pull/31).
-- Reworked as opt-in (default off), signal handlers wired, expanded test coverage: knowledge-rag maintainers.
+- Reworked as opt-in with signal handlers and expanded tests, then made the default single owner per data directory with followers, take-over and the access lock: knowledge-rag maintainers.

@@ -2,11 +2,10 @@
 
 import os
 import threading
-from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from mcp_server import instance_lock, logging_config, preflight, server
+from mcp_server import _writer_role, logging_config, preflight, server
 from mcp_server.fts5_index import Fts5LexicalIndex
 from mcp_server.ingestion import DocumentParser
 
@@ -50,9 +49,11 @@ def main():
     orchestrator.collection.count.return_value = 0
     orchestrator.start_reindex_background.side_effect = _start_background
     server.get_orchestrator = lambda: orchestrator
+    server._open_orchestrator = lambda: orchestrator
     server.config.transport = "stdio"
-    instance_lock.single_instance_lock = nullcontext
-    preflight.run_preflight = lambda: False
+    _writer_role.claim_writes = lambda: True  # the owner, without a lock file
+    preflight._check_cloud_sync = lambda: None
+    preflight._probe_and_repair = lambda: False
     logging_config.setup_logging = lambda **kwargs: None
     server.main()
 
