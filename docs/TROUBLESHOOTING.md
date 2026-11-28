@@ -62,6 +62,20 @@ knowledge-rag
 knowledge-rag-guarded
 ```
 
+### Interrupted index repair (`.auto-repair-pending`)
+
+Exit **65** means the repair needs inspection. After a successful move or complete rollback, preflight retries a busy marker removal after 1, 2 and 4 seconds, without moving the files again for that reason. If removal still fails, or the catalog rollback itself failed, the marker blocks the next preflight before it opens Chroma or prunes backups. Its contents name the **intended** backup for inspection; never execute them or treat them as proof of a move.
+
+Stop **all** servers and clients using this store. Make a separate copy of the active index, catalog, marker, `preflight.log` and `<data_dir>/backups/` outside the backup rotation. Inspect the backup for **this attempt** (same timestamp and reason); do not guess from the newest folder.
+
+| What you verify on disk | What to do |
+|---|---|
+| **Pair active:** `<data_dir>/index_metadata.json` and the configured `chroma_dir/chroma.sqlite3` are present; the attempt's backup contains neither moved member (the empty folder may be absent). | Verify both against the separate copy. Leave the active catalog and the entire index directory in place. |
+| **Pair in backup:** `index_metadata.<reason>.json` and `chroma_db.<reason>/chroma.sqlite3` are together in the indicated backup. The live catalog is absent and the active index is absent or an empty directory. | Verify the catalog and the entire backed-up index against the separate copy. Keep them together in the backup; **do not restore just the catalog**. Restarting one server after archiving the marker lets it rebuild. |
+| **Split pair:** `preflight.log` says `Catalog rollback failed`, the original index is active, the live catalog is absent, and the log identifies the matching backed-up catalog. | **Copy**, do not move, that catalog to `<data_dir>/index_metadata.json`. Verify that both catalogs have the same SHA-256 and keep the backup. Never overwrite an existing live catalog. |
+
+For a complete pair, compare SHA-256 of the catalog and the index files at matching relative paths in the separate copy. Only after verifying the appropriate state above, release any handle on the marker and **move only `<data_dir>/.auto-repair-pending`** into the separate copy under a new name. Restart one server. If either member is ambiguous, the catalog is unexpectedly absent or the marker still cannot be moved, keep everything in place; do not bypass the stop.
+
 ### Index is empty
 
 ```bash

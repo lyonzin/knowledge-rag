@@ -21,7 +21,7 @@ from pathlib import Path
 
 from . import _index_access, _preflight_probe, _writer_role, instance_lock
 from ._preflight_probe import _classify, _index_id, _Outcome, _Target
-from ._preflight_repair import _log, move_index_aside
+from ._preflight_repair import _check_pending_repair, _log, move_index_aside
 from .config import _get, config
 
 PROBE_ATTEMPTS = 3
@@ -147,9 +147,10 @@ def _probe_chroma(target: _Target, timeout_seconds: int = PROBE_TIMEOUT_SECONDS)
 def run_preflight(timeout_seconds: int = PROBE_TIMEOUT_SECONDS) -> bool:
     """Return True only for a confirmed repair. Timeout keeps the index (#216).
 
-    An unverifiable probe raises, not a healthy result. Exit 75 means a busy guard or
-    a blocked move; exit 78 rejects a cloud-sync directory. Borrow an eligible caller's
-    writer guard without releasing it, or hold our own for this call only.
+    An unverifiable probe raises, not a healthy result. Exit 65 means an interrupted repair
+    or a marker that could not be cleared: verify the catalog and index before restarting.
+    Exit 75 means a busy guard or blocked move; exit 78 rejects a cloud-sync directory.
+    Borrow an eligible caller's writer guard without releasing it, or hold our own for this call only.
     """
     _check_cloud_sync()
     target = _capture_target()
@@ -179,6 +180,7 @@ def _probe_and_repair_for_call(target: _Target, timeout_seconds: int) -> bool:
 
 def _probe_until_conclusive(target: _Target, timeout_seconds: int) -> _Outcome | None:
     """Require independent, matching read failures. Neither bootstrap nor stderr is evidence."""
+    _check_pending_repair(target.data_dir)  # the writer guard is held; do not even probe a split pair
     failures: list[_Outcome] = []
     for attempt in range(1, PROBE_ATTEMPTS + 1):
         try:
