@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-### v5.2.0 (2026-11-27) — Verified index recovery, single-owner startup and reliable keyword search
+### v5.2.0 (2026-11-28) — Verified index recovery, single-owner startup and reliable keyword search
 
 **Upgrade note:** Stop **all** `knowledge-rag` processes using the same data directory before upgrading from v5.1.0. Its default stdio launcher does not participate in the new locks. A second stdio client on the new version is a standby, not a simultaneous reader; to serve several clients at once, use one Streamable HTTP server.
 

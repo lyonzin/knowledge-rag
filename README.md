@@ -779,7 +779,7 @@ Any client that can start a stdio MCP server from a command, or connect to a Str
 
 ## Recent releases
 
-- **v5.2.0** (2026-11-27): one process owns each index; startup verifies the repair target before moving data, and keyword-only search no longer reports a false miss while BM25 warms up. Stop all older processes before upgrading. See [the upgrade guide](docs/single-instance.md#upgrading-from-an-older-version).
+- **v5.2.0** (2026-11-28): one process owns each index; startup verifies the repair target before moving data, and keyword-only search no longer reports a false miss while BM25 warms up. Stop all older processes before upgrading. See [the upgrade guide](docs/single-instance.md#upgrading-from-an-older-version).
 - **v5.1.0** (2026-11-14): path-level file watching, background BM25 refresh on large indexes and orphan cleanup.
 - **v5.0.0** (2026-11-05): **breaking** `list_documents` now returns 100 documents per page by default (up to 200 with `limit`); call it again with `offset` until you reach `total`. Also: an empty or missing `documents_dir` no longer clears the index, search snippets start at the match, `add_from_url` stops overwriting other pages, and failing tests now block merges.
 - **v4.11.1** (2026-10-25): fresh installs start again, Windows state writes retry through brief file locks, and the Docker image adds `linux/arm64`.

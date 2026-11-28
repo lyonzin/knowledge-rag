@@ -43,7 +43,7 @@ Anything requiring the attacker to already own the local filesystem is **out of 
 |---|---|
 | Latest published 5.2.x release | Current maintenance line; check release notes for the fixes actually included |
 | Unreleased branches / pull requests | Under review; not a released security guarantee |
-| 5.1.x | The 30-day security patch window following v5.2.0 ends on 2026-12-27 |
+| 5.1.x | Security patches for 30 days after the [v5.2.0 release](https://github.com/lyonzin/knowledge-rag/releases/tag/v5.2.0) is published |
 | 5.0.x | Its existing security patch window ends on 2026-12-14 |
 | 4.11.x | Its existing security patch window ends on 2026-12-05 |
 | Older releases | Unsupported; upgrade to the maintained release |
